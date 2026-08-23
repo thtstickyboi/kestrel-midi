@@ -523,9 +523,9 @@ each voice compares its own ordinal against it.
   use a preset that does not use `lorand` (most packs ship one), or cap
   `--layers`.
 - **SFZ support is otherwise partial.** The common opcodes work, including
-  `#include`, velocity layers, `fil_veltrack`, `amp_veltrack`, `key`,
-  `loopstart`/`loopend`, `pitch_keytrack` and `off_by` where it names its own
-  group. Several of those arrived in 0.2.4 -- see the release notes below,
+  `#include`, `#define`, velocity layers, `fil_veltrack`, `amp_veltrack`,
+  `key`, `loopstart`/`loopend`, `pitch_keytrack` and `off_by` where it names
+  its own group. Several of those arrived in 0.2.4 -- see the release notes below,
   because two of them were loading libraries wrongly rather than merely
   ignoring them. Per-voice LFOs (`amplfo_*`,
   `fillfo_*`, `pitchlfo_*`) are recognised and reported, not applied -- though

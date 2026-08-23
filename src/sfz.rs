@@ -119,9 +119,65 @@ struct Parser {
     root: PathBuf,
     unknown: HashMap<String, u32>,
     depth: u32,
+    /// `#define $NAME value`, longest name first.
+    ///
+    /// One table on the parser rather than one per file, because the scope of
+    /// a define crosses `#include` in both directions: a define before an
+    /// include is visible inside it, and a define made inside an included file
+    /// stays visible after it returns. That is what defines are *for* -- write
+    /// one keymap, include it once per layer with a different variable each
+    /// time -- so per-file scoping would break the common case.
+    defines: Vec<(String, String)>,
 }
 
 impl Parser {
+    /// Record a define, or redefine one.
+    ///
+    /// Redefinition is allowed and takes effect from that point on, which is
+    /// how a library re-includes one keymap per velocity layer.
+    fn define(&mut self, name: String, value: String) {
+        match self.defines.iter_mut().find(|(n, _)| *n == name) {
+            Some(slot) => slot.1 = value,
+            None => {
+                self.defines.push((name, value));
+                // Longest first, so `$KEYS` is matched before `$KEY`. Naive
+                // left-to-right replacement of the shorter name would leave an
+                // `S` welded onto the substituted value.
+                self.defines.sort_by_key(|d| std::cmp::Reverse(d.0.len()));
+            }
+        }
+    }
+
+    /// Textually replace every `$NAME` that has been defined by this point.
+    ///
+    /// An undefined `$NAME` is left in place rather than blanked, so it
+    /// survives into the resolved path and can be reported once at the end.
+    /// Blanking it would produce a path that merely does not exist, which is
+    /// the failure that was impossible to read in the first place.
+    fn substitute(&self, line: &str) -> String {
+        if self.defines.is_empty() || !line.contains('$') {
+            return line.to_string();
+        }
+        let mut out = String::with_capacity(line.len());
+        let mut rest = line;
+        while let Some(i) = rest.find('$') {
+            out.push_str(&rest[..i]);
+            let tail = &rest[i..];
+            match self.defines.iter().find(|(n, _)| tail.starts_with(n.as_str())) {
+                Some((n, v)) => {
+                    out.push_str(v);
+                    rest = &tail[n.len()..];
+                }
+                None => {
+                    out.push('$');
+                    rest = &tail[1..];
+                }
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
     /// `default_path` is passed in rather than held on the parser because it
     /// is positional: a file may carry several `<control>` sections and each
     /// governs the regions that follow it, not the whole file.
@@ -164,6 +220,32 @@ impl Parser {
             if line.is_empty() {
                 continue;
             }
+            // Before substitution, or a redefinition would have its own name
+            // replaced by the value it is about to be given.
+            if let Some(rest) = line.strip_prefix("#define") {
+                // `rest` must start at a word boundary, or this is some other
+                // directive that merely begins the same way.
+                if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                    let rest = rest.trim_start();
+                    // The value runs to end of line and may contain spaces, so
+                    // `find_value_end` is the wrong splitter here.
+                    let name_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+                    let (name, value) = rest.split_at(name_end);
+                    if name.len() > 1 && name.starts_with('$') {
+                        // A define may be written in terms of an earlier one.
+                        let value = self.substitute(value.trim());
+                        self.define(name.to_string(), value);
+                    } else {
+                        *self.unknown.entry("`#define` with no `$name`".into()).or_default() += 1;
+                    }
+                    continue;
+                }
+            }
+            // Includes are substituted too: splitting a library by
+            // variable-named directory is common, and resolving the include
+            // first would defeat the whole mechanism.
+            let expanded = self.substitute(line);
+            let line = expanded.trim();
             if let Some(rest) = line.strip_prefix("#include") {
                 let inc = rest.trim().trim_matches('"').trim();
                 // `default_path` governs `sample`, not `#include`.
@@ -180,10 +262,6 @@ impl Parser {
                 }
                 continue;
             }
-            if line.starts_with("#define") {
-                continue;
-            }
-
             // A line can hold several headers and opcodes.
             let mut rest = line;
             while !rest.is_empty() {
@@ -267,6 +345,7 @@ pub fn load(path: impl AsRef<Path>, cfg: &Config) -> Result<Bank> {
         root: root.clone(),
         unknown: HashMap::new(),
         depth: 0,
+        defines: Vec::new(),
     };
 
     let mut sections: Vec<(String, OpcodeSet)> = Vec::new();
@@ -330,6 +409,12 @@ pub fn load(path: impl AsRef<Path>, cfg: &Config) -> Result<Bank> {
 
     let mut regions: Vec<Region> = Vec::new();
     let mut region_ids: Vec<u32> = Vec::new();
+    // A sample that will not load fails once per *region*, and a library that
+    // names one keymap from forty velocity groups has thousands of them. Warned
+    // inline, the first and only informative line scrolls away. Count them and
+    // report the distinct ones, the way unsupported opcodes already are.
+    let mut sample_errors: HashMap<String, u32> = HashMap::new();
+    let mut unresolved_defines = 0u32;
 
     for (default_path, ops) in &region_sets {
         let Some(sample_rel) = ops.get("sample") else {
@@ -348,7 +433,10 @@ pub fn load(path: impl AsRef<Path>, cfg: &Config) -> Result<Bank> {
         ) {
             Ok(c) => c,
             Err(e) => {
-                log::warn!("{e:#}");
+                *sample_errors.entry(format!("{e:#}")).or_default() += 1;
+                if spath.to_string_lossy().contains('$') {
+                    unresolved_defines += 1;
+                }
                 continue;
             }
         };
@@ -378,6 +466,7 @@ pub fn load(path: impl AsRef<Path>, cfg: &Config) -> Result<Bank> {
     for (op, n) in &parser.unknown {
         log::warn!("sfz: ignored unsupported {op} ({n} times)");
     }
+    report_sample_errors(sample_errors, unresolved_defines);
 
     let preset = Preset {
         bank: 0,
@@ -410,6 +499,35 @@ pub fn load(path: impl AsRef<Path>, cfg: &Config) -> Result<Bank> {
     bank.build_params(cfg);
     bank.finish();
     Ok(bank)
+}
+
+/// How many distinct sample failures to name before summarising the rest.
+const SAMPLE_ERROR_LINES: usize = 8;
+
+/// Say what failed to load, once per distinct reason, with the region count.
+fn report_sample_errors(errors: HashMap<String, u32>, unresolved_defines: u32) {
+    if errors.is_empty() {
+        return;
+    }
+    let dropped: u32 = errors.values().sum();
+    let mut list: Vec<(String, u32)> = errors.into_iter().collect();
+    // Worst first, then by name so two runs of one library agree.
+    list.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    log::warn!(
+        "sfz: {dropped} regions dropped, {} distinct sample failures:",
+        list.len()
+    );
+    for (msg, n) in list.iter().take(SAMPLE_ERROR_LINES) {
+        log::warn!("  {msg} ({n} regions)");
+    }
+    if list.len() > SAMPLE_ERROR_LINES {
+        log::warn!("  and {} more", list.len() - SAMPLE_ERROR_LINES);
+    }
+    if unresolved_defines > 0 {
+        log::warn!(
+            "sfz: {unresolved_defines} of those paths still contain `$`, so a              `#define` was used before it was written or its name is misspelt"
+        );
+    }
 }
 
 const POOL_GUARD: usize = 8;
@@ -695,5 +813,74 @@ mod tests {
     fn single_value_runs_to_end() {
         let s = "60";
         assert_eq!(find_value_end(s), 2);
+    }
+
+    fn parser() -> Parser {
+        Parser {
+            root: PathBuf::new(),
+            unknown: HashMap::new(),
+            depth: 0,
+            defines: Vec::new(),
+        }
+    }
+
+    /// Feed lines through the same `#define` reader `parse_file` uses.
+    fn expand(lines: &[&str]) -> Vec<String> {
+        let mut p = parser();
+        let mut out = Vec::new();
+        for line in lines {
+            if let Some(rest) = line.strip_prefix("#define") {
+                let rest = rest.trim_start();
+                let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+                let (name, value) = rest.split_at(end);
+                let value = p.substitute(value.trim());
+                p.define(name.to_string(), value);
+                continue;
+            }
+            out.push(p.substitute(line));
+        }
+        out
+    }
+
+    #[test]
+    fn define_is_substituted_into_opcode_values() {
+        let out = expand(&["#define $KL 64", "sample=WYV-$KL-64.wav"]);
+        assert_eq!(out, ["sample=WYV-64-64.wav"]);
+    }
+
+    /// `$KEY` and `$KEYS` can both be defined. Replacing the shorter one first
+    /// welds its leftover characters onto the substituted value.
+    #[test]
+    fn longest_name_wins() {
+        let out = expand(&["#define $KEY a", "#define $KEYS b", "sample=$KEYS/$KEY.wav"]);
+        assert_eq!(out, ["sample=b/a.wav"]);
+    }
+
+    /// Redefinition takes effect from that point on, which is how a library
+    /// re-includes one keymap per velocity layer.
+    #[test]
+    fn redefinition_applies_from_that_point() {
+        let out = expand(&["#define $L 1", "a=$L", "#define $L 2", "b=$L"]);
+        assert_eq!(out, ["a=1", "b=2"]);
+    }
+
+    #[test]
+    fn value_runs_to_end_of_line() {
+        let out = expand(&["#define $D My Samples/v1", "sample=$D/s.wav"]);
+        assert_eq!(out, ["sample=My Samples/v1/s.wav"]);
+    }
+
+    #[test]
+    fn a_define_may_use_an_earlier_one() {
+        let out = expand(&["#define $R root", "#define $P $R/v1", "sample=$P/s.wav"]);
+        assert_eq!(out, ["sample=root/v1/s.wav"]);
+    }
+
+    /// Left in place rather than blanked, so it survives into the resolved
+    /// path and the loader can say which variable was never defined.
+    #[test]
+    fn an_undefined_name_survives_for_the_report() {
+        let out = expand(&["#define $A a", "sample=$A-$NOPE.wav"]);
+        assert_eq!(out, ["sample=a-$NOPE.wav"]);
     }
 }
