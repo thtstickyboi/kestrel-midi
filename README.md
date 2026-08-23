@@ -186,6 +186,11 @@ kestrel render input.mid -s soundfont.sfz -o output.wav
 `-s` takes a `.sf2` or a `.sfz`. Output is 32-bit float WAV by default; pass
 `--format pcm16` for 16-bit.
 
+An SFZ library's sample files may be WAV or FLAC. Which one is decided by
+reading the file, not by its extension, because libraries ship FLAC under names
+of their own invention and dispatching on the name silently drops every region
+that uses one.
+
 A more realistic invocation for a large file:
 
 ```bash
@@ -622,5 +627,7 @@ MIT -- see [LICENSE](LICENSE).
 
 `src/limiter.rs` is a port of the realtime limiter OmniConverter ships, which
 came originally from Kiva; the `--limiter omni` mode is named after it. The SF2
-and SFZ loaders were written against the published format specifications.
-Everything else was written for this project.
+and SFZ loaders, and the RIFF/WAVE reader and writer, were written against the
+published format specifications. FLAC samples are decoded by
+[claxon](https://github.com/ruuda/claxon) (Apache-2.0), which is the one format
+here not read by hand. Everything else was written for this project.

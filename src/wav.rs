@@ -1,8 +1,12 @@
-//! Minimal RIFF/WAVE reader and writer.
+//! Minimal RIFF/WAVE reader and writer, plus a FLAC reading path.
 //!
-//! Written by hand rather than pulled in as a dependency because the SFZ loader
-//! needs the `smpl` chunk loop points, the writer needs to stream multi-gigabyte
-//! files without buffering them, and the tests need bit-exact comparison.
+//! The RIFF half is written by hand rather than pulled in as a dependency
+//! because the SFZ loader needs the `smpl` chunk loop points, the writer needs
+//! to stream multi-gigabyte files without buffering them, and the tests need
+//! bit-exact comparison. FLAC is decoded by `claxon`, which is the one place
+//! that judgement did not hold: a correct FLAC decoder is a different order of
+//! work from a chunk walker, and its failure mode is quiet distortion rather
+//! than a loud parse error.
 
 use anyhow::{bail, Context, Result};
 use std::fs::File;
@@ -218,8 +222,89 @@ fn rd_tag(r: &mut impl Read) -> Result<[u8; 4]> {
     Ok(b)
 }
 
+/// Read a sample file, dispatching on its contents rather than on its name.
+///
+/// Sample libraries ship compressed samples under extensions of their own
+/// invention, so dispatching on the extension drops every region in such a
+/// library and renders silence rather than failing.
+/// libsndfile, which is what sfizz and most of the SFZ world load through,
+/// sniffs the magic number; so does this.
 pub fn read(path: impl AsRef<Path>) -> Result<WavData> {
     let path = path.as_ref();
+    let mut magic = [0u8; 4];
+    {
+        let mut f = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+        // A file too short to hold a magic number is not a container of any
+        // kind. Fall through so the RIFF path is the only place that says so.
+        let _ = f.read_exact(&mut magic);
+    }
+    match &magic {
+        b"fLaC" => read_flac(path),
+        b"OggS" => bail!("{}: Ogg-compressed sample, which is not supported", path.display()),
+        _ => read_riff(path),
+    }
+}
+
+/// FLAC, whatever the file is called.
+///
+/// `claxon` hands back planar `i32` blocks at the stream's own bit depth, so
+/// the work here is the transpose to interleaved and the scale to `f32`. Both
+/// are worth a test: getting either wrong produces noise rather than an error.
+fn read_flac(path: &Path) -> Result<WavData> {
+    let mut reader = claxon::FlacReader::open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    let info = reader.streaminfo();
+    if info.channels == 0 || info.bits_per_sample == 0 || info.bits_per_sample > 32 {
+        bail!(
+            "{}: FLAC stream declares {} channels at {} bits",
+            path.display(),
+            info.channels,
+            info.bits_per_sample
+        );
+    }
+    let nch = info.channels as usize;
+    let scale = 1.0 / (1u64 << (info.bits_per_sample - 1)) as f32;
+
+    let mut interleaved: Vec<f32> =
+        Vec::with_capacity(info.samples.unwrap_or(0) as usize * nch);
+    let mut buffer = Vec::with_capacity(info.max_block_size as usize * nch);
+    let mut blocks = reader.blocks();
+    loop {
+        let block = blocks
+            .read_next_or_eof(buffer)
+            .with_context(|| format!("decoding {}", path.display()))?;
+        let Some(block) = block else { break };
+        let dur = block.duration() as usize;
+        let base = interleaved.len();
+        interleaved.resize(base + dur * nch, 0.0);
+        for ch in 0..nch {
+            for (i, &v) in block.channel(ch as u32).iter().enumerate() {
+                interleaved[base + i * nch + ch] = v as f32 * scale;
+            }
+        }
+        buffer = block.into_buffer();
+    }
+
+    // FLAC carries no `smpl` chunk. Loops come from the SFZ opcodes instead,
+    // except for the LOOPSTART/LOOPLENGTH tag pair, which is the only place a
+    // converted library can have put them.
+    let tag = |name: &str| -> Option<u32> { reader.get_tag(name).next()?.trim().parse().ok() };
+    let loop_points = match (tag("LOOPSTART"), tag("LOOPLENGTH")) {
+        (Some(start), Some(len)) => Some((start, start.saturating_add(len))),
+        _ => None,
+    };
+
+    Ok(WavData {
+        sample_rate: info.sample_rate,
+        channels: info.channels.min(u16::MAX as u32) as u16,
+        interleaved,
+        loop_points,
+        root_key: None,
+        fine_tune_cents: 0.0,
+    })
+}
+
+fn read_riff(path: &Path) -> Result<WavData> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let file_len = file.metadata()?.len();
     let mut r = BufReader::with_capacity(1 << 16, file);
@@ -353,4 +438,141 @@ fn decode_samples(data: &[u8], tag: u16, bits: u16) -> Result<Vec<f32>> {
         _ => bail!("unsupported"),
     };
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- a minimal FLAC encoder, for fixtures ----------------------------
+    //
+    // VERBATIM subframes at 16 bits store raw samples and every field lands on
+    // a byte boundary, so no bit packing is needed. That is enough to exercise
+    // the parts of the FLAC path this crate owns: the magic-number dispatch,
+    // the planar-to-interleaved transpose, and the scale to `f32`.
+
+    fn crc8(d: &[u8]) -> u8 {
+        let mut c = 0u8;
+        for &b in d {
+            c ^= b;
+            for _ in 0..8 {
+                c = if c & 0x80 != 0 { (c << 1) ^ 0x07 } else { c << 1 };
+            }
+        }
+        c
+    }
+
+    fn crc16(d: &[u8]) -> u16 {
+        let mut c = 0u16;
+        for &b in d {
+            c ^= (b as u16) << 8;
+            for _ in 0..8 {
+                c = if c & 0x8000 != 0 { (c << 1) ^ 0x8005 } else { c << 1 };
+            }
+        }
+        c
+    }
+
+    /// Block size the fixtures use. Deliberately smaller than any test's data,
+    /// so every fixture is several frames and the decode loop's accumulation
+    /// across blocks is exercised rather than just its first pass.
+    const FIXTURE_BLOCK: usize = 32;
+
+    /// One FLAC stream: STREAMINFO plus VERBATIM frames of `FIXTURE_BLOCK`.
+    fn flac(rate: u32, channels: &[&[i16]]) -> Vec<u8> {
+        let nch = channels.len();
+        let n = channels[0].len();
+        assert!((1..=8).contains(&nch) && (1..=65536).contains(&n));
+        assert!(channels.iter().all(|c| c.len() == n));
+        let last = if n % FIXTURE_BLOCK == 0 { FIXTURE_BLOCK } else { n % FIXTURE_BLOCK };
+
+        let mut out = b"fLaC".to_vec();
+        out.push(0x80); // last metadata block, type 0 (STREAMINFO)
+        out.extend_from_slice(&[0, 0, 34]);
+        out.extend_from_slice(&(last.min(FIXTURE_BLOCK) as u16).to_be_bytes()); // min block
+        out.extend_from_slice(&(FIXTURE_BLOCK as u16).to_be_bytes()); // max block
+        out.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // min/max frame size unknown
+        let packed = ((rate as u64) << 44)
+            | (((nch - 1) as u64) << 41)
+            | ((16u64 - 1) << 36)
+            | n as u64;
+        out.extend_from_slice(&packed.to_be_bytes());
+        out.extend_from_slice(&[0u8; 16]); // md5 unknown
+
+        for (f, start) in (0..n).step_by(FIXTURE_BLOCK).enumerate() {
+            let len = FIXTURE_BLOCK.min(n - start);
+            // Frame header: sync, fixed blocking, 16-bit block size at the end
+            // of the header, sample rate from STREAMINFO, independent
+            // channels, 16-bit samples.
+            let mut frame = vec![0xFF, 0xF8, 0x70, (((nch - 1) as u8) << 4) | 0x08];
+            assert!(f < 128, "the fixture writes single-byte frame numbers");
+            frame.push(f as u8); // UTF-8 coded frame number
+            frame.extend_from_slice(&((len - 1) as u16).to_be_bytes());
+            let crc = crc8(&frame);
+            frame.push(crc);
+
+            for ch in channels {
+                frame.push(0x02); // VERBATIM, no wasted bits
+                for &v in &ch[start..start + len] {
+                    frame.extend_from_slice(&v.to_be_bytes());
+                }
+            }
+            let crc = crc16(&frame);
+            frame.extend_from_slice(&crc.to_be_bytes());
+            out.extend_from_slice(&frame);
+        }
+        out
+    }
+
+    fn fixture(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("kestrel_wav_{name}"));
+        std::fs::write(&p, bytes).unwrap();
+        p
+    }
+
+    /// The reported failure: FLAC samples under a library's own extension.
+    ///
+    /// Dispatching on the name rather than the contents skipped every region
+    /// in such a library, which renders as silence with only a `not a RIFF
+    /// file` warning to say why.
+    #[test]
+    fn flac_is_read_whatever_the_extension_is() {
+        let data: Vec<i16> = (0..64).map(|i| (i * 512 - 16384) as i16).collect();
+        let p = fixture("ext.smp", &flac(44100, &[&data[..]]));
+
+        let w = read(&p).expect("a FLAC file should load under any extension");
+        assert_eq!(w.sample_rate, 44100);
+        assert_eq!(w.channels, 1);
+        assert_eq!(w.frames(), data.len());
+        assert_eq!(w.channel_i16(0), data);
+        std::fs::remove_file(&p).ok();
+    }
+
+    /// The transpose from claxon's planar blocks, which is this crate's own
+    /// arithmetic and would read as noise rather than as an error if wrong.
+    #[test]
+    fn flac_stereo_interleaves_in_channel_order() {
+        let l: Vec<i16> = (0..48).map(|i| (i * 100) as i16).collect();
+        let r: Vec<i16> = (0..48).map(|i| -((i * 100) as i16)).collect();
+        let p = fixture("stereo.flac", &flac(48000, &[&l[..], &r[..]]));
+
+        let w = read(&p).unwrap();
+        assert_eq!(w.channels, 2);
+        assert_eq!(w.frames(), 48);
+        assert_eq!(w.channel_i16(0), l);
+        assert_eq!(w.channel_i16(1), r);
+        // And the scale, which is 2^-15 for 16-bit and not 2^-16.
+        assert!((w.interleaved[2] - 100.0 / 32768.0).abs() < 1e-9);
+        std::fs::remove_file(&p).ok();
+    }
+
+    /// A file that is neither is still reported against RIFF, so there is one
+    /// message for "this is not a sample file" rather than three.
+    #[test]
+    fn unknown_magic_still_reports_as_riff() {
+        let p = fixture("junk.wav", b"NOPE\x00\x00\x00\x00");
+        let e = read(&p).unwrap_err().to_string();
+        assert!(e.contains("not a RIFF file"), "{e}");
+        std::fs::remove_file(&p).ok();
+    }
 }
