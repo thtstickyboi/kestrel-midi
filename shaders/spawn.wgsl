@@ -1,9 +1,4 @@
-// Pass 1 of 4: spawn.
-//
-// Appends this block's note-ons to the end of the voice pool. The destination
-// slot is `spawn_base + i` where i is the command's index in the host's event
-// order, so allocation never depends on which invocation runs first. No
-// atomics, and the pool contents are a pure function of the MIDI file.
+// [1]
 
 struct SpawnCmd {
     phase_lo: u32,
@@ -25,6 +20,7 @@ struct SpawnCmd {
     note_id_hi: u32,
     gain_l: f32,
     gain_r: f32,
+    row_bias: u32,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -68,17 +64,18 @@ fn main(
             voices[F_START_REL * c + dst] = s.start_rel;
             voices[F_NOTE_LO * c + dst] = s.note_id_lo;
             voices[F_NOTE_HI * c + dst] = s.note_id_hi;
-            // Plus one, so that zero can mean "not born in this block" once
-            // the render pass clears it.
-            voices[F_BORN_VARIANT * c + dst] = s.variant + 1u;
+            // [2]
+            voices[F_BORN_VARIANT * c + dst] = (s.variant + 1u) | (s.row_bias << 16u);
             voices[F_STOP_REL * c + dst] = 0u;
+            // [3]
+            voices[F_AGE * c + dst] = 0u;
+            if (USE_MOD_ENV) { voices[F_REL_AGE * c + dst] = NO_RELEASE; }
         }
         i = i + stride;
     }
 }
 
-// Advance the live count once the appends are done. One invocation, so there
-// is nothing to race.
+// [4]
 @compute @workgroup_size(1)
 fn commit() {
     let live = state[S_LIVE];

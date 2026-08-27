@@ -1,0 +1,14 @@
+# Comments extracted from src/lib.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/lib.rs:1
+//! GPU-accelerated SoundFont/SFZ synthesizer for black MIDI.
+//!
+//! The architecture in short: the host parses MIDI and resolves presets, the
+//! device renders voices and reduces them to a stereo block, and every GPU
+//! result is checked against the single-threaded CPU reference in `cpu`.

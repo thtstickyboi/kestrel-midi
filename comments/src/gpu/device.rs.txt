@@ -1,0 +1,34 @@
+# Comments extracted from src/gpu/device.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/gpu/device.rs:17
+/// Pick an adapter and open a device.
+///
+/// Never silently falls back to a software adapter: if the only thing wgpu can
+/// find is a CPU device, that is an error, because a render that quietly takes
+/// a thousand times longer is worse than one that stops.
+
+[2] src/gpu/device.rs:50
+    // Discrete first, then integrated. Within a tier, prefer Vulkan over DX12
+    // over GL: the compute paths are better tested there.
+
+[3] src/gpu/device.rs:98
+    // A device error that arrives asynchronously would otherwise show up as
+    // silently wrong audio.
+
+[4] src/gpu/device.rs:108
+/// Compute-only bind group layout. `read_only[i]` says whether binding i is a
+/// read-only storage buffer; binding 0 is always the uniform block.
+
+[5] src/gpu/device.rs:164
+/// List every adapter wgpu can reach, for working out which device a render
+/// will land on.
+
+[6] src/gpu/device.rs:183
+        // The number people actually want off this listing. `gpu-info` used to
+        // print the binding size and leave the division to the reader.

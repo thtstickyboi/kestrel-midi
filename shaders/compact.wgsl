@@ -1,17 +1,4 @@
-// Pass 4 of 4: compact.
-//
-// Exclusive prefix sum over the liveness mask, then a stream compaction that
-// copies survivors into the back buffer. Order is preserved, so which voices
-// died never changes the order of the ones that lived.
-//
-// Three entry points, run in sequence:
-//   scan_local   one workgroup per WG voices, scans the mask locally
-//   scan_blocks  one workgroup total, scans the per-workgroup totals
-//   scatter      moves survivors, and writes the sort key when sorting is on
-//
-// When voice sorting is on, `scatter` is not used at all: the counting half
-// still runs to produce the live count, and `sort.wgsl` does the compaction
-// and the reordering together in a single copy of the pool.
+// [1]
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var<storage, read_write> voices: array<u32>;
@@ -34,12 +21,7 @@ fn scan_local(
     @builtin(num_workgroups) nwg: vec3<u32>,
 ) {
     let live = state[S_LIVE];
-    // One block per WG voices, but the grid is allowed to be smaller than the
-    // block count: a dispatch dimension is capped at 65,535 on D3D12 and the
-    // pool may hold more than that many blocks. A workgroup walks the blocks
-    // it owns. `block` is derived only from workgroup-uniform values, so the
-    // barriers below stay in uniform control flow, and a block's result never
-    // depends on which workgroup drew it, so the output is grid-independent.
+    // [2]
     let blocks = (live + WG - 1u) / WG;
     var block = wgid.x;
     loop {
@@ -69,8 +51,7 @@ fn scan_local(
         if (tid == WG - 1u) {
             block_sums[block] = sh_scan[tid];
         }
-        // Nothing after the scan reads another lane's slot, but the next
-        // round overwrites all of them, so hold the whole workgroup here.
+        // [3]
         workgroupBarrier();
         block = block + nwg.x;
     }
@@ -130,13 +111,11 @@ fn scatter(
                 for (var f = 0u; f < VOICE_FIELDS; f = f + 1u) {
                     voices_out[f * c + dst] = voices[f * c + i];
                 }
-                // Start offsets and the born-under variant only apply to
-                // the block a voice was born in.
+                // [4]
                 voices_out[F_START_REL * c + dst] = 0u;
                 voices_out[F_BORN_VARIANT * c + dst] = 0u;
                 voices_out[F_STOP_REL * c + dst] = 0u;
-                // Sort key: region first so neighbouring invocations read the
-                // same sample data, envelope stage second to cut divergence.
+                // [5]
                 sort_keys[dst] = (min(voices[F_REGION * c + i], 0x1FFFFFFFu) << 3u)
                     | min(voices[F_ENV_STAGE * c + i], 7u);
             }
@@ -145,9 +124,7 @@ fn scatter(
     }
 }
 
-// Marks the k oldest voices dead, where the threshold came out of the radix
-// select in select.wgsl. Note ids are unique, so "note_id <= threshold" names
-// exactly k voices.
+// [6]
 @compute @workgroup_size({{WG}})
 fn mark_stolen(
     @builtin(global_invocation_id) gid: vec3<u32>,
@@ -166,11 +143,7 @@ fn mark_stolen(
         if (u.steal_by_level != 0u) { lvl = voices[F_ENV_LEVEL * c + i]; }
         let k = steal_key(voices[F_NOTE_HI * c + i], lo, lvl);
         if (!less64(t_hi, t_lo, k.x, k.y)) { // key <= threshold
-            // Not killed here. Cutting every victim at frame zero is what put
-            // a step at the block boundary; instead each one stops at a frame
-            // of its own and fades out there. Victims are a contiguous range
-            // of note ids, so the low word spreads them evenly across the
-            // block, and it needs no ordering or coordination to compute.
+            // [7]
             let span = u.block_frames - STEAL_FADE;
             voices[F_STOP_REL * c + i] = (lo % span) + 1u;
         }
@@ -178,8 +151,7 @@ fn mark_stolen(
     }
 }
 
-// Publish the compacted count. Separate dispatch so the scatter above is done
-// reading the old count before it changes.
+// [8]
 @compute @workgroup_size(1)
 fn commit() {
     state[S_LIVE] = state[S_LIVE_NEW];

@@ -1,23 +1,11 @@
-//! wgpu compute backend.
-//!
-//! One command buffer per audio block, holding up to five groups of passes:
-//! steal, spawn, render, reduce, compact. The live voice count lives in a
-//! device-side state buffer rather than in a uniform, which is what lets the
-//! whole block be recorded without the host rewriting a uniform between
-//! dispatches.
-//!
-//! Nothing here uses a floating-point atomic. The mixdown is a fixed-order
-//! tree reduction, voice slots are assigned from an index rather than an
-//! atomic counter, and the only atomics in the codebase are the integer
-//! histogram bins in the voice-stealing selection. That is what makes two
-//! renders of the same file byte-identical.
+//! wgpu compute backend. \[1\]
 
 mod device;
 
 pub use device::print_adapters;
 
 use crate::backend::{Backend, BlockStats};
-use crate::bank::{Bank, RegionParams};
+use crate::bank::{Bank, ModEnvParams, RegionParams};
 use crate::config::{AdmitRule, Config, EnvelopeCurve, StealRule};
 use crate::voice::{spawn_pick, SpawnCmd, BEND_CHANNELS, CHAN_FIELDS, GATE_SLOTS};
 use anyhow::{bail, Context, Result};
@@ -49,20 +37,19 @@ struct Uniforms {
     sort_phase_mask: u32,
 
     sort_dead_region: u32,
-    /// Bit 0 bend, bit 1 gain, bit 2 params variant. One word rather than
-    /// three so the struct stays four-aligned without padding.
+    /// Bit 0 bend, bit 1 gain, bit 2 params variant. One word rather than \[2\]
     chan_active: u32,
     params_per_variant: u32,
     steal_by_level: u32,
+
+    /// Half-width of the modulation envelope's pitch-factor table, in \[3\]
+    menv_factor_half: u32,
+    /// Where the shared `log2` mantissa table starts in the same buffer.
+    menv_log2_base: u32,
+    _pad: [u32; 2],
 }
 
-/// How the voice pool's sort key is packed into 32 bits.
-///
-/// Region in the high bits so a warp shares a sample, envelope stage next so
-/// the branchy part of the render loop stops diverging, and a coarsened phase
-/// in the low bits so the lanes that share a sample also share cache lines.
-/// The phase field is the part that actually moves the needle: see the header
-/// comment in `shaders/sort.wgsl`.
+/// How the voice pool's sort key is packed into 32 bits. \[4\]
 #[derive(Debug, Clone, Copy)]
 struct SortKeyLayout {
     bits: u32,
@@ -79,9 +66,7 @@ impl SortKeyLayout {
         let region_bits = 32 - dead_region.leading_zeros();
         let stage_bits = 3u32;
 
-        // Enough phase resolution that a warp's worth of voices in the same
-        // sample land in a handful of cache lines, but no finer than the
-        // longest sample needs, and never more bits than the key has left.
+        // [5]
         let max_len = bank.samples.iter().map(|s| s.len).max().unwrap_or(1).max(1);
         let len_bits = 32 - max_len.leading_zeros();
         let phase_bits = 32u32
@@ -105,34 +90,30 @@ impl SortKeyLayout {
     }
 }
 
-/// Slots in the device state buffer. Mirrors the `S_*` constants in
-/// `shaders/common.wgsl`.
+/// Slots in the device state buffer. Mirrors the `S_*` constants in \[6\]
 const S_LIVE: usize = 0;
 const S_STOLEN: usize = 8;
 const S_DROPPED: usize = 9;
 const STATE_SLOTS: usize = 16;
 
-/// Largest grid one dispatch dimension may take. This is the D3D12 ceiling and
-/// the wgpu downlevel default, so every adapter reports at least this much. It
-/// bounds the *grid*, not the pool: every per-voice entry point grid-strides,
-/// so a pool with more blocks than this is walked by a grid of this size rather
-/// than rejected.
+/// Largest grid one dispatch dimension may take. This is the D3D12 ceiling and \[7\]
 const MAX_WORKGROUPS_PER_DIM: u32 = 65535;
 
-/// u32 words the voice pool stores per slot. Mirrors `VOICE_FIELDS` in
-/// `shaders/common.wgsl`; the two have to agree or the SoA stride is wrong.
-const VOICE_FIELDS: u64 = 24;
+/// u32 words the voice pool stores per slot. Mirrors `VOICE_FIELDS` in \[8\]
+const VOICE_FIELDS: u64 = 26;
 
-/// The largest `max_voices` an adapter can take, given how much of one buffer
-/// it will bind to a shader.
-///
-/// The voice pool is a single storage buffer of `pool_slots * VOICE_FIELDS`
-/// words, and `pool_slots` is `max_voices` plus its `--steal-percent` fade
-/// headroom, so the ceiling on the flag is the binding limit divided by both.
-///
-/// Shared by the startup check and by `gpu-info`. Two copies of this arithmetic
-/// drifting apart is exactly how the error message once came to recommend a
-/// value that then failed as well.
+/// Words actually allocated per slot for this configuration. \[9\]
+fn voice_fields(cfg: &Config) -> u64 {
+    if cfg.mod_env_enabled {
+        VOICE_FIELDS
+    } else if cfg.lfo_enabled {
+        VOICE_FIELDS - 1
+    } else {
+        VOICE_FIELDS - 2
+    }
+}
+
+/// The largest `max_voices` an adapter can take, given how much of one buffer \[10\]
 pub fn max_voices_for_binding(binding_bytes: u64, steal_percent: u32) -> u32 {
     let slots = binding_bytes / (VOICE_FIELDS * 4);
     let v = slots * 100 / (100 + steal_percent.clamp(1, 100) as u64);
@@ -145,6 +126,15 @@ fn substitute(src: &str, cfg: &Config) -> String {
         .replace("{{GATE_TILE}}", &cfg.gate_frames.to_string())
         .replace("{{STEAL_FADE}}", &cfg.steal_fade_frames.to_string())
         .replace("{{KAHAN}}", if cfg.kahan_reduce { "true" } else { "false" })
+        .replace("{{GAIN_RAMP}}", if cfg.gain_ramp { "true" } else { "false" })
+        .replace("{{FILTER_RAMP}}", if cfg.filter_ramp { "true" } else { "false" })
+        .replace("{{USE_LFO}}", if cfg.lfo_enabled { "true" } else { "false" })
+        .replace(
+            "{{USE_MOD_ENV}}",
+            if cfg.mod_env_enabled { "true" } else { "false" },
+        )
+        .replace("{{SAMPLE_RATE}}", &cfg.sample_rate.to_string())
+        .replace("{{VOICE_FIELDS}}", &voice_fields(cfg).to_string())
 }
 
 fn shader_source(body: &str, cfg: &Config) -> String {
@@ -158,8 +148,7 @@ struct Pipelines {
     spawn: wgpu::ComputePipeline,
     spawn_commit: wgpu::ComputePipeline,
     render: wgpu::ComputePipeline,
-    /// The same pass compiled with the channel controller path in it. Selected
-    /// per block, so a file that sends no controllers never pays for them.
+    /// The same pass compiled with the channel controller path in it. Selected \[11\]
     render_chan: wgpu::ComputePipeline,
     reduce: wgpu::ComputePipeline,
     scan_local: wgpu::ComputePipeline,
@@ -196,8 +185,7 @@ struct Groups {
     render: wgpu::BindGroup,
     compact: wgpu::BindGroup,
     select: wgpu::BindGroup,
-    /// Indexed by which of the two (key, index) buffers currently holds the
-    /// live pairs.
+    /// Indexed by which of the two (key, index) buffers currently holds the \[12\]
     sort: [wgpu::BindGroup; 2],
 }
 
@@ -219,6 +207,7 @@ pub struct GpuSynth {
     bend_active: bool,
     gain_active: bool,
     variant_active: bool,
+    cut_active: bool,
     voices: [wgpu::Buffer; 2],
     partials_buf: wgpu::Buffer,
     out_buf: wgpu::Buffer,
@@ -231,25 +220,29 @@ pub struct GpuSynth {
     sort_key: SortKeyLayout,
     cmds_buf: wgpu::Buffer,
     cmds_capacity: u32,
+    /// Note-off frames the gates buffer can hold behind its meta header.
+    off_frames_capacity: u32,
     pool_buf: wgpu::Buffer,
     params_buf: wgpu::Buffer,
     params_per_variant: u32,
+    menv_buf: wgpu::Buffer,
+    // [13]
+    menv_factor_buf: wgpu::Buffer,
+    menv_per_variant: u32,
+    menv_factor_half: u32,
+    menv_log2_base: u32,
 
     readback_out: wgpu::Buffer,
     readback_state: wgpu::Buffer,
 
     /// Which of `voices` currently holds the live pool.
     parity: usize,
-    /// Host mirror of the device live count, exact because every change to it
-    /// is either host-decided or read back at the end of the block. May exceed
-    /// `max_voices` between the spawn and the end-of-block compaction, while
-    /// stolen voices are still fading out alongside their replacements.
+    /// Host mirror of the device live count, exact because every change to it \[14\]
     live: u32,
     /// Allocated voice slots, `Config::pool_slots()`. The SoA stride.
     slots: u32,
     pending_spawns: Vec<SpawnCmd>,
-    /// Reused buffer for the thinned spawn list, so a saturated block does not
-    /// allocate a few megabytes every time.
+    /// Reused buffer for the thinned spawn list, so a saturated block does not \[15\]
     spawn_scratch: Vec<SpawnCmd>,
     stolen: u64,
     dropped: u64,
@@ -277,8 +270,7 @@ impl GpuSynth {
         cfg.validate()?;
         let (device, queue, adapter_name, limits, has_timestamps) = device::create(cfg)?;
 
-        // Workgroup storage: sh holds WG * (TILE * 2) floats, one per voice per
-        // channel lane, plus sh2's WG floats for the second reduction level.
+        // [16]
         let need_shared = cfg.workgroup_size * (cfg.reduce_tile * 2 + 1) * 4;
         if need_shared > limits.max_compute_workgroup_storage_size {
             bail!(
@@ -289,24 +281,11 @@ impl GpuSynth {
                 limits.max_compute_workgroup_storage_size
             );
         }
-        // Sizes `block_sums`: one entry per WG-sized block of the pool, counted
-        // from the allocated slots rather than from `max_voices`, because the
-        // pool runs over the voice ceiling between the spawn and the end-of-
-        // block compaction while stolen voices fade out alongside their
-        // replacements, and the scan has to cover all of them. This is not the
-        // dispatch grid -- the scans grid-stride, so it may exceed
-        // `MAX_WORKGROUPS_PER_DIM` and every block still needs its entry.
+        // [17]
         let scan_workgroups = cfg.pool_slots().div_ceil(cfg.workgroup_size);
 
-        // What bounds the pool is not the dispatch grid but how much of one
-        // buffer the adapter will bind to a shader at once. The voice pool is a
-        // single storage buffer of `pool_slots * VOICE_FIELDS` words and is the
-        // largest allocation here by an order of magnitude, so it reaches the
-        // ceiling first. That ceiling lands on the allocated slots, so the
-        // largest usable `max_voices` is the one whose steal headroom still fits
-        // under it -- naming the slot ceiling itself would send the caller
-        // straight back into this same error one flag later.
-        let voice_pool_bytes = cfg.pool_slots() as u64 * VOICE_FIELDS * 4;
+        // [18]
+        let voice_pool_bytes = cfg.pool_slots() as u64 * voice_fields(cfg) * 4;
         let binding_cap =
             (limits.max_storage_buffer_binding_size as u64).min(limits.max_buffer_size);
         if voice_pool_bytes > binding_cap {
@@ -335,9 +314,7 @@ impl GpuSynth {
             );
         }
 
-        // Slots, not the voice ceiling: a stolen voice keeps sounding until its
-        // own stop frame, so the pool briefly holds the outgoing voices and
-        // their replacements together. This is the SoA stride everywhere.
+        // [19]
         let capacity = cfg.pool_slots();
         let tiles = cfg.block_frames / cfg.gate_frames;
         let nwg = cfg.max_render_workgroups.clamp(1, MAX_WORKGROUPS_PER_DIM);
@@ -358,6 +335,10 @@ impl GpuSynth {
 
         let params: Vec<RegionParams> = if bank.params.is_empty() {
             vec![RegionParams {
+                mod_lfo_inc: 0,
+                vib_lfo_inc: 0,
+                lfo_delays: 0,
+                lfo_pitch: 0,
                 attack_rate: 1.0,
                 attack_end: 1.0,
                 decay_coef: 1.0,
@@ -369,14 +350,11 @@ impl GpuSynth {
                 a1: 0.0,
                 a2: 0.0,
                 flags: 0,
-                _pad: 0,
             }]
         } else {
             bank.params.clone()
         };
-        // Room for every params variant CC71-CC75 may ask for, allocated up
-        // front because the buffer is in a bind group that is built once. Only
-        // variant zero is written now; the rest arrive if a file uses them.
+        // [20]
         let params_per_variant = params.len() as u32;
         let variants = cfg.max_param_variants.max(1);
         let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -386,6 +364,39 @@ impl GpuSynth {
             mapped_at_creation: false,
         });
         queue.write_buffer(&params_buf, 0, bytemuck::cast_slice(&params));
+
+        // [21]
+        let menv: Vec<ModEnvParams> = if bank.menv.is_empty() {
+            vec![ModEnvParams::default()]
+        } else {
+            bank.menv.clone()
+        };
+        let menv_per_variant = menv.len() as u32;
+        let menv_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mod env params"),
+            size: (menv.len() * variants as usize * std::mem::size_of::<ModEnvParams>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&menv_buf, 0, bytemuck::cast_slice(&menv));
+
+        // [22]
+        let mut menv_tables: Vec<u32> = if bank.menv_factors.is_empty() {
+            vec![1 << 24]
+        } else {
+            bank.menv_factors.clone()
+        };
+        let menv_log2_base = menv_tables.len() as u32;
+        if bank.menv_log2.is_empty() {
+            menv_tables.push(0);
+        } else {
+            menv_tables.extend_from_slice(&bank.menv_log2);
+        }
+        let menv_factor_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mod env tables"),
+            contents: bytemuck::cast_slice(&menv_tables),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
 
         // ---- per-block data ----
         let storage = wgpu::BufferUsages::STORAGE;
@@ -398,10 +409,13 @@ impl GpuSynth {
             })
         };
 
-        let voice_bytes = capacity as u64 * VOICE_FIELDS * 4;
+        let voice_bytes = capacity as u64 * voice_fields(cfg) * 4;
         let partial_bytes = cfg.block_frames as u64 * 2 * nwg as u64 * 4;
         let out_bytes = cfg.block_frames as u64 * 2 * 4;
-        let gates_bytes = tiles as u64 * GATE_SLOTS as u64 * 4;
+        // [23]
+        let off_meta_words = (GATE_SLOTS as u64 + 1) * 2;
+        let off_frames_capacity = 65536u32;
+        let gates_bytes = (off_meta_words + off_frames_capacity as u64) * 4;
 
         let uniform_buf = mk(
             "uniforms",
@@ -409,7 +423,8 @@ impl GpuSynth {
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         );
         let gates_buf = mk("gates", gates_bytes, storage | wgpu::BufferUsages::COPY_DST);
-        let chan_bytes = tiles as u64 * BEND_CHANNELS as u64 * CHAN_FIELDS as u64 * 4;
+        // One row past the last tile; see `voice::ChannelTable::row_bias`.
+        let chan_bytes = (tiles as u64 + 1) * BEND_CHANNELS as u64 * CHAN_FIELDS as u64 * 4;
         let chan_buf = mk("channels", chan_bytes, storage | wgpu::BufferUsages::COPY_DST);
         let voices = [
             mk("voices a", voice_bytes, storage | wgpu::BufferUsages::COPY_DST),
@@ -485,7 +500,7 @@ impl GpuSynth {
             render: device::bind_layout(
                 &device,
                 "render",
-                &[false, true, true, true, false, false, true, true],
+                &[false, true, true, true, false, false, true, true, true, true],
             ),
             reduce: device::bind_layout(&device, "reduce", &[false, true, false]),
             compact: device::bind_layout(
@@ -518,6 +533,8 @@ impl GpuSynth {
                         &partials_buf,
                         &state_buf,
                         &chan_buf,
+                        &menv_buf,
+                        &menv_factor_buf,
                     ],
                 ),
                 compact: device::bind(
@@ -587,6 +604,8 @@ impl GpuSynth {
                         &partials_buf,
                         &state_buf,
                         &chan_buf,
+                        &menv_buf,
+                        &menv_factor_buf,
                     ],
                 ),
                 compact: device::bind(
@@ -690,6 +709,7 @@ impl GpuSynth {
             bend_active: false,
             gain_active: false,
             variant_active: false,
+            cut_active: false,
             voices,
             partials_buf,
             out_buf,
@@ -702,10 +722,16 @@ impl GpuSynth {
             sort_key,
             cmds_buf,
             cmds_capacity,
+            off_frames_capacity,
             slots: capacity,
             pool_buf,
             params_buf,
             params_per_variant,
+            menv_buf,
+            menv_factor_buf,
+            menv_per_variant,
+            menv_factor_half: bank.menv_factor_half,
+            menv_log2_base,
             readback_out,
             readback_state,
             parity: 0,
@@ -734,12 +760,7 @@ impl GpuSynth {
                 source: wgpu::ShaderSource::Wgsl(shader_source(src, cfg).into()),
             };
             let module = if cfg.unchecked_shaders {
-                // Drops naga's per-access clamps and its loop-bounding
-                // counters. Every index in these shaders is derived from a
-                // count the host wrote, so the clamps never fire in practice,
-                // but if one ever would, the result here is a wild read
-                // instead of a clamped one. Opt-in only, and never the
-                // default: see Config::unchecked_shaders.
+                // [24]
                 unsafe {
                     device.create_shader_module_trusted(
                         desc,
@@ -854,21 +875,7 @@ impl GpuSynth {
         })
     }
 
-    /// Workgroups the render pass will be dispatched with this block, given
-    /// the voice count it has to cover.
-    ///
-    /// This is not `max_render_workgroups`: every dispatched workgroup clears
-    /// its own slice of the partial buffer whether or not it has voices, so a
-    /// grid sized for a million voices costs a sparse block the full clear.
-    /// At 2048 workgroups that slice is 64 MiB and measured 2.8 ms on a block
-    /// holding 170 voices. The render pass loops internally past the grid, so
-    /// a smaller count stays correct; it only trades parallelism the block
-    /// cannot use.
-    ///
-    /// Compute this once per block and pass the same value to both the
-    /// uniform and the dispatch. It doubles as the stride of the partial
-    /// buffer, so a grid wider than the stride makes the high workgroups
-    /// clear and accumulate into slots belonging to other output samples.
+    /// Workgroups the render pass will be dispatched with this block, given \[25\]
     fn render_workgroups(&self, voices: u32) -> u32 {
         let cap = self
             .cfg
@@ -881,8 +888,7 @@ impl GpuSynth {
         let u = Uniforms {
             block_frames: self.cfg.block_frames,
             tiles: self.cfg.block_frames / self.cfg.reduce_tile,
-            // `tiles` above is the reduce tile count the render loop walks;
-            // the gate table is indexed separately by GATE_TILE.
+            // [26]
             capacity: self.slots,
             spawn_count,
             render_workgroups: nwg,
@@ -900,11 +906,13 @@ impl GpuSynth {
             sort_dead_region: self.sort_key.dead_region,
             chan_active: (self.bend_active as u32)
                 | ((self.gain_active as u32) << 1)
-                | ((self.variant_active as u32) << 2),
+                | ((self.variant_active as u32) << 2)
+                | ((self.cut_active as u32) << 3),
             params_per_variant: self.params_per_variant,
             steal_by_level: (self.cfg.steal_rule == StealRule::Quietest) as u32,
-
-
+            menv_factor_half: self.menv_factor_half,
+            menv_log2_base: self.menv_log2_base,
+            _pad: [0; 2],
         };
         self.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
@@ -942,9 +950,43 @@ impl GpuSynth {
         log::debug!("grew the spawn command buffer to {new_cap} entries");
     }
 
-    /// Workgroups to dispatch for `items` voices. Every entry point this feeds
-    /// grid-strides, so clamping here shortens the grid rather than dropping
-    /// the tail: a pool of any size is walked by whatever grid comes out.
+    /// Grow the gates buffer so it can carry `needed` note-off frames. \[27\]
+    fn grow_gates(&mut self, needed: u32) {
+        if needed <= self.off_frames_capacity {
+            return;
+        }
+        let new_cap = needed.next_power_of_two();
+        let meta_words = (GATE_SLOTS as u64 + 1) * 2;
+        self.gates_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("gates"),
+            size: (meta_words + new_cap as u64) * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.off_frames_capacity = new_cap;
+        // The render bind groups reference the old buffer, so rebuild them.
+        for p in 0..2 {
+            self.groups[p].render = device::bind(
+                &self.device,
+                &self.layouts.render,
+                &[
+                    &self.uniform_buf,
+                    &self.pool_buf,
+                    &self.params_buf,
+                    &self.gates_buf,
+                    &self.voices[p],
+                    &self.partials_buf,
+                    &self.state_buf,
+                    &self.chan_buf,
+                    &self.menv_buf,
+                    &self.menv_factor_buf,
+                ],
+            );
+        }
+        log::debug!("grew the gates buffer to {new_cap} note-off frames");
+    }
+
+    /// Workgroups to dispatch for `items` voices. Every entry point this feeds \[28\]
     fn dispatch_count(&self, items: u32) -> u32 {
         let ceiling = self.cfg.max_pool_workgroups.clamp(1, MAX_WORKGROUPS_PER_DIM);
         items.div_ceil(self.cfg.workgroup_size).clamp(1, ceiling)
@@ -969,7 +1011,12 @@ impl GpuSynth {
 }
 
 impl Backend for GpuSynth {
-    fn set_params_variant(&mut self, index: u32, data: &[RegionParams]) -> Result<()> {
+    fn set_params_variant(
+        &mut self,
+        index: u32,
+        data: &[RegionParams],
+        menv: &[ModEnvParams],
+    ) -> Result<()> {
         let per = self.params_per_variant as usize;
         if data.len() != per {
             bail!(
@@ -983,26 +1030,45 @@ impl Backend for GpuSynth {
         let off = (index as usize * per * std::mem::size_of::<RegionParams>()) as u64;
         self.queue
             .write_buffer(&self.params_buf, off, bytemuck::cast_slice(data));
+
+        // [29]
+        let mper = self.menv_per_variant as usize;
+        if menv.len() != mper {
+            bail!(
+                "mod env variant {index} has {} entries, expected {mper}",
+                menv.len()
+            );
+        }
+        let moff = (index as usize * mper * std::mem::size_of::<ModEnvParams>()) as u64;
+        self.queue
+            .write_buffer(&self.menv_buf, moff, bytemuck::cast_slice(menv));
         Ok(())
     }
 
-    fn set_channels(&mut self, rows: &[u32], bend: bool, gain: bool, variant: bool) -> Result<()> {
-        // Uploaded even when both flags are false: they only gate the
-        // arithmetic, and a block that returns to unity partway through still
-        // needs the earlier tiles' real values on the device.
+    fn set_channels(&mut self, rows: &[u32], bend: bool, gain: bool, variant: bool, cut: bool) -> Result<()> {
+        // [30]
         self.queue
             .write_buffer(&self.chan_buf, 0, bytemuck::cast_slice(rows));
         self.bend_active = bend;
         self.gain_active = gain;
         self.variant_active = variant;
+        self.cut_active = cut;
         Ok(())
     }
 
-    fn set_gates(&mut self, rows: &[u32]) -> Result<()> {
+    fn set_gates(&mut self, meta: &[u32], frames: &[u32]) -> Result<()> {
+        self.grow_gates(frames.len() as u32);
         self.queue
-            .write_buffer(&self.gates_buf, 0, bytemuck::cast_slice(rows));
+            .write_buffer(&self.gates_buf, 0, bytemuck::cast_slice(meta));
+        if !frames.is_empty() {
+            let off = meta.len() as u64 * 4;
+            self.queue
+                .write_buffer(&self.gates_buf, off, bytemuck::cast_slice(frames));
+        }
         Ok(())
     }
+
+
 
     fn spawn(&mut self, cmds: &[SpawnCmd]) -> Result<()> {
         // Held until render, so the whole block goes in one command buffer.
@@ -1014,9 +1080,7 @@ impl Backend for GpuSynth {
     fn render(&mut self, out: &mut [f32]) -> Result<()> {
         let cap = self.cfg.max_voices;
 
-        // More note-ons in one block than the pool can hold is a pathological
-        // but legal input. Keep the first `cap` in event order, on both
-        // backends, so the CPU reference and the device agree.
+        // [31]
         let want = self.pending_spawns.len() as u32;
         let want = want.min(cap);
         if want < self.pending_spawns.len() as u32 {
@@ -1026,8 +1090,7 @@ impl Backend for GpuSynth {
         let mut steal_k = 0u32;
         if self.live + want > cap {
             match self.cfg.steal_rule {
-                // Bounded so a block cannot replace the whole pool. See
-                // `Config::max_steal_percent`.
+                // [32]
                 StealRule::Oldest | StealRule::Quietest => {
                     steal_k = (self.live + want - cap)
                         .min(self.live)
@@ -1047,12 +1110,7 @@ impl Backend for GpuSynth {
                 self.queue
                     .write_buffer(&self.cmds_buf, 0, bytemuck::cast_slice(&self.pending_spawns));
             } else {
-                // Under `AdmitRule::Loudest` the driver has already sorted the
-                // block by rank, so a prefix is the highest-ranked `take`.
-                // Under `Even` it is thinned across the block instead of
-                // truncated, so a saturated block keeps its timing rather than
-                // being heard at its start and silent at its end. See
-                // `spawn_pick`.
+                // [33]
                 self.spawn_scratch.clear();
                 self.spawn_scratch.reserve(take);
                 match self.cfg.admit_rule {
@@ -1070,11 +1128,7 @@ impl Backend for GpuSynth {
                     .write_buffer(&self.cmds_buf, 0, bytemuck::cast_slice(&self.spawn_scratch));
             }
         }
-        // Voices only die inside the render pass, so this is an exact upper
-        // bound on what the pass has to cover: the stolen voices are still in
-        // the pool and still sounding until their stop frame. `self.live`
-        // moves as the passes are recorded, which is why the count is taken
-        // here and then carried rather than recomputed at the dispatch.
+        // [34]
         let nwg = self.render_workgroups(self.live + spawn_count);
         self.write_uniforms(spawn_count, steal_k, nwg);
 
@@ -1101,11 +1155,7 @@ impl Backend for GpuSynth {
             }};
         }
 
-        // ---- 1. steal ----
-        // The pass is always begun, even with nothing to do. Every timestamp
-        // in the range handed to resolve_query_set has to have been written or
-        // the resolve reads an unwritten query, which is undefined and shows
-        // up as a lost device rather than as a validation error.
+        // [35]
         {
             let live_wgs = self.dispatch_count(self.live);
             let mut p = begin!(enc, "steal");
@@ -1128,12 +1178,7 @@ impl Backend for GpuSynth {
                 p.dispatch_workgroups(1, 1, 1);
             }
         }
-        // No compaction here, and so no parity flip and no change to `live`.
-        // `mark_stolen` only schedules each victim's stop frame; the voices go
-        // on sounding until they reach it, fade out there, and are removed by
-        // the end-of-block compaction like any other voice that died. That is
-        // what keeps the steal off the block boundary -- and it drops a whole
-        // pool copy from the middle of the block as a side effect.
+        // [36]
 
         // ---- 2. spawn ----
         {
@@ -1152,18 +1197,13 @@ impl Backend for GpuSynth {
         {
             let mut p = begin!(enc, "render");
             p.set_bind_group(0, &self.groups[self.parity].render, &[]);
-            // The controller path is compiled out of the plain pipeline, so
-            // a block with nothing bent and nothing faded does not carry the
-            // registers for it.
+            // [37]
             p.set_pipeline(if self.bend_active || self.gain_active || self.variant_active {
                 &self.pipelines.render_chan
             } else {
                 &self.pipelines.render
             });
-            // Exactly `u.render_workgroups`, which is what the reduce pass
-            // uses as its stride. Every workgroup in the grid clears its own
-            // partial slice before accumulating, so the reduce never folds in
-            // stale audio; workgroups outside the grid are never read.
+            // [38]
             p.dispatch_workgroups(nwg, 1, 1);
         }
 
@@ -1177,14 +1217,11 @@ impl Backend for GpuSynth {
 
         // ---- 5. compact, and re-sort in the same pass ----
         {
-            // One grid for both halves. `dispatch_count` clamps to the grid
-            // ceiling and every entry point below grid-strides, so a pool with
-            // more blocks than the grid is walked, not truncated.
+            // [39]
             let live_wgs = self.dispatch_count(self.live);
             let mut p = begin!(enc, "compact");
 
-            // The counting half of the compaction runs either way: it is what
-            // produces the live count.
+            // [40]
             p.set_bind_group(0, &self.groups[self.parity].compact, &[]);
             p.set_pipeline(&self.pipelines.scan_local);
             p.dispatch_workgroups(live_wgs, 1, 1);
@@ -1192,10 +1229,7 @@ impl Backend for GpuSynth {
             p.dispatch_workgroups(1, 1, 1);
 
             if self.cfg.sort_voices {
-                // A least-significant-bit-first binary radix sort. Dead voices
-                // carry a region one past the last real one, so they end up
-                // past the live count and the gather never reaches them:
-                // compaction and reordering come out of one copy of the pool.
+                // [41]
                 let mut pair_parity = 0usize;
                 p.set_bind_group(0, &self.groups[self.parity].sort[pair_parity], &[]);
                 p.set_pipeline(&self.pipelines.sort_init);
@@ -1253,9 +1287,7 @@ impl Backend for GpuSynth {
         let state: &[u32] = bytemuck::cast_slice(&state_bytes);
         self.live = state[S_LIVE].min(self.cfg.max_voices);
         self.stolen = state[S_STOLEN] as u64;
-        // The shader's own drop counter should stay at zero: the host never
-        // asks it to spawn more than there is room for. If it ever moves,
-        // something upstream miscounted, so say so rather than hide it.
+        // [42]
         if state[S_DROPPED] != 0 {
             log::error!(
                 "the spawn pass dropped {} voices it should never have been handed",

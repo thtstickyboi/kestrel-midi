@@ -1,8 +1,4 @@
-//! Load-time sample-rate conversion for the sample pool.
-//!
-//! Only ever runs on the host, once, while building the pool. Uses a
-//! polyphase windowed-sinc bank so a multi-gigabyte soundfont converts in
-//! seconds rather than in the hours a naive per-output-sample sinc would take.
+//! Load-time sample-rate conversion for the sample pool. \[1\]
 
 const TAPS: usize = 32;
 const PHASES: usize = 512;
@@ -13,8 +9,7 @@ pub struct SincBank {
 }
 
 impl SincBank {
-    /// `ratio` is output rate over input rate. Below 1.0 the cutoff moves down
-    /// with the ratio so downsampling does not alias.
+    /// `ratio` is output rate over input rate. Below 1.0 the cutoff moves down \[2\]
     pub fn new(ratio: f64) -> Self {
         let cutoff = if ratio < 1.0 { ratio } else { 1.0 } * 0.95;
         let mut table = vec![0.0f32; PHASES * TAPS];
@@ -94,11 +89,7 @@ fn sinc(x: f64) -> f64 {
     }
 }
 
-/// Convenience wrapper that builds a bank and converts one sample.
-///
-/// Callers converting many samples at the same ratio should build the
-/// `SincBank` once; `Bank` loading does this per sample because soundfonts
-/// mix rates, and the table build is a few microseconds.
+/// Convenience wrapper that builds a bank and converts one sample. \[3\]
 pub fn resample_i16(src: &[i16], ratio: f64) -> Vec<i16> {
     if (ratio - 1.0).abs() < 1e-12 {
         return src.to_vec();
@@ -147,9 +138,7 @@ mod tests {
 
     #[test]
     fn upsampling_does_not_clip_headroom() {
-        // A loud but band-limited signal must survive 2x upsampling without
-        // hitting the rails. A full-scale alternating signal at Nyquist would
-        // legitimately overshoot, so it is not the case being tested here.
+        // [4]
         let src: Vec<i16> = (0..2000)
             .map(|i| {
                 let t = i as f64 / 44100.0;
@@ -164,8 +153,7 @@ mod tests {
     fn extreme_input_saturates_instead_of_wrapping() {
         let src: Vec<i16> = (0..500).map(|i| if i % 2 == 0 { 32767 } else { -32768 }).collect();
         let out = resample_i16(&src, 2.0);
-        // The clamp must hold: the accumulator saturates rather than wrapping,
-        // which would show up as a full-scale sign flip.
+        // [5]
         assert!(out.iter().all(|&v| (-32768..=32767).contains(&(v as i32))));
     }
 }

@@ -1,47 +1,64 @@
-// Pass 2 of 4: render.
-//
-// One invocation per voice. Each voice's state stays in registers for the whole
-// block, so the sequential parts of the DSP (phase accumulation, envelope,
-// filter memory) are never round-tripped through memory. Frames are processed
-// in tiles of TILE; at the end of each tile the workgroup reduces its
-// TILE * 2 channel lanes across all WG voices and adds the result into this
-// workgroup's own slice of the partial buffer.
-//
-// Per-frame results go straight into workgroup storage rather than into a
-// per-invocation array. An `array<f32, TILE>` in the function address space
-// looks free but is not: the shader compiler spills it to local memory as soon
-// as the frame loop stops being trivially unrollable, and every write then
-// costs a memory round trip. Measured on an RTX 5060 with a million voices, a
-// private array cost 232 ms per block at TILE=16 and 596 ms at TILE=32, where
-// writing straight to workgroup storage does not grow with TILE that way.
-//
-// No atomics anywhere. Each workgroup owns its partial slice outright, and the
-// in-workgroup reduction is a fixed-order tree, so two runs produce bitwise
-// identical partials. Two renders of the same input must be byte-identical;
-// that requirement is why there is no atomicAdd mixdown here.
+// [1]
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var<storage, read> pool: array<u32>;
 @group(0) @binding(2) var<storage, read> params: array<RegionParams>;
 @group(0) @binding(3) var<storage, read> gates: array<u32>;
 @group(0) @binding(4) var<storage, read_write> voices: array<u32>;
-// Frame-major: the partial for output sample j from workgroup w sits at
-// j * NWG + w, so the reduce pass reads contiguously across workgroups.
+// [2]
 @group(0) @binding(5) var<storage, read_write> partials: array<f32>;
 @group(0) @binding(6) var<storage, read> state: array<u32>;
 @group(0) @binding(7) var<storage, read> chan: array<u32>;
+// [3]
+@group(0) @binding(8) var<storage, read> menv: array<ModEnvParams>;
+// [4]
+@group(0) @binding(9) var<storage, read> menv_factors: array<u32>;
 
-// Lanes reduced per tile: TILE frames times two channels, interleaved so a
-// lane index is already an offset into the interleaved output block.
-// Whether this build of the pass carries the channel controller path at all.
-// Two pipelines are compiled, and the host picks per block. The branch below
-// is uniform across the whole dispatch, but a runtime-uniform branch still
-// costs the registers that hold the unbent step and the unscaled gains for
-// every voice, whether or not the block uses them: measured 1.8 ms per block
-// at a million voices, or 1.5% of the budget, charged to files that never
-// send a controller. A `const` lets the compiler delete them instead.
+// [5]
+
+// [6]
+fn log2_exact(x: f32) -> f32 {
+    let bits = bitcast<u32>(x);
+    let e = i32((bits >> 23u) & 0xFFu) - 127;
+    let man = bits & 0x007FFFFFu;
+    let i = man >> (23u - MOD_ENV_LOG2_BITS);
+    let frac = (man >> (23u - MOD_ENV_LOG2_BITS - MOD_ENV_LOG2_FRAC_BITS))
+        & ((1u << MOD_ENV_LOG2_FRAC_BITS) - 1u);
+    let a = menv_factors[u.menv_log2_base + i];
+    let b = menv_factors[u.menv_log2_base + i + 1u];
+    let v = a + (((b - a) * frac) >> MOD_ENV_LOG2_FRAC_BITS);
+    return f32(e) + f32(v) * (1.0 / 1073741824.0);
+}
+
+// [7]
+fn mod_env_attack_level(x: f32) -> f32 {
+    if (x <= 0.0) { return 0.0; }
+    return clamp(1.0 + quantise_level(log2_exact(x) * MOD_ENV_ATTACK_SCALE), 0.0, 1.0);
+}
+
+fn mod_env_pre_release(p: ModEnvParams, age: u32) -> f32 {
+    if (age < p.delay_frames) { return 0.0; }
+    var a = age - p.delay_frames;
+    if (a < p.attack_frames) {
+        return mod_env_attack_level(f32(a) / f32(p.attack_frames));
+    }
+    a = a - p.attack_frames;
+    if (a < p.hold_frames) { return 1.0; }
+    a = a - p.hold_frames;
+    return max(1.0 - quantise_level(f32(a) * p.decay_rate), p.sustain);
+}
+
+fn mod_env_level(p: ModEnvParams, age: u32, release_age: u32) -> f32 {
+    // [8]
+    let pre = mod_env_pre_release(p, min(age, release_age));
+    if (age <= release_age) { return pre; }
+    return max(pre - quantise_level(f32(age - release_age) * p.release_rate), 0.0);
+}
+
+// [9]
 const CHAN_ENABLED: bool = {{CHAN}};
 
+// [10]
 const M: u32 = TILE * 2u;
 // Threads cooperating on one lane during the first reduction level.
 const PER_LANE: u32 = WG / M;
@@ -62,10 +79,7 @@ fn fetch(base: u32, idx: u32) -> f32 {
     return p.x;
 }
 
-// The frame right after `idx`. Specialised out of `neighbour_index` because
-// this is the hot one: idx is always below `le`, so the wrap can only ever
-// land exactly on the loop start and the integer modulo is unnecessary. The
-// result is identical to the general path the CPU reference uses.
+// [11]
 fn next_index(idx: u32, looping: bool, ls: u32, le: u32, len: u32) -> u32 {
     let n = idx + 1u;
     if (looping) {
@@ -84,13 +98,7 @@ fn interpolate(
         return fetch(base, idx);
     }
     if (u.interp == INTERP_LINEAR) {
-        // Both taps come out of one word whenever the first one is even, which
-        // is exactly half the time and, because the pool is phase-sorted,
-        // usually the same half for every lane in a warp. So address the pair
-        // from a single word index and only issue a second load on the odd
-        // case, rather than calling `fetch` twice and recomputing the address,
-        // the bounds check and the unpack for a word that is often the one
-        // already in hand.
+        // [12]
         let i = base + idx;
         let w = i >> 1u;
         let p0 = word_pair(w);
@@ -98,9 +106,7 @@ fn interpolate(
         let odd = (i & 1u) == 1u;
         let s0 = select(p0.x, p0.y, odd);
         var s1 = select(p0.y, p1.x, odd);
-        // The tap after `idx` is `idx + 1` except where it runs off a loop end
-        // or the end of the sample. That is rare enough to be a fixup instead
-        // of a term in the hot path.
+        // [13]
         let n = next_index(idx, looping, ls, le, len);
         if (n != idx + 1u) { s1 = fetch(base, n); }
         return s0 + (s1 - s0) * frac;
@@ -118,10 +124,7 @@ fn interpolate(
     return ((a * frac + b) * frac + c) * frac + s0;
 }
 
-// Sum sh[] across the workgroup, M lanes at a time, and add the totals into
-// this workgroup's partial slice. Two levels, so the barrier count per tile is
-// three rather than log2(WG). The strided read in level one keeps a warp
-// spread across shared-memory banks instead of piling onto two of them.
+// [14]
 fn reduce_into_partials(tid: u32, wg: u32, nwg: u32, first_sample: u32) {
     let lane = tid / PER_LANE;
     let chunk = tid % PER_LANE;
@@ -153,8 +156,7 @@ fn main(
     let live = state[S_LIVE];
     let samples = u.block_frames * 2u;
 
-    // Clear this workgroup's partial slice. Workgroups with no voices still
-    // have to do this, or the reduce pass folds in the previous block's audio.
+    // [15]
     for (var j = tid; j < samples; j = j + WG) {
         partials[j * nwg + wg] = 0.0;
     }
@@ -180,6 +182,9 @@ fn main(
         var level = 0.0;
         var gain_l = 0.0;
         var gain_r = 0.0;
+        // [16]
+        var d_gain_l = 0.0;
+        var d_gain_r = 0.0;
         var z1 = 0.0;
         var z2 = 0.0;
         var gate_slot = 0u;
@@ -187,16 +192,42 @@ fn main(
         var start_rel = 0u;
         // Frame this voice was stolen at, plus one; zero if it was not.
         var stop_rel = 0u;
+        // [17]
+        var release_frame = NO_RELEASE;
         var p: RegionParams;
         var use_filter = false;
+        // [18]
+        var cb0 = 1.0;
+        var cb1 = 0.0;
+        var ca1 = 0.0;
+        var ca2 = 0.0;
+        var db0 = 0.0;
+        var db1 = 0.0;
+        var da1 = 0.0;
+        var da2 = 0.0;
+        // [19]
+        var filter_mix = 0.0;
+        var d_filter_mix = 0.0;
         var params_base = 0u;
         var variant = 0u;
-        // Non-zero only for a voice born in this block, and then it is the
-        // variant current at its own note-on plus one.
+        // [20]
         var born_variant = 0u;
+        // [21]
+        var born_bias = 0u;
 
         var base_step_hi = 0u;
         var base_step_lo = 0u;
+        // [22]
+        var bent_hi = 0u;
+        var bent_lo = 0u;
+        var age0 = 0u;
+        // [23]
+        var mp: ModEnvParams;
+        var use_menv = false;
+        var menv_filter = false;
+        var rel_age = NO_RELEASE;
+        // Tremolo, as a linear gain. One for a voice with no volume LFO.
+        var lfo_gain = 1.0;
         var base_gain_l = 0.0;
         var base_gain_r = 0.0;
 
@@ -204,14 +235,14 @@ fn main(
             let c = u.capacity;
             phase_lo = voices[F_PHASE_LO * c + v];
             phase_hi = voices[F_PHASE_HI * c + v];
-            // The pool holds the note's unbent step. When any channel is bent
-            // the effective step is this scaled by the channel's factor,
-            // refreshed once per gate tile below; when nothing is bent the two
-            // are the same value and the multiply never happens.
+            // [24]
             base_step_lo = voices[F_STEP_LO * c + v];
             base_step_hi = voices[F_STEP_HI * c + v];
             step_lo = base_step_lo;
             step_hi = base_step_hi;
+            bent_lo = base_step_lo;
+            bent_hi = base_step_hi;
+            age0 = voices[F_AGE * c + v];
             smp_base = voices[F_SMP_BASE * c + v];
             smp_len = voices[F_SMP_LEN * c + v];
             loop_start = voices[F_LOOP_START * c + v];
@@ -231,68 +262,231 @@ fn main(
             stop_rel = voices[F_STOP_REL * c + v];
             params_base = voices[F_PARAMS * c + v];
             born_variant = voices[F_BORN_VARIANT * c + v];
+            born_bias = born_variant >> 16u;
+            born_variant = born_variant & 0xFFFFu;
+            // [25]
+            if (stage < ENV_RELEASE) {
+                let obase = gates[gate_slot * 2u];
+                if (ordinal <= obase) {
+                    // Released before this block began.
+                    release_frame = 0u;
+                } else {
+                    let olo = gates[gate_slot * 2u + 1u];
+                    let ohi = gates[(gate_slot + 1u) * 2u + 1u];
+                    let j = ordinal - obase;
+                    if (j <= ohi - olo) {
+                        release_frame = gates[OFF_META_WORDS + olo + j - 1u];
+                    }
+                }
+            }
             if (born_variant != 0u) { variant = born_variant - 1u; }
             p = params[params_base + variant * u.params_per_variant];
             use_filter = (p.flags & RP_FILTER) != 0u;
+            cb0 = p.b0;
+            cb1 = p.b1;
+            ca1 = p.a1;
+            ca2 = p.a2;
+            filter_mix = select(0.0, 1.0, use_filter);
+            if (USE_MOD_ENV) {
+                rel_age = voices[F_REL_AGE * c + v];
+                use_menv = (p.flags & RP_MOD_ENV) != 0u;
+                if (use_menv) {
+                    mp = menv[params_base + variant * u.params_per_variant];
+                    menv_filter = mp.to_filter != 0.0;
+                    // [26]
+                    if (release_frame != NO_RELEASE) {
+                        rel_age = age0 + release_frame;
+                    }
+                }
+            }
         }
 
         let loop_enabled = (vflags & VF_LOOP) != 0u;
         let loop_until_release = (vflags & VF_LOOP_UNTIL_RELEASE) != 0u;
-        // Voices already carry their gate slot for the note-off lookup, and
-        // the channel is the top of it, so bend needs no extra pool field.
+        // [27]
         let channel = gate_slot >> 7u;
-        // The gate tile this voice starts in. Only meaningful while
-        // `born_variant` says the voice was born in this block; after that
-        // `start_rel` has been cleared and every tile is one it was alive for.
+        // [28]
         let born_gate = start_rel / GATE_TILE;
 
         for (var tile = 0u; tile < u.tiles; tile = tile + 1u) {
-            // Note-off gate, sampled once per GATE_TILE frames. The table row
-            // is 8 KiB so it stays in L1, but at a million voices even a
-            // cached read per voice per reduce tile costs several milliseconds
-            // a block, hence the coarser cadence.
+            // [29]
             if (is_live && (tile % TILES_PER_GATE) == 0u) {
                 let gt = tile / TILES_PER_GATE;
-                if (stage < ENV_RELEASE
-                    && gates[gt * GATE_SLOTS + gate_slot] >= ordinal) {
-                    stage = ENV_RELEASE;
-                    level = min(level, 1.0);
-                }
-                // Releasing voices bend and fade too, so this is not folded
-                // into the gate check above. One channel's entry is four
-                // adjacent words, so both reads come off the same cache line.
+                // [30]
                 if (CHAN_ENABLED && u.chan_active != 0u) {
                     let ci = (gt * BEND_CHANNELS + channel) * CHAN_FIELDS;
+                    // [31]
+                    let bias = select(
+                        0u, born_bias, born_variant != 0u && gt <= born_gate
+                    );
+                    let gi = ((gt + bias) * BEND_CHANNELS + channel) * CHAN_FIELDS;
                     if ((u.chan_active & CHAN_ACTIVE_BEND) != 0u) {
                         let st = scale64(
-                            base_step_hi, base_step_lo, chan[ci + CHAN_BEND]
+                            base_step_hi, base_step_lo, chan[gi + CHAN_BEND]
                         );
+                        bent_hi = st.x;
+                        bent_lo = st.y;
                         step_hi = st.x;
                         step_lo = st.y;
                     }
                     if ((u.chan_active & CHAN_ACTIVE_GAIN) != 0u) {
-                        gain_l = base_gain_l * bitcast<f32>(chan[ci + CHAN_GAIN_L]);
-                        gain_r = base_gain_r * bitcast<f32>(chan[ci + CHAN_GAIN_R]);
+                        let tgt_l = base_gain_l * bitcast<f32>(chan[gi + CHAN_GAIN_L]);
+                        let tgt_r = base_gain_r * bitcast<f32>(chan[gi + CHAN_GAIN_R]);
+                        // [32]
+                        if (GAIN_RAMP && gt > born_gate) {
+                            // [33]
+                            d_gain_l = (tgt_l - gain_l) * INV_GATE_TILE;
+                            d_gain_r = (tgt_r - gain_r) * INV_GATE_TILE;
+                        } else {
+                            gain_l = tgt_l;
+                            gain_r = tgt_r;
+                            d_gain_l = 0.0;
+                            d_gain_r = 0.0;
+                        }
                     }
-                    // CC71-CC75 change things that live in RegionParams, so
-                    // the voice re-reads its constants from a different copy
-                    // of the table. Only when the copy actually changes: an
-                    // unconditional reload would be a scattered load per voice
-                    // per gate tile, and these controllers move a few hundred
-                    // times in a whole file.
+                    // [34]
+                    if ((u.chan_active & CHAN_ACTIVE_CUT) != 0u) {
+                        let cut = chan[ci + CHAN_CUT];
+                        if (cut != 0u && stop_rel == 0u) {
+                            // [35]
+                            let cap = u.capacity;
+                            let id_lo = voices[F_NOTE_LO * cap + v];
+                            let id_hi = voices[F_NOTE_HI * cap + v];
+                            if (less64(id_hi, id_lo,
+                                       chan[ci + CHAN_CUT_ID_HI],
+                                       chan[ci + CHAN_CUT_ID_LO])) {
+                                stop_rel = cut;
+                            }
+                        }
+                    }
+                    // [36]
+                    db0 = 0.0;
+                    db1 = 0.0;
+                    da1 = 0.0;
+                    da2 = 0.0;
+                    d_filter_mix = 0.0;
                     let want = select(0u, chan[ci + CHAN_VARIANT],
                                       (u.chan_active & CHAN_ACTIVE_VARIANT) != 0u);
-                    // A row holds the state at the start of its tile, which is
-                    // older than a voice born inside that tile: the voice
-                    // already carries the variant that was current at its own
-                    // frame. So rows govern it only from the tile after the one
-                    // it was born in.
+                    // [37]
                     let born_here = born_variant != 0u && gt <= born_gate;
                     if (want != variant && !born_here) {
                         variant = want;
+                        let was_filtering = use_filter;
                         p = params[params_base + variant * u.params_per_variant];
                         use_filter = (p.flags & RP_FILTER) != 0u;
+                        // [38]
+                        if (USE_MOD_ENV) {
+                            use_menv = (p.flags & RP_MOD_ENV) != 0u;
+                            if (use_menv) {
+                                mp = menv[params_base
+                                          + variant * u.params_per_variant];
+                            }
+                            menv_filter = use_menv && mp.to_filter != 0.0;
+                        }
+                        // [39]
+                        if (FILTER_RAMP && gt > born_gate
+                            && use_filter && was_filtering) {
+                            db0 = (p.b0 - cb0) * INV_GATE_TILE;
+                            db1 = (p.b1 - cb1) * INV_GATE_TILE;
+                            da1 = (p.a1 - ca1) * INV_GATE_TILE;
+                            da2 = (p.a2 - ca2) * INV_GATE_TILE;
+                        } else if (FILTER_RAMP && gt > born_gate
+                                   && use_filter != was_filtering) {
+                            if (use_filter) {
+                                // [40]
+                                z1 = 0.0;
+                                z2 = 0.0;
+                                cb0 = p.b0;
+                                cb1 = p.b1;
+                                ca1 = p.a1;
+                                ca2 = p.a2;
+                                filter_mix = 0.0;
+                                d_filter_mix = INV_GATE_TILE;
+                            } else {
+                                // [41]
+                                filter_mix = 1.0;
+                                d_filter_mix = -INV_GATE_TILE;
+                            }
+                            db0 = 0.0;
+                            db1 = 0.0;
+                            da1 = 0.0;
+                            da2 = 0.0;
+                        } else {
+                            cb0 = p.b0;
+                            cb1 = p.b1;
+                            ca1 = p.a1;
+                            ca2 = p.a2;
+                            db0 = 0.0;
+                            db1 = 0.0;
+                            da1 = 0.0;
+                            da2 = 0.0;
+                            filter_mix = select(0.0, 1.0, use_filter);
+                        }
                     }
+                }
+            }
+
+            // [42]
+            if ((USE_LFO || USE_MOD_ENV) && is_live) {
+                // [43]
+                let age = age0 + tile * TILE;
+                var cents = 0.0;
+                if (USE_LFO) {
+                    let vp = rp_vib_pitch(p);
+                    let mlp = rp_mod_pitch(p);
+                    let mv = rp_mod_volume(p);
+                    if (vp != 0.0 && age >= rp_vib_delay(p)) {
+                        cents = cents + vp
+                            * lfo_tri((age - rp_vib_delay(p)) * p.vib_lfo_inc);
+                    }
+                    var mod_lfo = 0.0;
+                    if ((mlp != 0.0 || mv != 0.0) && age >= rp_mod_delay(p)) {
+                        mod_lfo = lfo_tri((age - rp_mod_delay(p)) * p.mod_lfo_inc);
+                        cents = cents + mlp * mod_lfo;
+                    }
+                    // [44]
+                    if (mv != 0.0) {
+                        lfo_gain = exp2(-(mod_lfo * mv) * (1.0 / 60.205999));
+                    } else {
+                        lfo_gain = 1.0;
+                    }
+                }
+                var menv_factor = 0u;
+                if (USE_MOD_ENV && use_menv) {
+                    let l = mod_env_level(mp, age, rel_age);
+                    // [45]
+                    if (mp.to_pitch != 0.0) {
+                        let i = mod_env_pitch_index(mp.to_pitch * l, u.menv_factor_half);
+                        menv_factor = menv_factors[i];
+                    }
+                    if (menv_filter) {
+                        // [46]
+                        let fc = cents_to_hz(mp.fc_cents + mp.to_filter * l);
+                        let co = biquad_lowpass_pre(fc, mp.q_gain, mp.q_inv_2q, SAMPLE_RATE_F);
+                        cb0 = co.x;
+                        cb1 = co.y;
+                        ca1 = co.z;
+                        ca2 = co.w;
+                        db0 = 0.0;
+                        db1 = 0.0;
+                        da1 = 0.0;
+                        da2 = 0.0;
+                    }
+                }
+                if (cents != 0.0) {
+                    // 8.24, the same fixed-point factor bend uses.
+                    let factor = u32(exp2(cents * (1.0 / 1200.0)) * 16777216.0);
+                    let st = scale64(bent_hi, bent_lo, factor);
+                    step_hi = st.x;
+                    step_lo = st.y;
+                } else {
+                    step_hi = bent_hi;
+                    step_lo = bent_lo;
+                }
+                if (menv_factor != 0u) {
+                    let st = scale64(step_hi, step_lo, menv_factor);
+                    step_hi = st.x;
+                    step_lo = st.y;
                 }
             }
 
@@ -302,14 +496,20 @@ fn main(
                 let f = f0 + i;
 
                 if (is_live && stage != ENV_DEAD && f >= start_rel) {
+                    // [47]
+                    if (stage < ENV_RELEASE && f >= release_frame) {
+                        stage = ENV_RELEASE;
+                        level = min(level, 1.0);
+                        release_frame = NO_RELEASE;
+                    }
+
                     let looping = loop_enabled
                         && !(loop_until_release && stage >= ENV_RELEASE);
 
                     if (!looping && phase_hi >= smp_len) {
                         stage = ENV_DEAD;
                     } else {
-                        // Envelope first, so an instant attack is at full
-                        // level on the voice's very first frame.
+                        // [48]
                         if (stage == ENV_ATTACK) {
                             level = level + p.attack_rate;
                             if (level >= p.attack_end) {
@@ -352,17 +552,22 @@ fn main(
 
                         // Transposed direct form II. b2 == b0.
                         y = x;
-                        if (use_filter) {
-                            y = p.b0 * x + z1;
-                            z1 = p.b1 * x - p.a1 * y + z2;
-                            z2 = p.b0 * x - p.a2 * y;
+                        // [49]
+                        if (FILTER_RAMP && d_filter_mix != 0.0) {
+                            // [50]
+                            let fy = cb0 * x + z1;
+                            z1 = cb1 * x - ca1 * fy + z2;
+                            z2 = cb0 * x - ca2 * fy;
+                            y = x + (fy - x) * filter_mix;
+                            // [51]
+                            filter_mix = filter_mix + d_filter_mix;
+                        } else if (use_filter) {
+                            y = cb0 * x + z1;
+                            z1 = cb1 * x - ca1 * y + z2;
+                            z2 = cb0 * x - ca2 * y;
                         }
 
-                        // A stolen voice fades to silence over STEAL_FADE
-                        // frames from its own stop frame, rather than every
-                        // victim being cut together at the top of the block.
-                        // After the filter, so the biquad keeps seeing the
-                        // untapered signal and does not ring on the taper.
+                        // [52]
                         if (stop_rel != 0u && f + 1u >= stop_rel) {
                             let d = f + 1u - stop_rel;
                             if (d >= STEAL_FADE) {
@@ -377,9 +582,7 @@ fn main(
                         phase_hi = np.x;
                         phase_lo = np.y;
                         if (looping && phase_hi >= loop_end) {
-                            // One subtraction covers any step shorter than the
-                            // loop; the modulo is only there for extreme
-                            // pitches, and gives the same answer either way.
+                            // [53]
                             let span = max(loop_end - loop_start, 1u);
                             phase_hi = phase_hi - span;
                             if (phase_hi >= loop_end) {
@@ -389,15 +592,19 @@ fn main(
                     }
                 }
 
+                if (USE_LFO) { y = y * lfo_gain; }
                 sh[(i * 2u) * WG + tid] = y * gain_l;
                 sh[(i * 2u + 1u) * WG + tid] = y * gain_r;
+                // [54]
+                gain_l = gain_l + d_gain_l;
+                gain_r = gain_r + d_gain_r;
+                cb0 = cb0 + db0;
+                cb1 = cb1 + db1;
+                ca1 = ca1 + da1;
+                ca2 = ca2 + da2;
             }
 
-            // Two barriers per tile, not three. The barrier inside the reduce
-            // already separates level one's reads of `sh` from the next tile's
-            // writes to it, and the barrier at the top of the next tile
-            // separates level two's reads of `sh2` from the next level one's
-            // writes. A third barrier here would guard nothing.
+            // [55]
             workgroupBarrier();
             reduce_into_partials(tid, wg, nwg, f0 * 2u);
         }
@@ -414,6 +621,10 @@ fn main(
             voices[F_START_REL * c + v] = 0u;
             voices[F_BORN_VARIANT * c + v] = 0u;
             voices[F_STOP_REL * c + v] = 0u;
+            if (USE_LFO || USE_MOD_ENV) {
+                voices[F_AGE * c + v] = age0 + u.block_frames;
+            }
+            if (USE_MOD_ENV) { voices[F_REL_AGE * c + v] = rel_age; }
         }
 
         batch = batch + nwg;

@@ -6,3 +6,11 @@
 *.sfz text eol=lf
 *.mid binary
 *.wav binary
+
+# The extracted comment text is browsable in the repository but is not part of
+# a distribution: it is regenerated per release, the numbers are meaningless
+# against any other version, and it doubles the size of a source download for
+# something nobody building from source needs. `export-ignore` is what GitHub's
+# generated "Source code" release assets honour; Cargo.toml's `exclude` covers
+# `cargo package`.
+/comments export-ignore

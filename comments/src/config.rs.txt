@@ -1,0 +1,368 @@
+# Comments extracted from src/config.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/config.rs:1
+//! All tunables live here. Nothing in this crate reads a magic constant that is
+//! not derived from a `Config`.
+
+[2] src/config.rs:7
+/// Sample interpolation quality used by both the CPU reference and the GPU path.
+///
+/// The GPU shader branches on this via a pipeline-overridable constant, so both
+/// backends must agree exactly for the null test to pass.
+
+[3] src/config.rs:46
+    /// Level falls by a constant number of dB per frame (multiplicative).
+    /// This is what the SoundFont spec asks for.
+
+[4] src/config.rs:49
+    /// Level falls by a constant amount per frame (additive). Matches the
+    /// "linear envelope" option XSynth exposes.
+
+[5] src/config.rs:64
+/// What happens when a note-on arrives and the voice pool is full.
+///
+/// Fixed once, on purpose. The rule must never depend on scheduling order,
+/// because that would make output non-reproducible.
+
+[6] src/config.rs:71
+    /// Kill the voices with the smallest note id, i.e. the ones that started
+    /// earliest. Note ids are assigned by the host in event order, so this is
+    /// a total order with no ties and is fully reproducible.
+
+[7] src/config.rs:77
+    /// Kill the voices with the lowest envelope level, which are the ones
+    /// contributing least to the mix. Ties are broken by note id, so the
+    /// victim set is still a total order with no ties and fully reproducible.
+    ///
+    /// `Oldest` is the wrong rule under saturation: the oldest voices are the
+    /// mature, sounding ones and the survivors are whichever were struck most
+    /// recently and are therefore still silent.
+
+[8] src/config.rs:87
+/// Which of a saturated block's note-ons get admitted when they outnumber the
+/// free pool slots.
+///
+/// Distinct from `StealRule`, which decides who *dies*. On a heavily
+/// oversubscribed file dropping dominates stealing by an order of magnitude,
+/// so this is the rule that decides most of what is heard.
+
+[9] src/config.rs:96
+    /// Rank by `voice::admit_key`: opening amplitude on a logarithmic scale,
+    /// with a scrambled candidate index as a tiebreak. Spends the budget on
+    /// the notes that are audible rather than on whichever ones happened to
+    /// arrive.
+    ///
+    /// No term in the key may be a function of position in the block; one
+    /// used to be, and it was the largest source of block-rate pumping in the
+    /// renderer. See `voice::admit_key`.
+
+[10] src/config.rs:105
+    /// Thin the block evenly by event position, ignoring what each note is.
+    /// The behaviour before ranking existed; kept for comparing against it.
+
+[11] src/config.rs:111
+    /// How many of `queued` note-ons a block can admit, given `live` voices
+    /// already in the pool.
+    ///
+    /// Mirrors the arithmetic both backends do in their own `spawn`. The
+    /// driver needs the same number to know where to partition the ranked
+    /// block: partition short and the backend admits notes that were never
+    /// ranked, partition long and the work is wasted. Kept here so the three
+    /// call sites cannot drift apart.
+
+[12] src/config.rs:165
+    // ---- stream ----------------------------------------------------------
+    /// Output sample rate in Hz.
+
+[13] src/config.rs:168
+    /// Output channel count. Only 2 is implemented; kept here so the constant
+    /// never gets hardcoded at a call site.
+
+[14] src/config.rs:172
+    // ---- block scheduling ------------------------------------------------
+    /// Frames rendered per dispatch. At 48 kHz, 4096 frames is about 85 ms,
+    /// which makes per-block dispatch overhead irrelevant.
+
+[15] src/config.rs:176
+    /// Frames handled per workgroup reduction step inside the render shader.
+    /// `block_frames` must be a multiple of this.
+
+[16] src/config.rs:179
+    /// Frames between note-off gate checks, and so the granularity of a
+    /// note-off. Must be a multiple of `reduce_tile`. Every voice reads one
+    /// gate entry per gate tile, which measured 6.8 ms per block at a million
+    /// voices when it was tied to the reduce tile; at 32 frames the check
+    /// costs a quarter of that and a note still releases within 0.7 ms.
+
+[17] src/config.rs:187
+    /// Upper bound on workgroups dispatched by the render pass. Voices beyond
+    /// `max_render_workgroups * workgroup_size` are handled by looping inside
+    /// the shader. This directly sizes the partial-sum buffer.
+
+[18] src/config.rs:191
+    /// Upper bound on the grid taken by every *per-voice* pass: spawn, steal
+    /// selection, compaction, and the radix sort. All of them grid-stride over
+    /// the pool, so this decides how many workgroups walk it and never what
+    /// they compute -- which is what lets the pool hold more WG-sized blocks
+    /// than one dispatch dimension can address. `u32::MAX` means "whatever the
+    /// backend's dispatch ceiling is", and the backend clamps to that either
+    /// way. Only the tests set it, to force the striding path on a pool small
+    /// enough to fit on a test machine.
+
+[19] src/config.rs:201
+    // ---- voice pool ------------------------------------------------------
+    /// Hard ceiling on concurrent voices.
+
+[20] src/config.rs:204
+    /// Voices per (channel, key) note-on. SoundFont layers spawn one voice
+    /// each; this caps runaway presets.
+
+[21] src/config.rs:210
+    /// Ceiling on how much of the pool one block may steal, in percent.
+    ///
+    /// Without this, a block whose note-ons outnumber the pool steals *every*
+    /// voice and refills every slot, so each block opens with the whole pool at
+    /// `env_level = 0`. That is a periodic amplitude notch at the block rate,
+    /// and the limiter turns it into audible pumping. It also means no voice
+    /// ever lives longer than one block, so a saturated section
+    /// renders as a stream of 85 ms attack fragments rather than notes.
+    ///
+    /// Bounding the churn trades note count for note length: fewer note-ons
+    /// survive, but the ones that do get to ring. A voice's minimum lifetime is
+    /// roughly `100 / steal_percent` blocks. 100 restores the old behaviour.
+    ///
+    /// 25 is the default. Almost all of the benefit is in bounding the churn at
+    /// all rather than in the exact figure, and going tighter costs render
+    /// time -- a pool drawn from a wider span of the file holds more distinct
+    /// sample regions and therefore sorts worse. The development notes have
+    /// both curves.
+
+[22] src/config.rs:229
+    /// Frames a stolen voice fades over instead of being cut.
+    ///
+    /// A steal used to take effect at frame zero for every victim at once,
+    /// which put a step at the block boundary however small the batch was.
+    /// Victims now stop at a frame derived from their own note id, spread
+    /// across the block, and fade linearly to silence over this many frames.
+    /// Fixed-length rather than a forced envelope release, because the pool
+    /// has to be back under `max_voices` by the end of the block and a
+    /// release rate read from the region could take arbitrarily long.
+
+[23] src/config.rs:239
+    /// Re-sort the voice pool by (region, envelope stage, phase) during
+    /// compaction. This is the single biggest performance lever in the whole
+    /// renderer and it is nearly free, because compaction already has to copy
+    /// the pool. Off only for measuring what it buys.
+
+[24] src/config.rs:249
+    /// Envelope level below which a releasing voice is considered dead.
+    /// -100 dB by default.
+
+[25] src/config.rs:252
+    /// Enable the per-voice low-pass filter. SoundFonts that leave the cutoff
+    /// at its default (13500 cents) bypass it anyway.
+
+[26] src/config.rs:257
+    /// Where CC7 sits on a channel that never sends one. General MIDI says a
+    /// channel powers on at 100, which is about 4 dB down; this defaults to
+    /// 127 instead, so a file that never mentions channel volume renders at
+    /// the level it always did and pays nothing for the feature. Set it to
+    /// 100 to match a GM synth exactly.
+
+[27] src/config.rs:263
+    /// How many copies of the params table the sound controllers CC71-CC75 may
+    /// build. Each is a full rebuild of the table, so this trades host and
+    /// device memory for how finely a file can sweep those controllers; past
+    /// the cap a channel reuses the nearest copy it already has.
+
+[28] src/config.rs:270
+    /// Which limiter runs. `Brickwall` is the default: a lookahead true-peak
+    /// limiter that never exceeds the ceiling, so `clamp_block` never has to
+    /// hard-clip, and that only pulls the gain down around the peak that needs
+    /// it instead of for a third of a second afterwards. `Omni` is the port of
+    /// the one OmniConverter ships, kept for level-matching against BASS and
+    /// XSynth but deprecated for rendering.
+
+[29] src/config.rs:281
+    /// Brickwall release in milliseconds. Short keeps the material after a
+    /// transient at full level; too short modulates the gain at audio rate on
+    /// sustained loud material, which is its own distortion.
+
+[30] src/config.rs:285
+    /// Time constant of the brickwall's sustained stage, in milliseconds.
+    ///
+    /// A single release time has to choose between pumping, if it is long, and
+    /// modulating the gain at audio rate on sustained loud material, if it is
+    /// short. This second, slower stage takes the sustained part of the
+    /// reduction so the fast one only ever handles transients.
+    ///
+    /// Off by default, because it measured *worse* on the material this synth
+    /// exists for. Program-dependent release trades on a distinction between
+    /// transient and sustained passages, and a saturated black MIDI mix has
+    /// none: it is sustained throughout, so the slow stage stays engaged and
+    /// becomes a second slow-release compressor, putting back the breathing
+    /// the brickwall was there to remove -- measured worse on every count, see
+    /// the development notes and the README. Kept because material with real transients
+    /// is a different question.
+
+[31] src/config.rs:301
+    /// Detect inter-sample peaks by 4x oversampling rather than looking at the
+    /// samples alone. Costs a little; catches overshoot that a sample-peak
+    /// limiter lets through.
+
+[32] src/config.rs:309
+    // ---- sample pool -----------------------------------------------------
+    /// Resample every sample to a single rate at load time. When false, the
+    /// per-sample rate ratio is folded into
+    /// the phase step instead, which is lossless but leaves the pool mixed-rate.
+
+[33] src/config.rs:314
+    /// Soft ceiling on sample-pool bytes on the device. When the pool does not
+    /// fit, its rate is halved until it does rather than failing outright.
+
+[34] src/config.rs:318
+    // ---- numerics --------------------------------------------------------
+    /// Clamp the final mix into [-1, 1] as the last step of every block.
+    ///
+    /// On by default because every integer output format needs it and the
+    /// limiter modes that can overshoot rely on it as a backstop. The one
+    /// case that does not want it is `--limiter off --format float32`, whose
+    /// entire purpose is to see the raw mix: float32 stores values outside
+    /// [-1, 1] exactly, so clamping there destroys the measurement rather
+    /// than protecting anything. The CLI turns it off for exactly that pair.
+
+[35] src/config.rs:329
+    /// Ramp channel gain across a gate tile instead of stepping it.
+    ///
+    /// Channel volume and expression are published once per gate tile and were
+    /// applied as a step, so an abrupt CC7/CC11 move put a hard amplitude
+    /// discontinuity in every sounding voice on that channel. The step is
+    /// broadband by construction -- it looks band-limited on a spectrogram only
+    /// because the material masks it below about 7 kHz, and reading it as a
+    /// filter artefact is the wrong turning here.
+    ///
+    /// Ramping spreads that change over `gate_frames` (0.67 ms at the
+    /// defaults), which is far shorter than any musical gesture and far longer
+    /// than the discontinuity. It never touches a voice's own attack: the
+    /// ramp only ever interpolates *between two channel-gain values*, and a
+    /// voice's first tile is always set directly.
+    ///
+    /// Off restores the stepped behaviour exactly, for A/B and for reverting.
+
+[36] src/config.rs:347
+    /// Ramp biquad coefficients across a gate tile instead of switching them.
+    ///
+    /// CC71 and CC74 move the filter, and a voice re-reads its coefficients
+    /// from a different copy of the params table when they do. The biquad's
+    /// state (`filt_z1`/`filt_z2`) is history under the *old* coefficients, so
+    /// applying new ones to it instantly is a state/coefficient mismatch and
+    /// the filter rings its way out of it -- a short decaying burst, five to
+    /// seven samples long, at the gate-tile boundary.
+    ///
+    /// Bypassing the filter collapses those bursts by 10-17x where a gain step
+    /// is untouched, which is what identifies the biquad rather than the gain
+    /// path; the development notes have the outlier table.
+    ///
+    /// Ramping the coefficients over `gate_frames` lets the state follow them.
+    /// Off restores the instant switch exactly. Independent of
+    /// [`Config::gain_ramp`] so the two can be reverted separately.
+
+[37] src/config.rs:365
+    /// Evaluate SF2 vibrato and tremolo LFOs.
+    ///
+    /// Real General MIDI sets lean on these: the font behind the Microsoft GS
+    /// wavetable drives `vibLfoToPitch` on 26 of its instruments, so a render
+    /// without them is audibly wrong on ordinary material. Off restores
+    /// the pre-0.2.5 behaviour, which is also the cheapest path: the whole
+    /// evaluation compiles away.
+
+[38] src/config.rs:374
+    /// Evaluate the SF2 modulation envelope and its pitch and filter
+    /// destinations.
+    ///
+    /// The second envelope every SF2 voice has, and the one that makes a synth
+    /// lead open on each attack. In the General MIDI set behind the Microsoft
+    /// GS wavetable, 21 zones drive the filter destination and 11 the pitch
+    /// one. Off restores the pre-0.2.5
+    /// behaviour, in which the generators were read and discarded, and is the
+    /// cheapest path -- the evaluation compiles away and the voice pool drops
+    /// its release-age field.
+
+[39] src/config.rs:386
+    /// Use Kahan compensation for the per-thread partial sums in the reduce
+    /// pass.
+    ///
+    /// The fixed-order binary tree already holds error to log2 of the term
+    /// count rather than the term count itself, which is why this is off by
+    /// default. It compensates the strided accumulation each thread does
+    /// *before* the tree, so it is the escalation for the case where a null
+    /// test still shows error with the tree in place. It does not change
+    /// determinism either way: the order is fixed in both branches.
+
+[40] src/config.rs:398
+    /// Compile the shaders without naga's automatic bounds clamps and loop
+    /// bounding counters. Every index in the shaders comes from a count the
+    /// host controls, so the clamps are dead weight, but turning them off
+    /// means a bug becomes an out-of-bounds access rather than a clamped one.
+    /// Off by default; measure before turning it on.
+
+[41] src/config.rs:405
+    // ---- diagnostics -----------------------------------------------------
+    /// Log per-pass timings.
+
+[42] src/config.rs:421
+            // Swept on an RTX 5060 at a million voices. The pairing matters
+            // more than either value alone, because `workgroup_size /
+            // (reduce_tile * 2)` is how many threads cooperate on one output
+            // lane in the first reduction level, and 32 of them -- one warp --
+            // is what measures best. 256/4 renders in 84.3 ms where 512/8 took
+            // 95.6 ms and 512/4, at the same workgroup storage as 256/8, took
+            // 104 ms.
+
+[43] src/config.rs:431
+            // 2048 workgroups of 256 is 524288 voices in flight; past that the
+            // render pass loops. Wider dispatches keep winning here (84.3 ms
+            // at 512, 82.5 ms at 2048) at the cost of a partial buffer that
+            // scales with the count: 2048 workgroups is 64 MiB, which the
+            // reduce pass then has to stream, and which is why this stops
+            // rather than doubling again.
+
+[44] src/config.rs:467
+            // 2 GiB. The reason for this number -- leaving room for Cake on the
+            // same device -- was retracted 2026-08-23; the two are never run
+            // together. The default has not been re-derived. See the development notes.
+
+[45] src/config.rs:527
+        // The render pass stages one float per voice per channel lane, plus a
+        // second level of WG floats. The limit is the 48 KiB a compute
+        // workgroup gets, not the 16 KiB wgpu guarantees as a floor.
+
+[46] src/config.rs:540
+        // The reduction assigns at least one thread to each of the
+        // reduce_tile * 2 channel lanes.
+
+[47] src/config.rs:589
+        // 255 and 65535 are the widths the driver packs a note-on into while
+        // it waits for admission. Well past anything musical, but a silent
+        // truncation there would corrupt which voice a candidate refers to.
+
+[48] src/config.rs:609
+    /// Frames in which a steal may be scheduled. The fade has to finish inside
+    /// the block, so a victim cannot start fading in the last `fade` frames.
+
+[49] src/config.rs:615
+    /// Voice slots to allocate. A stolen voice keeps sounding until its own
+    /// stop frame, so for part of a block the pool holds the outgoing voices
+    /// and their replacements at once. `max_voices` stays the ceiling on what
+    /// survives a block; this is the transient headroom on top of it.
+
+[50] src/config.rs:623
+    /// The most voices one block may steal. Integer arithmetic, and both
+    /// backends call this rather than computing it themselves, because the two
+    /// have to agree exactly or the null test stops meaning anything.

@@ -1,14 +1,4 @@
-//! SFZ loader.
-//!
-//! Covers the opcode subset a sampled-instrument library actually uses:
-//! region/group/global/control headers, key and velocity ranges, tuning,
-//! volume and pan, loop modes, the amplitude envelope, and the low-pass
-//! filter. Unknown opcodes are counted and reported once rather than
-//! silently ignored, so a library that leans on something unimplemented is
-//! visible instead of quietly wrong.
-//!
-//! Stereo sample files become two mono regions panned hard left and right,
-//! because the engine's voice is mono by construction.
+//! SFZ loader. \[1\]
 
 use crate::bank::*;
 use crate::config::Config;
@@ -35,25 +25,11 @@ impl OpcodeSet {
     fn get(&self, k: &str) -> Option<&str> {
         self.0.get(k).map(|s| s.as_str())
     }
-    /// Collapse aliased opcodes to one canonical name, at the level that
-    /// wrote them and before any inheritance happens.
-    ///
-    /// `merged` is a flat map, so on its own it cannot tell a region's
-    /// `key=22` from a group's `lokey=0 hikey=127`: both survive the merge
-    /// and whichever the reader happens to consult last wins, whatever level
-    /// set it. One affected library writes exactly that pair -- velocity split
-    /// into 41
-    /// `<group>`s carrying `lokey=0 hikey=127`, each including the same
-    /// per-key region list written as `key=N` -- and every one of its regions
-    /// came out spanning the whole keyboard, so every note played sixteen
-    /// layers of the wrong sample. Collapsing here means the merge only ever
-    /// sees one name per property, and normal region-over-group precedence
-    /// applies.
+    /// Collapse aliased opcodes to one canonical name, at the level that \[2\]
     fn canonicalise(&mut self) {
         if let Some(k) = self.0.remove("key") {
             for alias in ["lokey", "hikey", "pitch_keycenter"] {
-                // An explicit sibling at this same level still wins, which is
-                // what `key=60 pitch_keycenter=62` is written to mean.
+                // [3]
                 self.0.entry(alias.to_string()).or_insert_with(|| k.clone());
             }
         }
@@ -119,41 +95,24 @@ struct Parser {
     root: PathBuf,
     unknown: HashMap<String, u32>,
     depth: u32,
-    /// `#define $NAME value`, longest name first.
-    ///
-    /// One table on the parser rather than one per file, because the scope of
-    /// a define crosses `#include` in both directions: a define before an
-    /// include is visible inside it, and a define made inside an included file
-    /// stays visible after it returns. That is what defines are *for* -- write
-    /// one keymap, include it once per layer with a different variable each
-    /// time -- so per-file scoping would break the common case.
+    /// `#define $NAME value`, longest name first. \[4\]
     defines: Vec<(String, String)>,
 }
 
 impl Parser {
-    /// Record a define, or redefine one.
-    ///
-    /// Redefinition is allowed and takes effect from that point on, which is
-    /// how a library re-includes one keymap per velocity layer.
+    /// Record a define, or redefine one. \[5\]
     fn define(&mut self, name: String, value: String) {
         match self.defines.iter_mut().find(|(n, _)| *n == name) {
             Some(slot) => slot.1 = value,
             None => {
                 self.defines.push((name, value));
-                // Longest first, so `$KEYS` is matched before `$KEY`. Naive
-                // left-to-right replacement of the shorter name would leave an
-                // `S` welded onto the substituted value.
+                // [6]
                 self.defines.sort_by_key(|d| std::cmp::Reverse(d.0.len()));
             }
         }
     }
 
-    /// Textually replace every `$NAME` that has been defined by this point.
-    ///
-    /// An undefined `$NAME` is left in place rather than blanked, so it
-    /// survives into the resolved path and can be reported once at the end.
-    /// Blanking it would produce a path that merely does not exist, which is
-    /// the failure that was impossible to read in the first place.
+    /// Textually replace every `$NAME` that has been defined by this point. \[7\]
     fn substitute(&self, line: &str) -> String {
         if self.defines.is_empty() || !line.contains('$') {
             return line.to_string();
@@ -178,9 +137,7 @@ impl Parser {
         out
     }
 
-    /// `default_path` is passed in rather than held on the parser because it
-    /// is positional: a file may carry several `<control>` sections and each
-    /// governs the regions that follow it, not the whole file.
+    /// `default_path` is passed in rather than held on the parser because it \[8\]
     fn resolve(&self, default_path: &Path, rel: &str) -> PathBuf {
         // SFZ paths use backslashes on Windows-authored libraries.
         let rel = rel.replace('\\', "/");
@@ -241,9 +198,7 @@ impl Parser {
                     continue;
                 }
             }
-            // Includes are substituted too: splitting a library by
-            // variable-named directory is common, and resolving the include
-            // first would defeat the whole mechanism.
+            // [9]
             let expanded = self.substitute(line);
             let line = expanded.trim();
             if let Some(rest) = line.strip_prefix("#include") {
@@ -280,8 +235,7 @@ impl Parser {
                 let Some(eq) = rest.find('=') else { break };
                 let key = rest[..eq].trim().to_ascii_lowercase();
                 let after = &rest[eq + 1..];
-                // A value runs to the next `opcode=` on the line, so file
-                // names with spaces survive.
+                // [10]
                 let value_end = find_value_end(after);
                 let value = after[..value_end].trim().to_string();
                 rest = &after[value_end..];
@@ -306,8 +260,7 @@ fn strip_comment(line: &str) -> &str {
     }
 }
 
-/// Find where a value ends: just before the last whitespace-separated token
-/// that itself contains an `=`.
+/// Find where a value ends: just before the last whitespace-separated token \[11\]
 fn find_value_end(s: &str) -> usize {
     let bytes = s.as_bytes();
     let mut i = 0;
@@ -354,11 +307,7 @@ pub fn load(path: impl AsRef<Path>, cfg: &Config) -> Result<Bank> {
         ops.canonicalise();
     }
 
-    // One walk in file order, carrying everything a region inherits.
-    // `default_path` is part of that: a library split into sections by sample
-    // folder writes a `<control>` before each, and folding them all up front
-    // made the last one govern every region in the file. That loads without
-    // complaining, because the wrong sample is still a sample that exists.
+    // [12]
     let mut default_path = PathBuf::new();
     let mut global = OpcodeSet::default();
     let mut master = OpcodeSet::default();
@@ -390,6 +339,24 @@ pub fn load(path: impl AsRef<Path>, cfg: &Config) -> Result<Bank> {
                 global.merged(&master).merged(&group).merged(ops),
             )),
             "curve" | "effect" => {}
+            // Closing tags. Not SFZ 1.0 -- the format scopes by the next
+            // opening header, not by a matching close -- but generators emit
+            // them and every other player tolerates them. Treated as the
+            // scope end they are written to mean, so a `<region>` after a
+            // `</group>` does not silently inherit the group that closed.
+            // Ignoring them outright would work on well-formed files and
+            // quietly mis-scope the malformed ones.
+            "/group" => group = OpcodeSet::default(),
+            "/master" => {
+                master = OpcodeSet::default();
+                group = OpcodeSet::default();
+            }
+            "/global" => {
+                global = OpcodeSet::default();
+                master = OpcodeSet::default();
+                group = OpcodeSet::default();
+            }
+            "/region" | "/control" | "/curve" | "/effect" => {}
             other => {
                 *parser.unknown.entry(format!("<{other}>")).or_default() += 1;
             }
@@ -447,11 +414,10 @@ pub fn load(path: impl AsRef<Path>, cfg: &Config) -> Result<Bank> {
             let mut r =
                 region_from_opcodes(ops, *sidx, &samples[*sidx as usize], &mut extra);
             for what in extra {
-                *parser.unknown.entry(what.to_string()).or_default() += 1;
+                *parser.unknown.entry(what).or_default() += 1;
             }
             if channels.len() == 2 {
-                // Hard pan the two halves of a stereo file, then let the
-                // region's own pan bias the pair.
+                // [13]
                 r.pan = if ch == 0 { -1.0 } else { 1.0 };
             }
             region_ids.push(regions.len() as u32);
@@ -464,7 +430,12 @@ pub fn load(path: impl AsRef<Path>, cfg: &Config) -> Result<Bank> {
     }
 
     for (op, n) in &parser.unknown {
-        log::warn!("sfz: ignored unsupported {op} ({n} times)");
+        match op.strip_prefix(UNIMPL_TAG) {
+            // [14]
+            Some(group) => log::warn!("sfz: {group} not implemented, {n} opcodes ignored"),
+            // [15]
+            None => log::warn!("sfz: ignored unsupported {op} ({n} times)"),
+        }
     }
     report_sample_errors(sample_errors, unresolved_defines);
 
@@ -481,11 +452,18 @@ pub fn load(path: impl AsRef<Path>, cfg: &Config) -> Result<Bank> {
     };
 
     let mut bank = Bank {
+        uses_rand: false,
+        uses_lfo: false,
+        uses_mod_env: false,
         pool,
         pool_rate,
         samples,
         regions,
         params: Vec::new(),
+        menv: Vec::new(),
+        menv_factors: Vec::new(),
+        menv_factor_half: 0,
+        menv_log2: Vec::new(),
         gain_table: Vec::new(),
         delay_frames: Vec::new(),
         key_ok: Vec::new(),
@@ -566,6 +544,8 @@ fn load_sample_channels(
         };
 
         let len = data.len() as u32;
+        // [16]
+        let declared_loop = w.loop_points.is_some();
         let (mut ls, mut le) = w.loop_points.unwrap_or((0, len.saturating_sub(1)));
         ls = (ls as f64 * ratio).round() as u32;
         le = (le as f64 * ratio).round() as u32;
@@ -580,6 +560,7 @@ fn load_sample_channels(
             len,
             loop_start: ls.min(len.saturating_sub(1)),
             loop_end: le.min(len),
+            declared_loop,
             rate: if pool_rate != 0 { pool_rate } else { src_rate },
             root_key: w.root_key.unwrap_or(60),
             correction_cents: w.fine_tune_cents,
@@ -592,11 +573,7 @@ fn load_sample_channels(
     Ok(out)
 }
 
-/// Every opcode this loader reads. Anything outside it is dropped, and being
-/// dropped silently is how a soundfont ends up sounding wrong for a session:
-/// a widely used piano port carries `fil_veltrack=9600` against an 89 Hz
-/// cutoff, and without it every note plays under an 89 Hz lowpass. So the set
-/// is written down and what falls outside it is counted and reported.
+/// Every opcode this loader reads. Anything outside it is dropped, and being \[17\]
 const KNOWN_OPCODES: &[&str] = &[
     "sample",
     "lokey",
@@ -631,20 +608,54 @@ const KNOWN_OPCODES: &[&str] = &[
     "group",
     "off_by",
     "default_path",
+    "lorand",
+    "hirand",
+    "xfin_lovel",
+    "xfin_hivel",
+    "xfout_lovel",
+    "xfout_hivel",
 ];
 
-/// Opcodes that are recognised as deliberately unimplemented, so they are
-/// reported once as a group rather than as unknown noise. These are real
-/// features this synth does not have yet, not typos.
-const UNIMPLEMENTED_PREFIXES: &[&str] = &["amplfo_", "fillfo_", "pitchlfo_", "set_cc", "label_cc"];
+/// Opcodes recognised as deliberately unimplemented, grouped by the feature \[18\]
+const UNIMPL_TAG: char = '';
+
+const UNIMPLEMENTED_GROUPS: &[(&str, &[&str])] = &[
+    // [19]
+    ("LFO", &["amplfo_", "fillfo_", "pitchlfo_", "pitchlfo", "amplfo", "fillfo"]),
+    // [20]
+    ("effects", &["reverb_", "chorus_", "delay_", "send_effect", "send", "effect"]),
+    // [21]
+    (
+        "envelope veltrack",
+        &[
+            "ampeg_veltrack",
+            "ampeg_attack_veltrack",
+            "ampeg_decay_veltrack",
+            "ampeg_sustain_veltrack",
+            "ampeg_release_veltrack",
+            "ampeg_delay_veltrack",
+            "ampeg_hold_veltrack",
+            "ampeg_vel2",
+            "gain_veltrack",
+        ],
+    ),
+    // [22]
+    ("voice masking", &["note_selfmask", "note_polyphony", "polyphony"]),
+    // [23]
+    ("crossfade curve", &["xf_velcurve", "xf_keycurve", "xf_cccurve"]),
+    ("CC labelling", &["set_cc", "label_cc", "label_key"]),
+];
 
 fn note_unhandled(ops: &OpcodeSet, unknown: &mut HashMap<String, u32>) {
     for k in ops.0.keys() {
         if KNOWN_OPCODES.contains(&k.as_str()) {
             continue;
         }
-        let key = match UNIMPLEMENTED_PREFIXES.iter().find(|p| k.starts_with(**p)) {
-            Some(p) => format!("{p}* (not implemented)"),
+        let group = UNIMPLEMENTED_GROUPS
+            .iter()
+            .find(|(_, pats)| pats.iter().any(|p| k.starts_with(*p)));
+        let key = match group {
+            Some((name, _)) => format!("{UNIMPL_TAG}{name}"),
             None => k.clone(),
         };
         *unknown.entry(key).or_default() += 1;
@@ -655,15 +666,14 @@ fn region_from_opcodes(
     ops: &OpcodeSet,
     sample: u32,
     info: &SampleInfo,
-    unhandled: &mut Vec<&'static str>,
+    unhandled: &mut Vec<String>,
 ) -> Region {
     let mut r = Region {
         sample,
         ..Default::default()
     };
 
-    // `key` is gone by now: `canonicalise` expanded it into the three
-    // opcodes below at the level that wrote it.
+    // [24]
     if let Some(k) = ops.key("lokey") {
         r.key_lo = k.clamp(0, 127) as u8;
     }
@@ -702,30 +712,73 @@ fn region_from_opcodes(
         r.amp_veltrack = v.clamp(-100.0, 100.0);
     }
 
+    // [25]
     r.loop_mode = match ops.get("loop_mode").unwrap_or("") {
         "loop_continuous" => LoopMode::Continuous,
         "loop_sustain" => LoopMode::UntilRelease,
         "one_shot" => LoopMode::NoLoop,
         "no_loop" => LoopMode::NoLoop,
-        _ => {
-            // Default follows the sample: if the wav declares a loop, use it.
-            if info.loop_end > info.loop_start + 1 {
+        "off" => LoopMode::NoLoop,
+        "" => {
+            if info.declared_loop {
                 LoopMode::Continuous
             } else {
                 LoopMode::NoLoop
             }
         }
+        // [26]
+        other => {
+            unhandled.push(format!("loop_mode={other} (unknown, treated as no_loop)"));
+            LoopMode::NoLoop
+        }
     };
+
+    // [27]
+    if let Some(v) = ops.i32("xfin_lovel") {
+        r.xfin_lo = v.clamp(0, 127) as u8;
+    }
+    if let Some(v) = ops.i32("xfin_hivel") {
+        r.xfin_hi = v.clamp(0, 127) as u8;
+    }
+    if let Some(v) = ops.i32("xfout_lovel") {
+        r.xfout_lo = v.clamp(0, 127) as u8;
+    }
+    if let Some(v) = ops.i32("xfout_hivel") {
+        r.xfout_hi = v.clamp(0, 127) as u8;
+    }
+    // [28]
+    if r.xfin_hi < r.xfin_lo {
+        unhandled.push("xfin_hivel < xfin_lovel (ignored)".to_string());
+        r.xfin_lo = 0;
+        r.xfin_hi = 0;
+    }
+    if r.xfout_hi < r.xfout_lo {
+        unhandled.push("xfout_hivel < xfout_lovel (ignored)".to_string());
+        r.xfout_lo = 127;
+        r.xfout_hi = 127;
+    }
+
+    // [29]
+    if let Some(v) = ops.f32("lorand") {
+        r.rand_lo = v.clamp(0.0, 1.0);
+    }
+    if let Some(v) = ops.f32("hirand") {
+        r.rand_hi = v.clamp(0.0, 1.0);
+    }
+    if r.rand_hi < r.rand_lo {
+        unhandled.push(format!(
+            "lorand={} > hirand={} (empty range, ignored)",
+            r.rand_lo, r.rand_hi
+        ));
+        // [30]
+        r.rand_lo = 0.0;
+        r.rand_hi = 1.0;
+    }
 
     if let Some(o) = ops.i32("offset") {
         r.addr_start = o.max(0);
     }
-    // These four opcodes are absolute positions in source frames, but the
-    // `Region` stores offsets from the sample's own points, and `build_voice`
-    // scales those offsets by the resample ratio before applying them. So the
-    // subtraction has to happen in source frames too: the sample's points are
-    // already at pool rate, and mixing the two put an overridden loop up to a
-    // resample ratio's worth of frames off its mark.
+    // [31]
     let to_source = |resampled: u32| {
         if info.resample_ratio > 0.0 {
             (resampled as f32 / info.resample_ratio).round() as i32
@@ -763,27 +816,21 @@ fn region_from_opcodes(
     if let Some(vt) = ops.f32("fil_veltrack") {
         r.filter_veltrack_cents = vt.clamp(-9600.0, 9600.0);
     }
-    // Only lowpasses are implemented. Applying a lowpass where the file asked
-    // for a highpass would be worse than applying nothing, so anything else
-    // switches the filter off for the region rather than being approximated.
+    // [32]
     if let Some(kind) = ops.get("fil_type") {
         if !kind.starts_with("lpf") {
             r.filter_fc_cents = 13500.0;
             r.filter_veltrack_cents = 0.0;
         }
     }
-    // In SFZ `group` only labels; `off_by` is what mutes. The two together,
-    // naming the same number, are the self-exclusive case that
-    // `exclusive_class` already implements. `group` on its own used to switch
-    // exclusion on by itself, which mutes notes the library meant to keep.
+    // [33]
     let group_id = ops.i32("group").unwrap_or(0).clamp(0, 255);
     match ops.i32("off_by") {
         Some(off) if off.clamp(0, 255) == group_id && group_id > 0 => {
             r.exclusive_class = group_id as u8;
         }
-        // Muting a *different* group is a thing this engine cannot express,
-        // so it is reported rather than approximated by self-exclusion.
-        Some(_) => unhandled.push("off_by (cross-group, not implemented)"),
+        // [34]
+        Some(_) => unhandled.push("off_by (cross-group, not implemented)".to_string()),
         None => {}
     }
 
@@ -848,16 +895,14 @@ mod tests {
         assert_eq!(out, ["sample=WYV-64-64.wav"]);
     }
 
-    /// `$KEY` and `$KEYS` can both be defined. Replacing the shorter one first
-    /// welds its leftover characters onto the substituted value.
+    /// `$KEY` and `$KEYS` can both be defined. Replacing the shorter one first \[35\]
     #[test]
     fn longest_name_wins() {
         let out = expand(&["#define $KEY a", "#define $KEYS b", "sample=$KEYS/$KEY.wav"]);
         assert_eq!(out, ["sample=b/a.wav"]);
     }
 
-    /// Redefinition takes effect from that point on, which is how a library
-    /// re-includes one keymap per velocity layer.
+    /// Redefinition takes effect from that point on, which is how a library \[36\]
     #[test]
     fn redefinition_applies_from_that_point() {
         let out = expand(&["#define $L 1", "a=$L", "#define $L 2", "b=$L"]);
@@ -876,8 +921,7 @@ mod tests {
         assert_eq!(out, ["sample=root/v1/s.wav"]);
     }
 
-    /// Left in place rather than blanked, so it survives into the resolved
-    /// path and the loader can say which variable was never defined.
+    /// Left in place rather than blanked, so it survives into the resolved \[37\]
     #[test]
     fn an_undefined_name_survives_for_the_report() {
         let out = expand(&["#define $A a", "sample=$A-$NOPE.wav"]);

@@ -1,8 +1,4 @@
-//! Synthetic soundfonts and MIDI files for the test suite.
-//!
-//! The tests must not depend on a soundfont that happens to be installed, and
-//! a hand-built SF2 doubles as a check on the loader: everything written here
-//! is read back through the real parser.
+//! Synthetic soundfonts and MIDI files for the test suite. \[1\]
 
 use crate::midi::MidiWriter;
 use anyhow::Result;
@@ -10,12 +6,9 @@ use std::f64::consts::PI;
 use std::io::Write;
 use std::path::Path;
 
-// ---------------------------------------------------------------------------
-// waveforms
-// ---------------------------------------------------------------------------
+// [2]
 
-/// One cycle repeated, so the loop points are exact and a looped render is a
-/// pure tone with no discontinuity.
+/// One cycle repeated, so the loop points are exact and a looped render is a \[3\]
 pub fn sine_cycles(freq: f64, rate: u32, cycles: usize, amp: f64) -> Vec<i16> {
     let per_cycle = (rate as f64 / freq).round() as usize;
     let n = per_cycle * cycles;
@@ -27,8 +20,7 @@ pub fn sine_cycles(freq: f64, rate: u32, cycles: usize, amp: f64) -> Vec<i16> {
         .collect()
 }
 
-/// A ramp from -1 to 1 over `n` samples. Every sample is distinct, which makes
-/// phase-accumulator bugs show up as an obviously wrong slope.
+/// A ramp from -1 to 1 over `n` samples. Every sample is distinct, which makes \[4\]
 pub fn ramp(n: usize) -> Vec<i16> {
     (0..n)
         .map(|i| {
@@ -38,8 +30,7 @@ pub fn ramp(n: usize) -> Vec<i16> {
         .collect()
 }
 
-/// Deterministic pseudo-random noise. Not for listening, for catching indexing
-/// bugs: neighbouring samples are uncorrelated, so an off-by-one is loud.
+/// Deterministic pseudo-random noise. Not for listening, for catching indexing \[5\]
 pub fn noise(n: usize, seed: u64) -> Vec<i16> {
     let mut s = seed | 1;
     (0..n)
@@ -52,9 +43,7 @@ pub fn noise(n: usize, seed: u64) -> Vec<i16> {
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// SF2 builder
-// ---------------------------------------------------------------------------
+// [6]
 
 pub struct TestSample {
     pub name: String,
@@ -81,8 +70,7 @@ impl TestSample {
     }
 }
 
-/// One instrument zone. `gens` are extra (operator, amount) pairs written
-/// before the terminal sampleID generator.
+/// One instrument zone. `gens` are extra (operator, amount) pairs written \[7\]
 pub struct TestZone {
     pub sample: u16,
     pub key: (u8, u8),
@@ -141,15 +129,7 @@ fn pad_name(name: &str) -> [u8; 20] {
     b
 }
 
-/// An SF2 `ZSTR`: the string, then one or two zero bytes, whichever makes the
-/// total length even.
-///
-/// The SoundFont spec asks for this explicitly, and it is not decoration. RIFF
-/// pads an odd-sized chunk with a byte that is not counted in the chunk's size,
-/// and BASSMIDI's reader advances by the size alone -- so an odd `INAM` puts it
-/// one byte out for the rest of the file and it rejects the whole soundfont
-/// with `BASS_ERROR_FILEFORM`. This crate's own reader never noticed, because
-/// it seeks each chunk by name.
+/// An SF2 `ZSTR`: the string, then one or two zero bytes, whichever makes the \[8\]
 fn zstr(s: &str) -> Vec<u8> {
     let mut v = s.as_bytes().to_vec();
     v.push(0);
@@ -273,13 +253,7 @@ impl Sf2Builder {
             shdr.extend_from_slice(&0u16.to_le_bytes()); // sampleLink
             shdr.extend_from_slice(&1u16.to_le_bytes()); // monoSample
         }
-        // EOS. A shdr record is 46 bytes: 20 of name, then start, end,
-        // startloop, endloop and rate as u32, originalKey and correction as
-        // bytes, sampleLink and sampleType as u16. The terminal record has to
-        // be the same size as a real one -- this wrote 48 for a while, which
-        // left the chunk size not a whole number of records, and BASSMIDI
-        // rejects such a file outright with BASS_ERROR_FILEFORM even though
-        // this crate's own loader divides through and carries on.
+        // [9]
         shdr.extend_from_slice(&pad_name("EOS"));
         shdr.extend_from_slice(&[0u8; 22]);
         shdr.extend_from_slice(&0u16.to_le_bytes());
@@ -316,8 +290,7 @@ impl Sf2Builder {
     }
 }
 
-/// The default test soundfont: one looped sine, no envelope shaping, so a
-/// single note renders to exactly the sample repeated.
+/// The default test soundfont: one looped sine, no envelope shaping, so a \[10\]
 pub fn simple_sf2(path: impl AsRef<Path>, rate: u32) -> Result<()> {
     let data = sine_cycles(440.0, rate, 20, 0.5);
     let n = data.len() as u32;
@@ -347,8 +320,7 @@ pub fn simple_sf2(path: impl AsRef<Path>, rate: u32) -> Result<()> {
     b.write(path)
 }
 
-/// A soundfont with several regions, key splits, panning, an envelope and a
-/// filter. Exercises the parts of the loader a real soundfont uses.
+/// A soundfont with several regions, key splits, panning, an envelope and a \[11\]
 pub fn rich_sf2(path: impl AsRef<Path>, rate: u32) -> Result<()> {
     let low = sine_cycles(220.0, rate, 40, 0.6);
     let mid = ramp(2048);
@@ -388,7 +360,8 @@ pub fn rich_sf2(path: impl AsRef<Path>, rate: u32) -> Result<()> {
                     .gen(37, 100)
                     .gen(38, -600)
                     .gen(17, 400)
-                    .gen(48, 100), // -10 dB attenuation
+                    // [12]
+                    .gen(48, 100),
             ],
         }],
         presets: vec![
@@ -404,17 +377,15 @@ pub fn rich_sf2(path: impl AsRef<Path>, rate: u32) -> Result<()> {
                 bank: 0,
                 program: 1,
                 instrument: 0,
-                gens: vec![(48, 200)], // preset-level attenuation offset
+                // A further -8 dB on top of the instrument's -4.
+                gens: vec![(48, 200)],
             },
         ],
     };
     b.write(path)
 }
 
-/// A soundfont whose sample pool is too big to sit in cache, one looped sample
-/// per key. This is what a real piano library looks like to the memory system,
-/// and it is the only way to see whether the region sort is doing anything:
-/// with a pool that fits in L2, every access pattern looks equally good.
+/// A soundfont whose sample pool is too big to sit in cache, one looped sample \[13\]
 pub fn big_sf2(path: impl AsRef<Path>, rate: u32, target_mb: usize) -> Result<()> {
     const KEYS: usize = 88;
     let frames_per_sample = (target_mb * 1024 * 1024 / 2 / KEYS).max(1024);
@@ -423,8 +394,7 @@ pub fn big_sf2(path: impl AsRef<Path>, rate: u32, target_mb: usize) -> Result<()
     let mut zones = Vec::with_capacity(KEYS);
     for k in 0..KEYS {
         let key = 21 + k as u8;
-        // A detuned pair beating slowly, so neighbouring samples are not
-        // identical and the compiler cannot fold them away.
+        // [14]
         let f0 = 440.0 * 2f64.powf((key as f64 - 69.0) / 12.0);
         let data: Vec<i16> = (0..frames_per_sample)
             .map(|i| {
@@ -468,9 +438,7 @@ pub fn big_sf2(path: impl AsRef<Path>, rate: u32, target_mb: usize) -> Result<()
     .write(path)
 }
 
-// ---------------------------------------------------------------------------
-// MIDI generators
-// ---------------------------------------------------------------------------
+// [15]
 
 /// `notes` note-ons spread over `seconds`, cycling through keys and channels.
 pub fn scatter_midi(
@@ -527,8 +495,7 @@ pub fn simultaneous_midi(path: impl AsRef<Path>, notes: usize, hold_seconds: f64
     let mut w = MidiWriter::new(PPQ);
     w.tempo_track(us_per_qn);
 
-    // 16 channels x 128 keys is only 2048 distinct notes, so the rest are
-    // retriggers of the same keys, which is exactly what a black MIDI does.
+    // [16]
     let per_track = 65536usize;
     let mut left = notes;
     let mut n = 0usize;
@@ -548,9 +515,7 @@ pub fn simultaneous_midi(path: impl AsRef<Path>, notes: usize, hold_seconds: f64
     w.save(path)
 }
 
-/// `notes` note-ons spread over `seconds`, none of them released until the
-/// very end. The voice count only ever climbs, which is what forces the pool
-/// to overflow and the stealing rule to be exercised.
+/// `notes` note-ons spread over `seconds`, none of them released until the \[17\]
 pub fn sustained_midi(path: impl AsRef<Path>, notes: usize, seconds: f64) -> Result<()> {
     const PPQ: u16 = 960;
     let us_per_qn = 500_000u32;
@@ -578,10 +543,7 @@ pub fn sustained_midi(path: impl AsRef<Path>, notes: usize, seconds: f64) -> Res
     w.save(path)
 }
 
-/// One note, one key, held for a known length. The single-voice test.
-/// A MIDI built from raw `(seconds, message, length)` triples at a fixed
-/// tempo. Controller tests care about the exact ordering of events around a
-/// note, which the shaped helpers above deliberately hide.
+/// One note, one key, held for a known length. The single-voice test. \[18\]
 pub fn event_midi(path: impl AsRef<Path>, events: &[(f64, [u8; 3], usize)]) -> Result<()> {
     const PPQ: u16 = 960;
     let us_per_qn = 500_000u32;
@@ -597,9 +559,7 @@ pub fn event_midi(path: impl AsRef<Path>, events: &[(f64, [u8; 3], usize)]) -> R
     w.save(path)
 }
 
-/// The three messages that set a channel's bend range through RPN 0. Without
-/// them the range is the GM default of two semitones, which cannot express an
-/// exact interval: the largest bend is 8191/8192 of the range, not all of it.
+/// The three messages that set a channel's bend range through RPN 0. Without \[19\]
 pub fn set_bend_range(ch: u8, semitones: u8) -> [(f64, [u8; 3], usize); 3] {
     [
         (0.0, [0xB0 | ch, 101, 0], 3),

@@ -1,9 +1,4 @@
-//! Block-at-a-time render driver.
-//!
-//! Owns the MIDI stream, the tempo clock, channel state and the gate table,
-//! and feeds a `Backend` one block of spawn commands at a time. Both the CPU
-//! reference and the GPU path go through this, which is what makes the null
-//! test meaningful: the two backends see byte-identical input.
+//! Block-at-a-time render driver. \[1\]
 
 use crate::backend::Backend;
 use crate::bank::{Bank, ParamMod, PreviewLayer, VoiceSpawn};
@@ -14,44 +9,25 @@ use crate::fixed::bend_factor;
 use crate::voice::{ChannelTable, GateTable, SpawnCmd};
 use anyhow::{bail, Result};
 
-/// Time strata a saturated block is cut into before ranking admission.
-///
-/// Bounds how far the admitted set can drift in time while leaving each
-/// stratum wide enough that ranking inside it is a real choice. At 64 a
-/// 4096-frame block is cut into 64-frame pieces, 1.3 ms apiece.
+/// Time strata a saturated block is cut into before ranking admission. \[2\]
 const ADMIT_STRATA: usize = 64;
 use std::path::Path;
 use std::sync::Arc;
 
-/// A selected RPN that is not one this synth acts on, including the null RPN
-/// and anything reached through NRPN. Parked outside the 14-bit range so it
-/// can never compare equal to RPN 0.
+/// A selected RPN that is not one this synth acts on, including the null RPN \[3\]
 pub const RPN_NONE: u16 = 0x4000;
 
-/// How far CC71-CC75 are quantised before they become a params variant.
-///
-/// Two steps of a controller, so 64 levels. CC74 spans +/-2400 cents across
-/// its 128 values, which makes a quantised step about 76 cents of cutoff --
-/// well under a semitone, and inaudible as a step. At the eight steps this
-/// started with, a step was 300 cents and a move from CC74=64 to CC74=70
-/// landed in the same bucket and did nothing at all.
+/// How far CC71-CC75 are quantised before they become a params variant. \[4\]
 pub const SOUND_CC_SHIFT: u32 = 1;
 
-/// What this synth does with a controller number.
-///
-/// Every number from 0 to 127 has an entry, because the alternative -- a match
-/// arm with a `_ => {}` at the end -- is how a soundfont ends up sounding
-/// wrong for a session with nothing to show for it. `kestrel info` prints
-/// this for the controllers a file actually sends, so "is this doing
-/// anything" is answerable without reading source.
+/// What this synth does with a controller number. \[5\]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CcRole {
     /// Acted on.
     Applied,
     /// Recognised, and correctly does nothing to an offline render.
     Inert(&'static str),
-    /// Would change what is heard, and is not implemented. The string says
-    /// what it would take.
+    /// Would change what is heard, and is not implemented. The string says \[6\]
     Missing(&'static str),
 }
 
@@ -135,39 +111,31 @@ pub fn handles_cc(num: u8) -> bool {
     cc_role(num).1 == CcRole::Applied
 }
 
-/// How long to keep rendering after the last MIDI event before giving up on
-/// voices that will not die, in seconds.
+/// How long to keep rendering after the last MIDI event before giving up on \[7\]
 const MAX_TAIL_SECONDS: f64 = 60.0;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DriverStats {
     /// Copies of the params table CC71-CC75 asked for and got.
     pub param_variants: u32,
-    /// Times a sound-controller change had to reuse an approximate copy
-    /// because the budget was spent. Any of these is audible as the
-    /// controller appearing to do nothing.
+    /// Times a sound-controller change had to reuse an approximate copy \[8\]
     pub variant_fallbacks: u64,
-    /// Distinct quantised states the file asked for, whether or not they
-    /// were granted.
+    /// Distinct quantised states the file asked for, whether or not they \[9\]
     pub variant_states: u32,
     /// Times a slot was reused for a different state. Correct, just work.
     pub variant_rebuilds: u64,
     pub frames: u64,
     pub blocks: u64,
     pub events: u64,
-    /// Note-ons the block could not admit. Counted here rather than in the
-    /// backends because admission now happens before a voice is built, so a
-    /// backend never sees the ones that were refused.
+    /// Note-ons the block could not admit. Counted here rather than in the \[10\]
     pub dropped: u64,
     pub notes: u64,
     pub voices_spawned: u64,
     pub peak: f32,
-    /// Samples the final clamp had to pull back to full scale. Every run of
-    /// these is a squared-off waveform top, which is what a click sounds like.
+    /// Samples the final clamp had to pull back to full scale. Every run of \[11\]
     pub clipped: u64,
 
-    // ---- last block only, for the per-block diagnostic ------------------
-    /// Voices alive when this block's admission decision was taken.
+    // [12]
     pub last_live: u32,
     /// Note-on layers this block queued.
     pub last_want: u32,
@@ -175,61 +143,56 @@ pub struct DriverStats {
     pub last_take: u32,
     /// Voices the backend killed to make room for them.
     pub last_stolen: u64,
-    /// Summed opening amplitude of every layer the block queued, and of the
-    /// subset it admitted. Level follows the second of these, so if anything
-    /// moves at the block rate it moves here first.
+    /// Summed opening amplitude of every layer the block queued, and of the \[13\]
     pub last_want_energy: u64,
     pub last_take_energy: u64,
 }
 
-/// Pack a note-on into one word: everything `build_layer` and `SpawnCmd` will
-/// need if the note survives admission, minus the ordinal, which is a u32 of
-/// its own because it does not fit alongside the rest.
-///
-/// `rel` is bounded by `block_frames` and `variant` by the 64 params slots;
-/// `Config::validate` holds both inside the widths used here rather than
-/// leaving the masks to truncate silently.
+/// Pack a note-on into one word: everything `build_layer` and `SpawnCmd` will \[14\]
 #[inline]
-fn note_pack(ch: u8, key: u8, vel: u8, variant: u32, rel: u32) -> u64 {
-    debug_assert!(variant < 64 && rel < 65536);
+fn note_pack(ch: u8, key: u8, vel: u8, variant: u32, rel: u32, row_bias: u32) -> u64 {
+    debug_assert!(variant < 64 && rel < 65536 && row_bias < 2);
     (ch as u64 & 0xF)
         | ((key as u64 & 0x7F) << 4)
         | ((vel as u64 & 0x7F) << 11)
         | ((variant as u64 & 0x3F) << 18)
         | ((rel as u64 & 0xFFFF) << 24)
+        | ((row_bias as u64 & 1) << 40)
 }
 
 #[inline]
-fn note_unpack(w: u64) -> (u8, u8, u8, u32, u32) {
+fn note_unpack(w: u64) -> (u8, u8, u8, u32, u32, u32) {
     (
         (w & 0xF) as u8,
         ((w >> 4) & 0x7F) as u8,
         ((w >> 11) & 0x7F) as u8,
         ((w >> 18) & 0x3F) as u32,
         ((w >> 24) & 0xFFFF) as u32,
+        ((w >> 40) & 1) as u32,
     )
 }
 
-/// One layer a block might admit, before anything has been built for it.
-///
-/// `key` is `voice::admit_key`, which no longer has a block-relative field,
-/// so it is final as soon as the candidate is built.
+/// One layer a block might admit, before anything has been built for it. \[15\]
 #[derive(Clone, Copy)]
 struct Cand {
     key: u64,
-    /// Index into `notes`, or `DEFERRED` for a voice built in an earlier block
-    /// whose delay lands in this one.
+    /// Index into `notes`, or `DEFERRED` for a voice built in an earlier block \[16\]
     note: u32,
-    /// The region to build, so materialising never has to preview again. For a
-    /// `DEFERRED` candidate this is the index into `deferred_now` instead.
+    /// The region to build, so materialising never has to preview again. For a \[17\]
     region: u32,
-    /// Note id, as an offset from `block_first_id`. Unused when `DEFERRED`,
-    /// whose command already carries its id.
+    /// Note id, as an offset from `block_first_id`. Unused when `DEFERRED`, \[18\]
     id_off: u32,
 }
 
 /// `Cand::note` for a candidate that came off the deferred queue.
 const DEFERRED: u32 = u32::MAX;
+
+/// Which channels are drum parts before a file says anything. Channel 10 -- \[19\]
+const DEFAULT_DRUM_MAP: [u8; 16] = {
+    let mut m = [0u8; 16];
+    m[9] = 1;
+    m
+};
 
 /// `admit_key`, reached without building a `SpawnCmd` first.
 #[inline]
@@ -249,38 +212,41 @@ pub struct Driver {
 
     bank_msb: [u8; 16],
     bank_lsb: [u8; 16],
+    /// Last program change per channel, kept because the drum-part SysEx can \[20\]
+    program: [u8; 16],
+    /// GS part type: 0 melodic, 1 or 2 for the two drum maps. Channel 10 is \[21\]
+    drum_map: [u8; 16],
     preset: [u32; 16],
     /// Raw pitch bend, -8192..8191 relative to centre.
     bend_val: [i16; 16],
     /// Bend range in semitones, RPN 0. Two is the GM default.
     bend_range: [f64; 16],
+    /// Channel coarse tuning, RPN 2, in semitones. The wire value is an MSB \[22\]
+    coarse_tune: [f64; 16],
+    /// Channel fine tuning, RPN 1, in cents. A 14-bit value centred on 8192 \[23\]
+    fine_tune: [f64; 16],
+    /// The raw 14-bit value behind it, kept so an MSB and an LSB written at \[24\]
+    fine_tune_raw: [u16; 16],
     /// Currently selected RPN, from CC101 (MSB) and CC100 (LSB).
     rpn_sel: [u16; 16],
     /// CC7 channel volume, CC11 expression, CC10 pan.
     cc_volume: [u8; 16],
     cc_expression: [u8; 16],
     cc_pan: [u8; 16],
-    /// CC71 resonance, CC72 release, CC73 attack, CC74 brightness, CC75 decay.
-    /// Quantised to sixteen steps each before they become a params variant, so
-    /// a slow sweep does not demand a new copy of the table per event.
+    /// CC71 resonance, CC72 release, CC73 attack, CC74 brightness, CC75 decay. \[25\]
     cc_sound: [[u8; 5]; 16],
-    /// CC1 modulation depth, CC76 vibrato rate, CC77 vibrato depth, CC92
-    /// tremolo depth, CC67 soft pedal.
+    /// CC1 modulation depth, CC76 vibrato rate, CC77 vibrato depth, CC92 \[26\]
     cc_mod: [u8; 16],
     cc_vib_rate: [u8; 16],
     cc_vib_depth: [u8; 16],
     cc_tremolo: [u8; 16],
     cc_soft: [u8; 16],
-    /// Fine halves for the four controllers that have one worth reading. A
-    /// file almost never sends them, but declaring a controller "applied" and
-    /// then dropping half its resolution is the same silence this whole table
-    /// exists to stop.
+    /// Fine halves for the four controllers that have one worth reading. A \[27\]
     lsb_mod: [u8; 16],
     lsb_volume: [u8; 16],
     lsb_pan: [u8; 16],
     lsb_expression: [u8; 16],
-    /// LFO phase per channel, in cycles, carried across blocks so vibrato does
-    /// not restart every 85 ms.
+    /// LFO phase per channel, in cycles, carried across blocks so vibrato does \[28\]
     lfo_phase: [f64; 16],
     /// Quantised sound-controller states, indexed by variant number.
     variants: Vec<[u8; 5]>,
@@ -288,18 +254,14 @@ pub struct Driver {
     seen_states: Vec<[u8; 5]>,
     /// Which variant each channel is currently on.
     cur_variant: [u32; 16],
-    /// Bitmask of variants any channel has pointed at during this block. A
-    /// variant referenced by a row already written cannot be rebuilt under it.
+    /// Bitmask of variants any channel has pointed at during this block. A \[29\]
     variant_used: u64,
     /// Monotonic tick per variant, for choosing the stalest one to reuse.
     variant_seen: Vec<u64>,
     variant_clock: u64,
     /// Variants asked for this block but not yet built and uploaded.
     pending_variants: Vec<(u32, ParamMod)>,
-    /// Set when a voice queued this block was born under a non-zero variant.
-    /// Its copy of the params table has to stay reachable even if no published
-    /// row names it, which happens when a channel moves onto a variant and
-    /// back off inside a single gate tile.
+    /// Set when a voice queued this block was born under a non-zero variant. \[30\]
     spawn_variants: bool,
 
     next_note_id: u64,
@@ -311,27 +273,16 @@ pub struct Driver {
     tail_blocks_left: u64,
 
     spawn_buf: Vec<SpawnCmd>,
-    /// This block's note-ons, one packed entry each, plus their ordinals.
-    ///
-    /// A block may hold a hundred times more note-ons than the pool can admit
-    /// -- 98.5M against 1M on one real file -- and admission
-    /// cannot decide anything until the whole block is in, so *something* per
-    /// note-on has to be remembered. These two are that something, at 12 bytes
-    /// a note-on against the 152 a materialised `SpawnCmd` used to cost in the
-    /// driver and the backend together.
+    /// This block's note-ons, one packed entry each, plus their ordinals. \[31\]
     notes: Vec<u64>,
     note_ordinal: Vec<u32>,
     /// One entry per admissible layer this block. See `Cand`.
     cands: Vec<Cand>,
-    /// This block's share of the deferred queue, already built. Kept apart from
-    /// `spawn_buf` so that admission ranks over one list and `spawn_buf` can be
-    /// filled with the winners alone.
+    /// This block's share of the deferred queue, already built. Kept apart from \[32\]
     deferred_now: Vec<SpawnCmd>,
     /// Scratch for `Bank::preview_note_on`.
     preview_buf: Vec<PreviewLayer>,
-    /// Note id of this block's first candidate. Ids are handed out in
-    /// candidate order, so a candidate's id is this plus its index and does
-    /// not have to be stored.
+    /// Note id of this block's first candidate. Ids are handed out in \[33\]
     block_first_id: u64,
     /// Voices whose SF2 delay pushes their start past this block.
     deferred: Vec<(u64, SpawnCmd)>,
@@ -363,9 +314,14 @@ impl Driver {
             ),
             bank_msb: [0; 16],
             bank_lsb: [0; 16],
+            program: [0; 16],
+            drum_map: DEFAULT_DRUM_MAP,
             preset: [0; 16],
             bend_val: [0; 16],
             bend_range: [2.0; 16],
+            coarse_tune: [0.0; 16],
+            fine_tune: [0.0; 16],
+            fine_tune_raw: [8192; 16],
             rpn_sel: [0; 16],
             cc_volume: [cfg.default_channel_volume.min(127); 16],
             cc_expression: [127; 16],
@@ -417,9 +373,9 @@ impl Driver {
     }
 
     fn refresh_preset(&mut self, ch: usize, program: u8) {
-        // Channel 10 is percussion by GM convention, and SF2 files put their
-        // drum kits in bank 128.
-        let bank_num = if ch == 9 {
+        self.program[ch] = program;
+        // [34]
+        let bank_num = if self.drum_map[ch] != 0 {
             128u16
         } else {
             self.bank_msb[ch] as u16
@@ -446,8 +402,7 @@ impl Driver {
 
         self.gates.begin_block();
         self.chan.begin_block();
-        // Whatever each channel is already on stays referenced for the whole
-        // block, because `end_block` fills every unwritten row with it.
+        // [35]
         self.variant_used = 1;
         for v in self.cur_variant {
             self.variant_used |= 1u64 << v;
@@ -460,9 +415,7 @@ impl Driver {
         self.block_first_id = self.next_note_id;
         self.spawn_variants = false;
 
-        // Voices whose delay landed them in this block. They are already
-        // built, so they enter admission as candidates that point at
-        // `deferred_now` rather than at a note-on to be previewed.
+        // [36]
         let mut i = 0;
         while i < self.deferred.len() {
             if self.deferred[i].0 < block_end {
@@ -498,8 +451,7 @@ impl Driver {
             };
 
             if let Event::Tempo(us) = ev {
-                // Tempo applies from its own tick, so it must be consumed even
-                // if it lands past the block boundary check below.
+                // [37]
                 self.clock.set_tempo(tick, us);
                 self.stats.events += 1;
                 continue;
@@ -520,9 +472,7 @@ impl Driver {
         // Once the file runs out, release everything so looping voices stop.
         if self.stream_done && !self.end_sent {
             for ch in 0..16u8 {
-                // Not `all_notes_off`: a file that ends with the pedal still
-                // down would otherwise leave every held note un-released and
-                // ringing into the tail until it timed out.
+                // [38]
                 self.gates.all_sound_off(ch, 0);
             }
             self.end_sent = true;
@@ -530,30 +480,24 @@ impl Driver {
 
         for (i, m) in std::mem::take(&mut self.pending_variants) {
             let data = self.bank.build_variant(&self.cfg, &m);
-            backend.set_params_variant(i, &data)?;
+            let menv = self.bank.build_menv_variant(&self.cfg, &m);
+            backend.set_params_variant(i, &data, &menv)?;
         }
 
         self.gates.end_block();
         self.chan.end_block();
         self.apply_modulation();
         self.chan.refresh_active();
-        backend.set_gates(&self.gates.rows)?;
+        backend.set_gates(&self.gates.off_meta, &self.gates.off_frames)?;
         backend.set_channels(
             &self.chan.rows,
             self.chan.bend_active(),
             self.chan.gain_active(),
-            // A voice born under a variant no published row names still has to
-            // be handed back to the rows on its second gate tile, so the
-            // controller path stays on for it.
+            // [39]
             self.chan.variant_active() || self.spawn_variants,
+            self.chan.cut_active(),
         )?;
-        // Admission, on candidates rather than on built voices.
-        //
-        // `take` is what the backend would have kept anyway; deciding it here
-        // means the block builds that many voices instead of building every
-        // note-on and throwing most of them away. On a block of 98.5M note-ons
-        // against a 1M pool that is the difference between 15 GiB of host
-        // memory and a few hundred megabytes.
+        // [40]
         let live = backend.stats().active_voices as u32;
         let want = self.cands.len();
         let take = self.cfg.admit_take(live, want as u32) as usize;
@@ -565,11 +509,7 @@ impl Driver {
 
         if take < want && take > 0 {
             match self.cfg.admit_rule {
-                // Thinned across the block rather than truncated, so a
-                // saturated block keeps its timing instead of being heard at
-                // its start and silent at its end. `spawn_pick(i, ..) >= i`, so
-                // compacting forwards in place never overwrites a candidate
-                // still to be read.
+                // [41]
                 AdmitRule::Even => {
                     for i in 0..take {
                         self.cands[i] = self.cands[crate::voice::spawn_pick(i, want, take)];
@@ -578,8 +518,7 @@ impl Driver {
                 AdmitRule::Loudest => self.rank_candidates(want, take),
             }
         }
-        // After the rule has reordered, not before: measuring the first
-        // `take` in arrival order reports the same number for every rule.
+        // [42]
         self.stats.last_want_energy = self.cands.iter().map(|c| (c.key >> 48) & 0x7FFF).sum();
         self.stats.last_take_energy =
             self.cands[..take.min(self.cands.len())].iter().map(|c| (c.key >> 48) & 0x7FFF).sum();
@@ -587,9 +526,7 @@ impl Driver {
 
         backend.spawn(&self.spawn_buf)?;
         self.stats.last_stolen = backend.stats().stolen - stolen_before;
-        // `want`, not what was admitted. The counter has always meant "voices
-        // this block queued", dropped ones included, and changing that
-        // silently would move a number people read off the summary line.
+        // [43]
         self.stats.voices_spawned += want as u64;
         backend.render(out)?;
 
@@ -600,10 +537,10 @@ impl Driver {
                 LimiterMode::Brickwall => self.brickwall.process(out),
             }
         }
-        // Always last, so nothing leaves the renderer out of range whatever
-        // ran before it. In brickwall mode it should never fire; the count is
-        // reported so that "should" is checkable rather than assumed.
-        self.stats.clipped += clamp_block(out);
+        // [44]
+        if self.cfg.clamp_output {
+            self.stats.clipped += clamp_block(out);
+        }
 
         if self.cfg.nan_guard {
             if let Some(i) = out.iter().position(|v| !v.is_finite()) {
@@ -650,6 +587,7 @@ impl Driver {
         ordinal: u32,
         start_rel: u32,
         id: u64,
+        row_bias: u32,
     ) -> SpawnCmd {
         SpawnCmd {
             phase_lo: v.phase.lo(),
@@ -662,9 +600,7 @@ impl Driver {
             loop_end: v.loop_end,
             flags: v.flags,
             params: v.params,
-            // Events are handled in stream order, so this is the variant in
-            // force at the note-on's own frame -- which the tile row does not
-            // yet carry if the controller arrived on this very tick.
+            // [45]
             variant,
             region: v.region,
             gate_slot,
@@ -674,30 +610,12 @@ impl Driver {
             note_id_hi: (id >> 32) as u32,
             gain_l: v.gain_l,
             gain_r: v.gain_r,
+            // [46]
+            row_bias,
         }
     }
 
-    /// Move the `take` best candidates to the front, ranked *within* time
-    /// strata rather than across the whole block.
-    ///
-    /// Ranking globally was the first attempt and it reintroduced exactly the
-    /// artifact `spawn_pick` exists to prevent. The top `take` by amplitude has
-    /// no reason to be spread across the block, and loud notes cluster in time
-    /// -- chords, downbeats -- so the admitted set piled up at the block's
-    /// opening and left its tail thin. Measured on a file that drops 48%
-    /// of its voices, that was +6.3 dB at the start of the block against the
-    /// block mean, audible as pumping at the block rate.
-    ///
-    /// The strata decide *when*, exactly as `spawn_pick` would; the key decides
-    /// *which candidate within each stratum*. Both properties at once rather
-    /// than one traded for the other.
-    ///
-    /// Stratum `s` is `[s*want/strata, (s+1)*want/strata)` with a proportional
-    /// quota each. One winner per output slot was the first attempt and it
-    /// over-constrained the choice: at 32k voices a slice held ~7 candidates,
-    /// so ranking could only pick best-of-7. At 64 strata a 4096-frame block is
-    /// cut into 64-frame pieces -- 1.3 ms, far too short to hear as clustering
-    /// -- and each picks its own top share.
+    /// Move the `take` best candidates to the front, ranked *within* time \[47\]
     fn rank_candidates(&mut self, want: usize, take: usize) {
         let cands = &mut self.cands;
         let strata = take.min(ADMIT_STRATA);
@@ -717,24 +635,9 @@ impl Driver {
             if q < n {
                 seg.select_nth_unstable_by_key(q, key);
             }
-            // Left in partition order, not sorted. The order does decide which
-            // voice lands in which pool slot and therefore the summation order
-            // of the mixdown, but that only has to be *deterministic*, and
-            // `select_nth_unstable` already is: "unstable" means it does not
-            // preserve the input order of equal elements, not that it is
-            // randomised, and pdqsort has no randomness in it. Sorting the
-            // prefix on top of selecting it was about 262k elements per block
-            // for nothing -- measured at **11% of a 131 s render**, 98.5 s
-            // against 88.5 s over matched three-run samples, which is the
-            // entire cost the scrambled tiebreak appeared to introduce.
-            //
-            // The old key made this invisible: it was `gain << 48 | ascending
-            // id` with loudness saturated, so the array arrived already sorted
-            // and both the selection and the sort hit pdqsort's pre-sorted
-            // fast path. A key that actually ranks cannot be pre-sorted, which
-            // is what exposed the redundant pass rather than caused it.
-            // Slide the winners down. `olo <= lo` because `take <= want`, so
-            // this never reaches into a stratum still to be visited.
+            // [48]
+
+            // [49]
             for j in 0..q {
                 cands.swap(olo + j, lo + j);
             }
@@ -742,12 +645,7 @@ impl Driver {
     }
 
 
-    /// Build the voices for the first `take` candidates, appending them to
-    /// `spawn_buf` in candidate order.
-    ///
-    /// This is the point of the whole exercise: `build_layer` runs here and
-    /// nowhere else, so a block that queued a hundred million note-ons and can
-    /// admit a million builds a million voices rather than a hundred million.
+    /// Build the voices for the first `take` candidates, appending them to \[50\]
     fn materialise(&mut self, take: usize) {
         let cands = std::mem::take(&mut self.cands);
         for c in &cands[..take.min(cands.len())] {
@@ -755,16 +653,15 @@ impl Driver {
                 self.spawn_buf.push(self.deferred_now[c.region as usize]);
                 continue;
             }
-            let (ch, key, vel, variant, rel) = note_unpack(self.notes[c.note as usize]);
+            let (ch, key, vel, variant, rel, row_bias) =
+                note_unpack(self.notes[c.note as usize]);
             let ordinal = self.note_ordinal[c.note as usize];
             let Some(v) = self.bank.build_layer(c.region, key, vel, &self.cfg) else {
-                // The preview said this layer exists, so this is unreachable
-                // unless the two have drifted apart.
+                // [51]
                 debug_assert!(false, "preview named a layer build_layer will not build");
                 continue;
             };
-            // A delayed layer whose start still lands inside this block is a
-            // candidate like any other, but it starts late.
+            // [52]
             let start_rel = if v.delay_frames == 0 {
                 rel
             } else {
@@ -777,6 +674,7 @@ impl Driver {
                 ordinal,
                 start_rel,
                 self.block_first_id + c.id_off as u64,
+                row_bias,
             ));
         }
         self.cands = cands;
@@ -789,15 +687,15 @@ impl Driver {
                 self.stats.notes += 1;
                 let variant = self.cur_variant[ch as usize & 15];
 
-                // Preview rather than build. A saturated block cannot admit
-                // most of these, and building a voice for one that is about to
-                // be dropped is the whole cost this exists to remove.
+                // [53]
                 let mut prev = std::mem::take(&mut self.preview_buf);
                 prev.clear();
+                // [54]
                 self.bank.preview_note_on(
                     self.preset[ch as usize & 15],
                     key,
                     vel,
+                    self.next_note_id,
                     self.cfg.max_layers as usize,
                     &mut prev,
                 );
@@ -805,23 +703,18 @@ impl Driver {
                 let note = self.notes.len() as u32;
                 let mut recorded = false;
                 for p in prev.iter() {
-                    // Ids are handed out here, in candidate order, exactly as
-                    // they were when this loop built voices -- so a candidate's
-                    // id is `block_first_id` plus its index and never has to be
-                    // stored. A delayed layer takes one too, because it did
-                    // before and the sequence has to be the same either way.
+                    // [55]
                     let id = self.next_note_id;
                     self.next_note_id += 1;
 
                     if p.delay_frames != 0 {
                         let start = block_start + rel as u64 + p.delay_frames as u64;
                         if start >= block_start + self.cfg.block_frames as u64 {
-                            // Lands in a later block, so it is not this block's
-                            // to admit. Build it now and park it; delayed voices
-                            // are rare enough that this is not the hot path.
+                            // [56]
                             if let Some(v) =
                                 self.bank.build_layer(p.region, key, vel, &self.cfg)
                             {
+                                // [57]
                                 let cmd = Self::make_cmd(
                                     &v,
                                     variant,
@@ -829,6 +722,7 @@ impl Driver {
                                     ordinal,
                                     rel,
                                     id,
+                                    0,
                                 );
                                 self.deferred.push((start, cmd));
                             }
@@ -837,7 +731,14 @@ impl Driver {
                     }
 
                     if !recorded {
-                        self.notes.push(note_pack(ch, key, vel, variant, rel));
+                        self.notes.push(note_pack(
+                            ch,
+                            key,
+                            vel,
+                            variant,
+                            rel,
+                            self.chan.row_bias(ch, rel),
+                        ));
                         self.note_ordinal.push(ordinal);
                         recorded = true;
                     }
@@ -850,10 +751,7 @@ impl Driver {
                         id_off: id_off as u32,
                     });
 
-                    // A variant a queued voice was born under has to stay
-                    // reachable for the whole block whether or not the voice
-                    // survives admission, which is what the old code did by
-                    // pinning at queue time.
+                    // [58]
                     if variant != 0 {
                         self.variant_used |= 1u64 << variant;
                         self.spawn_variants = true;
@@ -886,17 +784,29 @@ impl Driver {
                         self.refresh_gain(c, rel);
                     }
                     32 => self.bank_lsb[c] = val,
-                    // Data entry, and the increment/decrement pair that walks
-                    // the same value. Only RPN 0, pitch bend sensitivity, is
-                    // acted on; selecting an NRPN parks `rpn_sel` outside the
-                    // 14-bit range so a file's NRPN data entry cannot be
-                    // mistaken for a bend range.
+                    // [59]
                     6 if self.rpn_sel[c] == 0 => {
                         self.bend_range[c] = val as f64;
                         self.refresh_bend(c, rel);
                     }
                     38 if self.rpn_sel[c] == 0 => {
                         self.bend_range[c] = self.bend_range[c].trunc() + val as f64 / 100.0;
+                        self.refresh_bend(c, rel);
+                    }
+                    // [60]
+                    6 if self.rpn_sel[c] == 1 => {
+                        self.fine_tune_raw[c] = (self.fine_tune_raw[c] & 0x7F) | ((val as u16) << 7);
+                        self.fine_tune[c] = (self.fine_tune_raw[c] as f64 - 8192.0) / 8192.0 * 100.0;
+                        self.refresh_bend(c, rel);
+                    }
+                    38 if self.rpn_sel[c] == 1 => {
+                        self.fine_tune_raw[c] = (self.fine_tune_raw[c] & 0x3F80) | val as u16;
+                        self.fine_tune[c] = (self.fine_tune_raw[c] as f64 - 8192.0) / 8192.0 * 100.0;
+                        self.refresh_bend(c, rel);
+                    }
+                    // [61]
+                    6 if self.rpn_sel[c] == 2 => {
+                        self.coarse_tune[c] = val as f64 - 64.0;
                         self.refresh_bend(c, rel);
                     }
                     96 if self.rpn_sel[c] == 0 => {
@@ -945,18 +855,34 @@ impl Driver {
                     76 => self.cc_vib_rate[c] = val,
                     77 => self.cc_vib_depth[c] = val,
                     92 => self.cc_tremolo[c] = val,
-                    120 => self.gates.all_sound_off(ch, rel),
+                    120 => {
+                        // [62]
+                        self.gates.all_sound_off(ch, rel);
+                        self.chan.set_sound_off(ch, rel, self.next_note_id);
+                    }
                     121 => self.reset_controllers(ch, rel),
-                    // Every channel mode message below carries an all-notes-off
-                    // with it, which is the part that changes what is heard.
-                    // The mode itself -- omni, and mono against poly voice
-                    // allocation -- is not implemented; see the README.
+                    // [63]
                     123..=127 => self.gates.all_notes_off(ch, rel),
                     _ => {}
                 }
             }
             Event::Program { ch, val } => {
                 self.refresh_preset(ch as usize & 15, val);
+            }
+            Event::DrumPart { ch, map } => {
+                let c = ch as usize & 15;
+                if self.drum_map[c] != map {
+                    self.drum_map[c] = map;
+                    self.refresh_preset(c, self.program[c]);
+                }
+            }
+            Event::ResetParts => {
+                for (c, want) in DEFAULT_DRUM_MAP.iter().enumerate() {
+                    if self.drum_map[c] != *want {
+                        self.drum_map[c] = *want;
+                        self.refresh_preset(c, self.program[c]);
+                    }
+                }
             }
             Event::PitchBend { ch, val } => {
                 self.bend_val[ch as usize & 15] = val;
@@ -966,17 +892,7 @@ impl Driver {
         }
     }
 
-    /// Take one of CC71-CC75 and move the channel onto whichever copy of the
-    /// params table matches its new combination, building that copy if this is
-    /// the first time the combination has come up.
-    ///
-    /// Values are quantised to sixteen steps first. A file that sweeps CC74
-    /// would otherwise ask for a new full rebuild of the table on every event,
-    /// and the table can be tens of thousands of entries; sixteen steps across
-    /// the +/-2400 cent range is 300 cents a step, which is coarse for a
-    /// continuous sweep and exact for the discrete settings files actually
-    /// use. Past `max_param_variants` a channel takes the nearest copy that
-    /// already exists rather than failing or thrashing.
+    /// Take one of CC71-CC75 and move the channel onto whichever copy of the \[64\]
     fn set_sound_cc(&mut self, ch: u8, which: usize, val: u8, rel: u32) {
         let c = ch as usize & 15;
         if self.cc_sound[c][which] == val {
@@ -1003,16 +919,7 @@ impl Driver {
                 self.build_variant_at(i, c);
                 i
             }
-            // Out of slots. Rebuilding a stale one is much better than
-            // approximating, because an approximation is silent: this file
-            // asks for 67 distinct states, and approximating meant most of it
-            // rendered with whatever the first sixteen happened to be.
-            //
-            // A slot is only safe to rebuild if no channel has pointed at it
-            // during this block, since rows already written for earlier tiles
-            // still name it and the device would read the new contents under
-            // the old reference. Voices always read their channel's current
-            // variant, so nothing older than this block can be holding one.
+            // [65]
             None => {
                 let victim = (1..self.variants.len())
                     .filter(|i| self.variant_used & (1u64 << i) == 0)
@@ -1052,9 +959,7 @@ impl Driver {
         self.chan.set_variant(ch, idx, rel);
     }
 
-    /// Queue the build of variant `i` from channel `c`'s current controllers.
-    /// Built at the end of the block rather than here: a table can be tens of
-    /// thousands of entries and the event loop is not the place for it.
+    /// Queue the build of variant `i` from channel `c`'s current controllers. \[66\]
     fn build_variant_at(&mut self, i: u32, c: usize) {
         let m = ParamMod::from_controllers(
             self.cc_sound[c][0],
@@ -1068,45 +973,23 @@ impl Driver {
         self.pending_variants.push((i, m));
     }
 
-    /// CC121, and the start-of-file state. Everything a channel carries goes
-    /// back to where it powers on.
+    /// CC121, Reset All Controllers. \[67\]
     fn reset_controllers(&mut self, ch: u8, rel: u32) {
         let c = ch as usize & 15;
-        self.bank_msb[c] = 0;
-        self.bank_lsb[c] = 0;
-        self.bend_range[c] = 2.0;
+        // Pitch wheel to centre -- but not its range.
         self.bend_val[c] = 0;
         self.rpn_sel[c] = RPN_NONE;
-        self.cc_volume[c] = self.cfg.default_channel_volume.min(127);
         self.cc_expression[c] = 127;
-        self.cc_pan[c] = 64;
-        self.cc_soft[c] = 0;
+        self.lsb_expression[c] = 0;
         self.cc_mod[c] = 0;
         self.lsb_mod[c] = 0;
-        self.lsb_volume[c] = 0;
-        self.lsb_pan[c] = 0;
-        self.lsb_expression[c] = 0;
-        self.cc_tremolo[c] = 0;
-        self.cc_vib_rate[c] = 64;
-        self.cc_vib_depth[c] = 64;
-        for w in 0..5 {
-            self.set_sound_cc(ch, w, 64, rel);
-        }
+        self.cc_soft[c] = 0;
         self.refresh_bend(c, rel);
         self.refresh_gain(c, rel);
         self.gates.reset_controllers(ch, rel);
     }
 
-    /// Lay the vibrato and tremolo LFOs over the controller rows.
-    ///
-    /// Both are per channel, not per voice, so they can be evaluated on the
-    /// host: every voice on a channel shares one curve. That is the whole
-    /// reason modulation is cheap here. It is sampled once per gate tile, 32
-    /// frames or 0.67 ms, which is a 1.5 kHz sample rate for a curve that
-    /// moves at 5 Hz.
-    ///
-    /// Depth is the GM default of +/-50 cents at full wheel, scaled by CC77.
-    /// Rate is 5 Hz at CC76's centre and spans roughly 0.5 to 14 Hz.
+    /// Lay the vibrato and tremolo LFOs over the controller rows. \[68\]
     fn apply_modulation(&mut self) {
         let tiles = self.chan.tiles;
         let tile_seconds = self.cfg.gate_frames as f64 / self.cfg.sample_rate as f64;
@@ -1117,8 +1000,7 @@ impl Driver {
             let trem = self.cc_tremolo[c] as f64 / 127.0 * 0.25;
             let rate = 5.0 * (2.0f64).powf((self.cc_vib_rate[c] as f64 - 64.0) / 32.0);
             if vib <= 0.0 && trem <= 0.0 {
-                // Keep the phase running anyway, so switching the wheel on
-                // mid-note does not jump the curve to wherever it left off.
+                // [69]
                 self.lfo_phase[c] =
                     (self.lfo_phase[c] + rate * tile_seconds * tiles as f64).fract();
                 continue;
@@ -1140,27 +1022,18 @@ impl Driver {
         }
     }
 
-    /// Freeze this channel's bend into the factor the backends multiply by.
-    /// The power lives here, on the host, once per event rather than once per
-    /// voice per tile.
+    /// Freeze this channel's bend into the factor the backends multiply by. \[70\]
     fn refresh_bend(&mut self, c: usize, rel: u32) {
-        let semitones = (self.bend_val[c] as f64 / 8192.0) * self.bend_range[c];
+        // [71]
+        let semitones = (self.bend_val[c] as f64 / 8192.0) * self.bend_range[c]
+            + self.coarse_tune[c]
+            + self.fine_tune[c] / 100.0;
         self.chan.set_bend(c as u8, bend_factor(semitones), rel);
     }
 
-    /// Fold CC7, CC11 and CC10 into the pair of gains a voice multiplies by.
-    ///
-    /// Volume and expression are squared, which is the General MIDI
-    /// definition: the controller is 40*log10(v/127) dB of attenuation, and
-    /// that is the same statement as an amplitude of (v/127)^2. Getting this
-    /// wrong is not subtle -- a linear reading makes every mid-level fader
-    /// setting several dB too loud.
-    ///
-    /// Pan is constant power, and multiplies whatever pan the region already
-    /// had rather than replacing it.
+    /// Fold CC7, CC11 and CC10 into the pair of gains a voice multiplies by. \[72\]
     fn refresh_gain(&mut self, c: usize, rel: u32) {
-        // 14-bit where a file bothers to send the fine half, 7-bit otherwise:
-        // with the LSB at zero these are exactly msb/127.
+        // [73]
         let fine = |msb: u8, lsb: u8| {
             if lsb == 0 {
                 msb as f32 / 127.0
@@ -1170,15 +1043,11 @@ impl Driver {
         };
         let v = fine(self.cc_volume[c], self.lsb_volume[c]);
         let e = fine(self.cc_expression[c], self.lsb_expression[c]);
-        // The soft pedal is continuous rather than a switch, and takes off up
-        // to 6 dB at the bottom of its travel. A real una corda also darkens
-        // the tone; that part is not modelled.
+        // [74]
         let soft = 1.0 - 0.5 * (self.cc_soft[c] as f32 / 127.0);
         let amp = (v * v) * (e * e) * soft;
         let theta = fine(self.cc_pan[c], self.lsb_pan[c]) * std::f32::consts::FRAC_PI_2;
-        // Centre has to come out at exactly one on both sides, or a file that
-        // sends a redundant "pan centre" would quietly drop 3 dB and stop the
-        // unity fast path.
+        // [75]
         let (l, r) = if self.cc_pan[c] == 64 && self.lsb_pan[c] == 0 {
             (1.0, 1.0)
         } else {

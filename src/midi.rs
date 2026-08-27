@@ -1,9 +1,4 @@
-//! Streaming SMF parser and track merger.
-//!
-//! Nothing here ever holds a whole MIDI file in memory. Each track keeps a
-//! 256 KiB window over its own chunk, and a min-heap merges the per-track
-//! cursors into one tick-ordered stream. A 40 GB black MIDI costs the same
-//! resident memory as a 4 KB one.
+//! Streaming SMF parser and track merger. \[1\]
 
 use anyhow::{bail, Context, Result};
 use std::cmp::Reverse;
@@ -21,10 +16,13 @@ pub enum Event {
     Cc { ch: u8, num: u8, val: u8 },
     Program { ch: u8, val: u8 },
     PitchBend { ch: u8, val: i16 },
+    /// Roland GS "USE FOR RHYTHM PART". `map` is 0 for a melodic part and 1 or \[2\]
+    DrumPart { ch: u8, map: u8 },
+    /// GM System On, GM System Off or GS Reset. Puts every channel back to the \[3\]
+    ResetParts,
     /// Microseconds per quarter note.
     Tempo(u32),
-    /// Anything the synth does not act on. Kept in the stream so callers can
-    /// count events without a second pass.
+    /// Anything the synth does not act on. Kept in the stream so callers can \[4\]
     Other,
 }
 
@@ -144,8 +142,7 @@ impl TrackReader {
             }
         };
 
-        // Running status: a data byte where a status byte was expected reuses
-        // the previous channel status and is itself the first data byte.
+        // [5]
         let first_data;
         if status < 0x80 {
             first_data = status;
@@ -159,8 +156,7 @@ impl TrackReader {
             if status < 0xF0 {
                 self.running = status;
             } else if status != 0xF7 && status != 0xF0 {
-                // Meta and realtime clear running status per the spec; many
-                // writers disagree, so only clear on meta.
+                // [6]
                 if status == 0xFF {
                     self.running = 0;
                 }
@@ -234,13 +230,45 @@ impl TrackReader {
                 }
                 0xF0 | 0xF7 => {
                     let len = self.varlen()?;
-                    self.skip(len)?;
-                    Some(Event::Other)
+                    // [7]
+                    let mut head = [0u8; 10];
+                    let n = len.min(head.len() as u64) as usize;
+                    for h in head.iter_mut().take(n) {
+                        *h = self.byte()?;
+                    }
+                    self.skip(len - n as u64)?;
+                    Some(sysex_event(&head[..n]))
                 }
                 _ => Some(Event::Other),
             },
         }
     }
+}
+
+/// Recognise the SysEx messages that change how a channel resolves. \[8\]
+fn sysex_event(p: &[u8]) -> Event {
+    // Roland GS DT1: 41 <dev> 42 12 <addr hi mid lo> <data..> <sum> F7.
+    if p.len() >= 8 && p[0] == 0x41 && p[2] == 0x42 && p[3] == 0x12 {
+        // [9]
+        if p[4] == 0x40 && p[5] & 0xF0 == 0x10 && p[6] == 0x15 {
+            let block = p[5] & 0x0F;
+            let ch = match block {
+                0 => 9,
+                1..=9 => block - 1,
+                _ => block,
+            };
+            return Event::DrumPart { ch, map: p[7] & 0x7F };
+        }
+        // GS Reset, address 40 00 7F, data 00.
+        if p[4] == 0x40 && p[5] == 0x00 && p[6] == 0x7F {
+            return Event::ResetParts;
+        }
+    }
+    // GM System On / Off: 7E <dev> 09 <01|02|03>.
+    if p.len() >= 4 && p[0] == 0x7E && p[2] == 0x09 && matches!(p[3], 0x01..=0x03) {
+        return Event::ResetParts;
+    }
+    Event::Other
 }
 
 /// Tick-ordered merge of every track in a standard MIDI file.
@@ -281,8 +309,7 @@ impl MidiStream {
             }
         };
 
-        // Walk the chunk list. Only the 8-byte headers are read, so this is a
-        // handful of seeks even on a 40 GB file.
+        // [10]
         let mut offset = 8 + hdr_len;
         let mut locs: Vec<(u64, u64)> = Vec::new();
         while offset + 8 <= file_len {
@@ -298,15 +325,7 @@ impl MidiStream {
             if &ch[0..4] == b"MTrk" {
                 locs.push((data_start, len));
             } else if len == 0 {
-                // An unrecognised tag with no body is not a chunk, and the
-                // walk must stop rather than step over it. Exporters pad the
-                // end of a file with zeros, and every 8 zero bytes then parse
-                // as one of these: one real 6.15 GB file carries 1.38 GB of
-                // padding after its last track, which is 172 million
-                // seek-and-read pairs at 8 bytes a step. It finishes
-                // eventually and it looks exactly like a hang -- one core
-                // busy, the disk idle, and nothing logged between the
-                // soundfont and the track count.
+                // [11]
                 let trailing = file_len - offset;
                 if trailing > 0 {
                     log::warn!(
@@ -357,10 +376,7 @@ impl MidiStream {
         })
     }
 
-    /// Next event in tick order, or None at the end of the file.
-    ///
-    /// Deliberately not an `Iterator`: the borrow of `self` that an iterator
-    /// would need conflicts with the per-track readers this pulls from.
+    /// Next event in tick order, or None at the end of the file. \[12\]
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<(u64, Event)> {
         let Reverse((tick, idx)) = self.heap.pop()?;
@@ -375,8 +391,7 @@ impl MidiStream {
     }
 }
 
-/// Converts ticks to absolute output frames, tracking tempo changes as they
-/// arrive in the merged stream.
+/// Converts ticks to absolute output frames, tracking tempo changes as they \[13\]
 #[derive(Debug, Clone)]
 pub struct TempoClock {
     division: Division,
@@ -430,12 +445,9 @@ impl TempoClock {
     }
 }
 
-// ---------------------------------------------------------------------------
-// writer, for generating test material
-// ---------------------------------------------------------------------------
+// [14]
 
-/// Minimal SMF writer. Only used by tests and the `gen-test-midi` CLI command,
-/// but it lives here so the format constants stay in one file.
+/// Minimal SMF writer. Only used by tests and the `gen-test-midi` CLI command, \[15\]
 pub struct MidiWriter {
     tracks: Vec<Vec<u8>>,
     ppq: u16,
@@ -506,3 +518,130 @@ fn write_varlen(buf: &mut Vec<u8>, mut v: u64) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Trailing padding must not be walked eight bytes at a time. \[16\]
+    #[test]
+    fn trailing_padding_does_not_stall_the_chunk_walk() {
+        let dir = std::env::temp_dir().join("kestrel_midi_padding");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("padded.mid");
+
+        let mut w = MidiWriter::new(960);
+        w.tempo_track(500_000);
+        for _ in 0..4 {
+            w.track(vec![(0, [0x90, 60, 90], 3), (480, [0x80, 60, 0], 3)]);
+        }
+        w.save(&path).unwrap();
+
+        let clean = std::fs::metadata(&path).unwrap().len();
+        // 16 MiB of zeros: 2M chunk headers if the walk steps over them.
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            f.write_all(&vec![0u8; 16 << 20]).unwrap();
+        }
+
+        let t0 = std::time::Instant::now();
+        let s = MidiStream::open(&path).unwrap();
+        let took = t0.elapsed();
+
+        assert_eq!(s.track_count, 5, "tempo track plus four");
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "opening a padded file took {took:?}; the walk is stepping through \
+             the padding rather than stopping at it"
+        );
+        assert!(std::fs::metadata(&path).unwrap().len() > clean);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A file that moves its drums with SysEx must not be read as melodic. \[17\]
+    #[test]
+    fn gs_rhythm_part_sysex_maps_blocks_to_the_right_channels() {
+        // (block, data) -> (channel index, map)
+        for (block, data, ch, map) in [
+            (0x00u8, 0x01u8, 9u8, 1u8),   // block 0 is channel 10
+            (0x01, 0x00, 0, 0),           // blocks 1-9 are channels 1-9
+            (0x09, 0x01, 8, 1),
+            (0x0A, 0x02, 10, 2),          // blocks A-F are channels 11-16
+            (0x0F, 0x01, 15, 1),
+        ] {
+            let msg = [0x41, 0x10, 0x42, 0x12, 0x40, 0x10 | block, 0x15, data, 0x00, 0xF7];
+            assert_eq!(
+                sysex_event(&msg),
+                Event::DrumPart { ch, map },
+                "block {block:#04x}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_resets_are_recognised_and_nothing_else_is() {
+        // GS Reset and GM System On.
+        assert_eq!(
+            sysex_event(&[0x41, 0x10, 0x42, 0x12, 0x40, 0x00, 0x7F, 0x00, 0x41, 0xF7]),
+            Event::ResetParts
+        );
+        assert_eq!(sysex_event(&[0x7E, 0x7F, 0x09, 0x01, 0xF7]), Event::ResetParts);
+        // [18]
+        assert_eq!(
+            sysex_event(&[0x41, 0x10, 0x42, 0x12, 0x40, 0x11, 0x02, 0x40, 0x00, 0xF7]),
+            Event::Other
+        );
+        assert_eq!(sysex_event(&[0x7F, 0x7F, 0x04, 0x01, 0x00, 0x7F, 0xF7]), Event::Other);
+        assert_eq!(sysex_event(&[0x41, 0x10]), Event::Other);
+        assert_eq!(sysex_event(&[]), Event::Other);
+    }
+
+    /// The head-and-skip read has to leave the cursor exactly at the end of the \[19\]
+    #[test]
+    fn a_sysex_longer_than_the_peek_buffer_does_not_desync_the_track() {
+        let dir = std::env::temp_dir().join("kestrel_midi_sysex");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sysex.mid");
+
+        // [20]
+        let mut track: Vec<u8> = Vec::new();
+        let mut ev = |delta: u8, bytes: &[u8]| {
+            track.push(delta);
+            track.extend_from_slice(bytes);
+        };
+        ev(0, &[0xF0, 0x05, 0x7E, 0x7F, 0x09, 0x01, 0xF7]);
+        let mut bulk = vec![0xF0, 40u8, 0x41, 0x10, 0x42, 0x12, 0x48, 0x00, 0x00];
+        bulk.extend(std::iter::repeat_n(0x00u8, 40 - 8));
+        bulk.push(0xF7);
+        ev(0, &bulk);
+        ev(0, &[0x90, 60, 90]);
+        ev(96, &[0x80, 60, 0]);
+        ev(0, &[0xFF, 0x2F, 0x00]);
+
+        let mut file: Vec<u8> = Vec::new();
+        file.extend_from_slice(b"MThd");
+        file.extend_from_slice(&6u32.to_be_bytes());
+        file.extend_from_slice(&[0, 0, 0, 1, 0x03, 0xC0]);
+        file.extend_from_slice(b"MTrk");
+        file.extend_from_slice(&(track.len() as u32).to_be_bytes());
+        file.extend_from_slice(&track);
+        std::fs::write(&path, &file).unwrap();
+
+        let mut s = MidiStream::open(&path).unwrap();
+        let mut got = Vec::new();
+        while let Some((tick, e)) = s.next() {
+            got.push((tick, e));
+        }
+        assert!(
+            got.contains(&(0, Event::ResetParts)),
+            "the 5-byte reset was not seen: {got:?}"
+        );
+        assert!(
+            got.contains(&(0, Event::NoteOn { ch: 0, key: 60, vel: 90 })),
+            "the note after the oversized SysEx was lost, so the skip left the \
+             cursor in the wrong place: {got:?}"
+        );
+        assert!(got.contains(&(96, Event::NoteOff { ch: 0, key: 60 })));
+        let _ = std::fs::remove_file(&path);
+    }
+}

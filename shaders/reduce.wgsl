@@ -1,14 +1,4 @@
-// Pass 3 of 4: reduce.
-//
-// Sums the per-workgroup partials into the stereo output block. One workgroup
-// per output sample; each thread takes a strided share of the partials and the
-// workgroup finishes with a fixed-order binary tree.
-//
-// The tree matters for more than speed. Summing a million voice contributions
-// sequentially in f32 accumulates error proportional to the term count; a tree
-// makes it proportional to log2 of the term count. Kahan compensation on the
-// per-thread partial sums is available for the cases where even that is not
-// enough.
+// [1]
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var<storage, read> partials: array<f32>;

@@ -1,12 +1,4 @@
-//! Minimal RIFF/WAVE reader and writer, plus a FLAC reading path.
-//!
-//! The RIFF half is written by hand rather than pulled in as a dependency
-//! because the SFZ loader needs the `smpl` chunk loop points, the writer needs
-//! to stream multi-gigabyte files without buffering them, and the tests need
-//! bit-exact comparison. FLAC is decoded by `claxon`, which is the one place
-//! that judgement did not hold: a correct FLAC decoder is a different order of
-//! work from a chunk walker, and its failure mode is quiet distortion rather
-//! than a loud parse error.
+//! Minimal RIFF/WAVE reader and writer, plus a FLAC reading path. \[1\]
 
 use anyhow::{bail, Context, Result};
 use std::fs::File;
@@ -46,9 +38,7 @@ impl SampleFormat {
     }
 }
 
-// ---------------------------------------------------------------------------
-// writer
-// ---------------------------------------------------------------------------
+// [2]
 
 /// Streaming WAVE writer. Sizes are patched into the header on `finish`.
 pub struct WavWriter {
@@ -135,9 +125,7 @@ impl WavWriter {
 
         let riff_size = 36u64 + self.data_bytes;
         if riff_size > u32::MAX as u64 {
-            // Loud, not silent: a >4 GiB render cannot be described by a plain
-            // RIFF header. The audio data is intact, but the size fields are
-            // saturated and some players will stop early.
+            // [3]
             log::error!(
                 "output exceeds 4 GiB ({} bytes); RIFF size fields saturated, \
                  use --format pcm16 or split the render",
@@ -162,17 +150,13 @@ impl Drop for WavWriter {
     }
 }
 
-// ---------------------------------------------------------------------------
-// reader
-// ---------------------------------------------------------------------------
+// [4]
 
 #[derive(Debug, Clone)]
 pub struct WavData {
     pub sample_rate: u32,
     pub channels: u16,
-    /// Deinterleaved to mono by taking the first channel if `channels > 1`.
-    /// The synth is a mono-sample engine; stereo SFZ samples are handled by
-    /// the caller splitting them into two regions.
+    /// Deinterleaved to mono by taking the first channel if `channels > 1`. \[5\]
     pub interleaved: Vec<f32>,
     /// From the `smpl` chunk, if present: (start, end) in frames.
     pub loop_points: Option<(u32, u32)>,
@@ -222,20 +206,13 @@ fn rd_tag(r: &mut impl Read) -> Result<[u8; 4]> {
     Ok(b)
 }
 
-/// Read a sample file, dispatching on its contents rather than on its name.
-///
-/// Sample libraries ship compressed samples under extensions of their own
-/// invention, so dispatching on the extension drops every region in such a
-/// library and renders silence rather than failing.
-/// libsndfile, which is what sfizz and most of the SFZ world load through,
-/// sniffs the magic number; so does this.
+/// Read a sample file, dispatching on its contents rather than on its name. \[6\]
 pub fn read(path: impl AsRef<Path>) -> Result<WavData> {
     let path = path.as_ref();
     let mut magic = [0u8; 4];
     {
         let mut f = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-        // A file too short to hold a magic number is not a container of any
-        // kind. Fall through so the RIFF path is the only place that says so.
+        // [7]
         let _ = f.read_exact(&mut magic);
     }
     match &magic {
@@ -245,11 +222,7 @@ pub fn read(path: impl AsRef<Path>) -> Result<WavData> {
     }
 }
 
-/// FLAC, whatever the file is called.
-///
-/// `claxon` hands back planar `i32` blocks at the stream's own bit depth, so
-/// the work here is the transpose to interleaved and the scale to `f32`. Both
-/// are worth a test: getting either wrong produces noise rather than an error.
+/// FLAC, whatever the file is called. \[8\]
 fn read_flac(path: &Path) -> Result<WavData> {
     let mut reader = claxon::FlacReader::open(path)
         .with_context(|| format!("opening {}", path.display()))?;
@@ -285,9 +258,7 @@ fn read_flac(path: &Path) -> Result<WavData> {
         buffer = block.into_buffer();
     }
 
-    // FLAC carries no `smpl` chunk. Loops come from the SFZ opcodes instead,
-    // except for the LOOPSTART/LOOPLENGTH tag pair, which is the only place a
-    // converted library can have put them.
+    // [9]
     let tag = |name: &str| -> Option<u32> { reader.get_tag(name).next()?.trim().parse().ok() };
     let loop_points = match (tag("LOOPSTART"), tag("LOOPLENGTH")) {
         (Some(start), Some(len)) => Some((start, start.saturating_add(len))),
@@ -345,8 +316,7 @@ fn read_riff(path: &Path) -> Result<WavData> {
                 let _block_align = rd_u16(&mut r)?;
                 bits = rd_u16(&mut r)?;
                 if tag == 0xFFFE && size >= 40 {
-                    // WAVE_FORMAT_EXTENSIBLE: the real tag is the first two
-                    // bytes of the sub-format GUID.
+                    // [10]
                     let _cb = rd_u16(&mut r)?;
                     let _valid_bits = rd_u16(&mut r)?;
                     let _mask = rd_u32(&mut r)?;
@@ -444,12 +414,7 @@ fn decode_samples(data: &[u8], tag: u16, bits: u16) -> Result<Vec<f32>> {
 mod tests {
     use super::*;
 
-    // ---- a minimal FLAC encoder, for fixtures ----------------------------
-    //
-    // VERBATIM subframes at 16 bits store raw samples and every field lands on
-    // a byte boundary, so no bit packing is needed. That is enough to exercise
-    // the parts of the FLAC path this crate owns: the magic-number dispatch,
-    // the planar-to-interleaved transpose, and the scale to `f32`.
+    // [11]
 
     fn crc8(d: &[u8]) -> u8 {
         let mut c = 0u8;
@@ -473,9 +438,7 @@ mod tests {
         c
     }
 
-    /// Block size the fixtures use. Deliberately smaller than any test's data,
-    /// so every fixture is several frames and the decode loop's accumulation
-    /// across blocks is exercised rather than just its first pass.
+    /// Block size the fixtures use. Deliberately smaller than any test's data, \[12\]
     const FIXTURE_BLOCK: usize = 32;
 
     /// One FLAC stream: STREAMINFO plus VERBATIM frames of `FIXTURE_BLOCK`.
@@ -501,9 +464,7 @@ mod tests {
 
         for (f, start) in (0..n).step_by(FIXTURE_BLOCK).enumerate() {
             let len = FIXTURE_BLOCK.min(n - start);
-            // Frame header: sync, fixed blocking, 16-bit block size at the end
-            // of the header, sample rate from STREAMINFO, independent
-            // channels, 16-bit samples.
+            // [13]
             let mut frame = vec![0xFF, 0xF8, 0x70, (((nch - 1) as u8) << 4) | 0x08];
             assert!(f < 128, "the fixture writes single-byte frame numbers");
             frame.push(f as u8); // UTF-8 coded frame number
@@ -530,11 +491,7 @@ mod tests {
         p
     }
 
-    /// The reported failure: FLAC samples under a library's own extension.
-    ///
-    /// Dispatching on the name rather than the contents skipped every region
-    /// in such a library, which renders as silence with only a `not a RIFF
-    /// file` warning to say why.
+    /// The reported failure: FLAC samples under a library's own extension. \[14\]
     #[test]
     fn flac_is_read_whatever_the_extension_is() {
         let data: Vec<i16> = (0..64).map(|i| (i * 512 - 16384) as i16).collect();
@@ -548,8 +505,7 @@ mod tests {
         std::fs::remove_file(&p).ok();
     }
 
-    /// The transpose from claxon's planar blocks, which is this crate's own
-    /// arithmetic and would read as noise rather than as an error if wrong.
+    /// The transpose from claxon's planar blocks, which is this crate's own \[15\]
     #[test]
     fn flac_stereo_interleaves_in_channel_order() {
         let l: Vec<i16> = (0..48).map(|i| (i * 100) as i16).collect();
@@ -566,8 +522,7 @@ mod tests {
         std::fs::remove_file(&p).ok();
     }
 
-    /// A file that is neither is still reported against RIFF, so there is one
-    /// message for "this is not a sample file" rather than three.
+    /// A file that is neither is still reported against RIFF, so there is one \[16\]
     #[test]
     fn unknown_magic_still_reports_as_riff() {
         let p = fixture("junk.wav", b"NOPE\x00\x00\x00\x00");

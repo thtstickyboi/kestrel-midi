@@ -1,0 +1,47 @@
+# Comments extracted from src/backend.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/backend.rs:1
+//! The interface the driver renders through.
+//!
+//! Deliberately narrow: the driver owns MIDI parsing, preset resolution and
+//! the gate table, and a backend only has to accept spawn commands and hand
+//! back mixed blocks. That is what lets the CPU reference and the GPU path be
+//! swapped under the same test.
+
+[2] src/backend.rs:23
+    /// Publish this block's note-offs: `meta` is the interleaved per-slot
+    /// `[base, index]` table and `frames` the exact frame of each one. See
+    /// `GateTable::off_frames` for why the frames themselves have to travel.
+
+[3] src/backend.rs:28
+    /// Publish this block's per-channel controller state. `rows` is
+    /// `tiles * BEND_CHANNELS * CHAN_FIELDS` words, tile-major: an 8.24 bend
+    /// factor and two f32 gains per channel. The two flags are false when that
+    /// control sat at unity for the whole block, which lets a backend skip the
+    /// work rather than multiply by one.
+
+[4] src/backend.rs:36
+    /// Install one copy of the region params table. Variant 0 is the
+    /// untouched one installed at construction; later ones are built when a
+    /// channel's CC71-CC75 reach a combination not seen before, which is rare
+    /// enough that this is a cold path.
+    /// `menv` is the matching modulation-envelope table, one entry per entry
+    /// of `data`, or a single default entry when the bank drives none.
+
+[5] src/backend.rs:49
+    /// Add voices to the pool. May steal or drop according to the configured
+    /// rule if the pool is full.
+
+[6] src/backend.rs:53
+    /// Render one block into `out`, interleaved stereo, `block_frames * 2`
+    /// samples. Advances every voice and compacts the pool.
+
+[7] src/backend.rs:61
+    /// Per-pass timings from the last block, for `--profile`. Empty when the
+    /// backend has nothing to report.

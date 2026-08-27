@@ -1,0 +1,100 @@
+# Comments extracted from src/wav.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/wav.rs:1
+//! Minimal RIFF/WAVE reader and writer, plus a FLAC reading path.
+//!
+//! The RIFF half is written by hand rather than pulled in as a dependency
+//! because the SFZ loader needs the `smpl` chunk loop points, the writer needs
+//! to stream multi-gigabyte files without buffering them, and the tests need
+//! bit-exact comparison. FLAC is decoded by `claxon`, which is the one place
+//! that judgement did not hold: a correct FLAC decoder is a different order of
+//! work from a chunk walker, and its failure mode is quiet distortion rather
+//! than a loud parse error.
+
+[2] src/wav.rs:49
+// ---------------------------------------------------------------------------
+// writer
+// ---------------------------------------------------------------------------
+
+[3] src/wav.rs:138
+            // Loud, not silent: a >4 GiB render cannot be described by a plain
+            // RIFF header. The audio data is intact, but the size fields are
+            // saturated and some players will stop early.
+
+[4] src/wav.rs:165
+// ---------------------------------------------------------------------------
+// reader
+// ---------------------------------------------------------------------------
+
+[5] src/wav.rs:173
+    /// Deinterleaved to mono by taking the first channel if `channels > 1`.
+    /// The synth is a mono-sample engine; stereo SFZ samples are handled by
+    /// the caller splitting them into two regions.
+
+[6] src/wav.rs:225
+/// Read a sample file, dispatching on its contents rather than on its name.
+///
+/// Sample libraries ship compressed samples under extensions of their own
+/// invention, so dispatching on the extension drops every region in such a
+/// library and renders silence rather than failing.
+/// libsndfile, which is what sfizz and most of the SFZ world load through,
+/// sniffs the magic number; so does this.
+
+[7] src/wav.rs:237
+        // A file too short to hold a magic number is not a container of any
+        // kind. Fall through so the RIFF path is the only place that says so.
+
+[8] src/wav.rs:248
+/// FLAC, whatever the file is called.
+///
+/// `claxon` hands back planar `i32` blocks at the stream's own bit depth, so
+/// the work here is the transpose to interleaved and the scale to `f32`. Both
+/// are worth a test: getting either wrong produces noise rather than an error.
+
+[9] src/wav.rs:288
+    // FLAC carries no `smpl` chunk. Loops come from the SFZ opcodes instead,
+    // except for the LOOPSTART/LOOPLENGTH tag pair, which is the only place a
+    // converted library can have put them.
+
+[10] src/wav.rs:348
+                    // WAVE_FORMAT_EXTENSIBLE: the real tag is the first two
+                    // bytes of the sub-format GUID.
+
+[11] src/wav.rs:447
+    // ---- a minimal FLAC encoder, for fixtures ----------------------------
+    //
+    // VERBATIM subframes at 16 bits store raw samples and every field lands on
+    // a byte boundary, so no bit packing is needed. That is enough to exercise
+    // the parts of the FLAC path this crate owns: the magic-number dispatch,
+    // the planar-to-interleaved transpose, and the scale to `f32`.
+
+[12] src/wav.rs:476
+    /// Block size the fixtures use. Deliberately smaller than any test's data,
+    /// so every fixture is several frames and the decode loop's accumulation
+    /// across blocks is exercised rather than just its first pass.
+
+[13] src/wav.rs:504
+            // Frame header: sync, fixed blocking, 16-bit block size at the end
+            // of the header, sample rate from STREAMINFO, independent
+            // channels, 16-bit samples.
+
+[14] src/wav.rs:533
+    /// The reported failure: FLAC samples under a library's own extension.
+    ///
+    /// Dispatching on the name rather than the contents skipped every region
+    /// in such a library, which renders as silence with only a `not a RIFF
+    /// file` warning to say why.
+
+[15] src/wav.rs:551
+    /// The transpose from claxon's planar blocks, which is this crate's own
+    /// arithmetic and would read as noise rather than as an error if wrong.
+
+[16] src/wav.rs:569
+    /// A file that is neither is still reported against RIFF, so there is one
+    /// message for "this is not a sample file" rather than three.

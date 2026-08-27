@@ -1,0 +1,475 @@
+# Comments extracted from src/driver.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/driver.rs:1
+//! Block-at-a-time render driver.
+//!
+//! Owns the MIDI stream, the tempo clock, channel state and the gate table,
+//! and feeds a `Backend` one block of spawn commands at a time. Both the CPU
+//! reference and the GPU path go through this, which is what makes the null
+//! test meaningful: the two backends see byte-identical input.
+
+[2] src/driver.rs:17
+/// Time strata a saturated block is cut into before ranking admission.
+///
+/// Bounds how far the admitted set can drift in time while leaving each
+/// stratum wide enough that ranking inside it is a real choice. At 64 a
+/// 4096-frame block is cut into 64-frame pieces, 1.3 ms apiece.
+
+[3] src/driver.rs:26
+/// A selected RPN that is not one this synth acts on, including the null RPN
+/// and anything reached through NRPN. Parked outside the 14-bit range so it
+/// can never compare equal to RPN 0.
+
+[4] src/driver.rs:31
+/// How far CC71-CC75 are quantised before they become a params variant.
+///
+/// Two steps of a controller, so 64 levels. CC74 spans +/-2400 cents across
+/// its 128 values, which makes a quantised step about 76 cents of cutoff --
+/// well under a semitone, and inaudible as a step. At the eight steps this
+/// started with, a step was 300 cents and a move from CC74=64 to CC74=70
+/// landed in the same bucket and did nothing at all.
+
+[5] src/driver.rs:40
+/// What this synth does with a controller number.
+///
+/// Every number from 0 to 127 has an entry, because the alternative -- a match
+/// arm with a `_ => {}` at the end -- is how a soundfont ends up sounding
+/// wrong for a session with nothing to show for it. `kestrel info` prints
+/// this for the controllers a file actually sends, so "is this doing
+/// anything" is answerable without reading source.
+
+[6] src/driver.rs:53
+    /// Would change what is heard, and is not implemented. The string says
+    /// what it would take.
+
+[7] src/driver.rs:138
+/// How long to keep rendering after the last MIDI event before giving up on
+/// voices that will not die, in seconds.
+
+[8] src/driver.rs:146
+    /// Times a sound-controller change had to reuse an approximate copy
+    /// because the budget was spent. Any of these is audible as the
+    /// controller appearing to do nothing.
+
+[9] src/driver.rs:150
+    /// Distinct quantised states the file asked for, whether or not they
+    /// were granted.
+
+[10] src/driver.rs:158
+    /// Note-ons the block could not admit. Counted here rather than in the
+    /// backends because admission now happens before a voice is built, so a
+    /// backend never sees the ones that were refused.
+
+[11] src/driver.rs:165
+    /// Samples the final clamp had to pull back to full scale. Every run of
+    /// these is a squared-off waveform top, which is what a click sounds like.
+
+[12] src/driver.rs:169
+    // ---- last block only, for the per-block diagnostic ------------------
+    /// Voices alive when this block's admission decision was taken.
+
+[13] src/driver.rs:178
+    /// Summed opening amplitude of every layer the block queued, and of the
+    /// subset it admitted. Level follows the second of these, so if anything
+    /// moves at the block rate it moves here first.
+
+[14] src/driver.rs:185
+/// Pack a note-on into one word: everything `build_layer` and `SpawnCmd` will
+/// need if the note survives admission, minus the ordinal, which is a u32 of
+/// its own because it does not fit alongside the rest.
+///
+/// `rel` is bounded by `block_frames` and `variant` by the 64 params slots;
+/// `Config::validate` holds both inside the widths used here rather than
+/// leaving the masks to truncate silently.
+
+[15] src/driver.rs:215
+/// One layer a block might admit, before anything has been built for it.
+///
+/// `key` is `voice::admit_key`, which no longer has a block-relative field,
+/// so it is final as soon as the candidate is built.
+
+[16] src/driver.rs:222
+    /// Index into `notes`, or `DEFERRED` for a voice built in an earlier block
+    /// whose delay lands in this one.
+
+[17] src/driver.rs:225
+    /// The region to build, so materialising never has to preview again. For a
+    /// `DEFERRED` candidate this is the index into `deferred_now` instead.
+
+[18] src/driver.rs:228
+    /// Note id, as an offset from `block_first_id`. Unused when `DEFERRED`,
+    /// whose command already carries its id.
+
+[19] src/driver.rs:236
+/// Which channels are drum parts before a file says anything. Channel 10 --
+/// index 9 -- by the General MIDI convention, and nothing else.
+
+[20] src/driver.rs:262
+    /// Last program change per channel, kept because the drum-part SysEx can
+    /// move a channel between the melodic banks and bank 128 without a program
+    /// change following it, and the preset has to be re-resolved when it does.
+
+[21] src/driver.rs:266
+    /// GS part type: 0 melodic, 1 or 2 for the two drum maps. Channel 10 is
+    /// drums by the GM convention and the rest are not, until a `DrumPart`
+    /// SysEx says otherwise.
+
+[22] src/driver.rs:275
+    /// Channel coarse tuning, RPN 2, in semitones. The wire value is an MSB
+    /// centred on 64, so this is `msb - 64` and the range is +/-64 semitones.
+
+[23] src/driver.rs:278
+    /// Channel fine tuning, RPN 1, in cents. A 14-bit value centred on 8192
+    /// spanning +/-100 cents.
+
+[24] src/driver.rs:281
+    /// The raw 14-bit value behind it, kept so an MSB and an LSB written at
+    /// different times compose rather than replacing one another.
+
+[25] src/driver.rs:290
+    /// CC71 resonance, CC72 release, CC73 attack, CC74 brightness, CC75 decay.
+    /// Quantised by `SOUND_CC_SHIFT` before they become a params variant, so
+    /// a slow sweep does not demand a new copy of the table per event.
+
+[26] src/driver.rs:294
+    /// CC1 modulation depth, CC76 vibrato rate, CC77 vibrato depth, CC92
+    /// tremolo depth, CC67 soft pedal.
+
+[27] src/driver.rs:301
+    /// Fine halves for the four controllers that have one worth reading. A
+    /// file almost never sends them, but declaring a controller "applied" and
+    /// then dropping half its resolution is the same silence this whole table
+    /// exists to stop.
+
+[28] src/driver.rs:309
+    /// LFO phase per channel, in cycles, carried across blocks so vibrato does
+    /// not restart every 85 ms.
+
+[29] src/driver.rs:318
+    /// Bitmask of variants any channel has pointed at during this block. A
+    /// variant referenced by a row already written cannot be rebuilt under it.
+
+[30] src/driver.rs:326
+    /// Set when a voice queued this block was born under a non-zero variant.
+    /// Its copy of the params table has to stay reachable even if no published
+    /// row names it, which happens when a channel moves onto a variant and
+    /// back off inside a single gate tile.
+
+[31] src/driver.rs:341
+    /// This block's note-ons, one packed entry each, plus their ordinals.
+    ///
+    /// A block may hold a hundred times more note-ons than the pool can admit
+    /// -- 98.5M against 1M on one real file -- and admission
+    /// cannot decide anything until the whole block is in, so *something* per
+    /// note-on has to be remembered. These two are that something, at 12 bytes
+    /// a note-on against the 152 a materialised `SpawnCmd` used to cost in the
+    /// driver and the backend together.
+
+[32] src/driver.rs:353
+    /// This block's share of the deferred queue, already built. Kept apart from
+    /// `spawn_buf` so that admission ranks over one list and `spawn_buf` can be
+    /// filled with the winners alone.
+
+[33] src/driver.rs:359
+    /// Note id of this block's first candidate. Ids are handed out in
+    /// candidate order, so a candidate's id is this plus its index and does
+    /// not have to be stored.
+
+[34] src/driver.rs:453
+        // SF2 files put their drum kits in bank 128. Which channels are drum
+        // parts is channel 10 by the GM convention, plus whatever the GS
+        // rhythm-part SysEx has said since.
+
+[35] src/driver.rs:483
+        // Whatever each channel is already on stays referenced for the whole
+        // block, because `end_block` fills every unwritten row with it.
+
+[36] src/driver.rs:497
+        // Voices whose delay landed them in this block. They are already
+        // built, so they enter admission as candidates that point at
+        // `deferred_now` rather than at a note-on to be previewed.
+
+[37] src/driver.rs:535
+                // Tempo applies from its own tick, so it must be consumed even
+                // if it lands past the block boundary check below.
+
+[38] src/driver.rs:557
+                // Not `all_notes_off`: a file that ends with the pedal still
+                // down would otherwise leave every held note un-released and
+                // ringing into the tail until it timed out.
+
+[39] src/driver.rs:580
+            // A voice born under a variant no published row names still has to
+            // be handed back to the rows on its second gate tile, so the
+            // controller path stays on for it.
+
+[40] src/driver.rs:586
+        // Admission, on candidates rather than on built voices.
+        //
+        // `take` is what the backend would have kept anyway; deciding it here
+        // means the block builds that many voices instead of building every
+        // note-on and throwing most of them away. On a block of 98.5M note-ons
+        // against a 1M pool that is the difference between 15 GiB of host
+        // memory and a few hundred megabytes.
+
+[41] src/driver.rs:604
+                // Thinned across the block rather than truncated, so a
+                // saturated block keeps its timing instead of being heard at
+                // its start and silent at its end. `spawn_pick(i, ..) >= i`, so
+                // compacting forwards in place never overwrites a candidate
+                // still to be read.
+
+[42] src/driver.rs:617
+        // After the rule has reordered, not before: measuring the first
+        // `take` in arrival order reports the same number for every rule.
+
+[43] src/driver.rs:626
+        // `want`, not what was admitted. The counter has always meant "voices
+        // this block queued", dropped ones included, and changing that
+        // silently would move a number people read off the summary line.
+
+[44] src/driver.rs:639
+        // Always last, so nothing leaves the renderer out of range whatever
+        // ran before it. In brickwall mode it should never fire; the count is
+        // reported so that "should" is checkable rather than assumed.
+        //
+        // `clamp_output` is the one escape hatch: `--limiter off --format
+        // float32` asks for the raw mix, and clamping it to [-1, 1] answers a
+        // different question than the one that was asked. Everything else --
+        // any integer format, any limiter mode -- still goes through here.
+
+[45] src/driver.rs:709
+            // Events are handled in stream order, so this is the variant in
+            // force at the note-on's own frame -- which the tile row does not
+            // yet carry if the controller arrived on this very tick.
+
+[46] src/driver.rs:721
+            // As with `variant`: a bend or a gain change on this note's own
+            // tick has not reached its tile's row yet, so it reads the next.
+
+[47] src/driver.rs:727
+    /// Move the `take` best candidates to the front, ranked *within* time
+    /// strata rather than across the whole block.
+    ///
+    /// **Ranking across the whole block instead is a defect**, not a
+    /// simplification: the top `take` by amplitude has no reason to be spread
+    /// across the block, and loud notes cluster in time -- chords, downbeats --
+    /// so the admitted set piles up at the block's opening and leaves its tail
+    /// thin. That shipped in 0.2.0 and was audible; see the development notes.
+    ///
+    /// The strata decide *when*, exactly as `spawn_pick` would; the key decides
+    /// *which candidate within each stratum*. Both properties at once rather
+    /// than one traded for the other.
+    ///
+    /// Stratum `s` is `[s*want/strata, (s+1)*want/strata)` with a proportional
+    /// quota each. The count trades the two properties off: one stratum per
+    /// output slot over-constrains the choice and ranking degenerates, while
+    /// too few brings back the clustering. At 64 a 4096-frame block is cut into
+    /// 64-frame pieces -- 1.3 ms, far too short to hear as clustering -- and
+    /// each picks its own top share. The development notes have the comparison.
+
+[48] src/driver.rs:765
+            // Left in partition order, and **do not sort it**. The order
+            // decides which voice lands in which pool slot and therefore the
+            // summation order of the mixdown, so it has to be deterministic --
+            // but `select_nth_unstable` already is. "Unstable" means it does
+            // not preserve the input order of equal elements, not that it is
+            // randomised, and pdqsort has no randomness in it. Sorting the
+            // prefix as well cost 11% of a render for nothing; the
+            // development notes have that measurement and why it stayed
+            // hidden for so long.
+
+[49] src/driver.rs:775
+            // Slide the winners down. `olo <= lo` because `take <= want`, so
+            // this never reaches into a stratum still to be visited.
+
+[50] src/driver.rs:784
+    /// Build the voices for the first `take` candidates, appending them to
+    /// `spawn_buf` in candidate order.
+    ///
+    /// This is the point of the whole exercise: `build_layer` runs here and
+    /// nowhere else, so a block that queued a hundred million note-ons and can
+    /// admit a million builds a million voices rather than a hundred million.
+
+[51] src/driver.rs:801
+                // The preview said this layer exists, so this is unreachable
+                // unless the two have drifted apart.
+
+[52] src/driver.rs:806
+            // A delayed layer whose start still lands inside this block is a
+            // candidate like any other, but it starts late.
+
+[53] src/driver.rs:833
+                // Preview rather than build. A saturated block cannot admit
+                // most of these, and building a voice for one that is about to
+                // be dropped is the whole cost this exists to remove.
+
+[54] src/driver.rs:838
+                // The seed is the id the first layer of this note-on is
+                // about to be given. It is handed out in candidate order from
+                // a counter that only the MIDI advances, so it is stable
+                // across runs and independent of admission -- which is what
+                // `lorand`/`hirand` need to stay deterministic.
+
+[55] src/driver.rs:855
+                    // Ids are handed out here, in candidate order, exactly as
+                    // they were when this loop built voices -- so a candidate's
+                    // id is `block_first_id` plus its index and never has to be
+                    // stored. A delayed layer takes one too, because it did
+                    // before and the sequence has to be the same either way.
+
+[56] src/driver.rs:866
+                            // Lands in a later block, so it is not this block's
+                            // to admit. Build it now and park it; delayed voices
+                            // are rare enough that this is not the hot path.
+
+[57] src/driver.rs:872
+                                // A voice parked for a later block is born in
+                                // that block's tile zero, whose row already
+                                // carries the state this controller set, so it
+                                // needs no bias.
+
+[58] src/driver.rs:912
+                    // A variant a queued voice was born under has to stay
+                    // reachable for the whole block whether or not the voice
+                    // survives admission, which is what the old code did by
+                    // pinning at queue time.
+
+[59] src/driver.rs:948
+                    // Data entry, and the increment/decrement pair that walks
+                    // the same value. Only RPN 0, pitch bend sensitivity, is
+                    // acted on; selecting an NRPN parks `rpn_sel` outside the
+                    // 14-bit range so a file's NRPN data entry cannot be
+                    // mistaken for a bend range.
+
+[60] src/driver.rs:961
+                    // RPN 1, channel fine tuning: 14 bits centred on 8192,
+                    // spanning a semitone either way. The MSB alone is the
+                    // usual case and lands on `(msb - 64) * 128` internally.
+
+[61] src/driver.rs:974
+                    // RPN 2, channel coarse tuning: MSB only, centred on 64,
+                    // one semitone per step. A file that transposes a part two
+                    // octaves up and bends it two octaves back down nets to
+                    // zero -- and a synth that reads only the bend plays it two
+                    // octaves flat, which is what this used to do.
+
+[62] src/driver.rs:1030
+                        // The gate side keeps the note bookkeeping straight --
+                        // those notes really have ended -- and the channel row
+                        // carries the hard cut, because CC120 must not wait for
+                        // a release the way CC123 does.
+
+[63] src/driver.rs:1038
+                    // Every channel mode message below carries an all-notes-off
+                    // with it, which is the part that changes what is heard.
+                    // The mode itself -- omni, and mono against poly voice
+                    // allocation -- is not implemented; see the README.
+
+[64] src/driver.rs:1072
+    /// Take one of CC71-CC75 and move the channel onto whichever copy of the
+    /// params table matches its new combination, building that copy if this is
+    /// the first time the combination has come up.
+    ///
+    /// Values are quantised by `SOUND_CC_SHIFT` first. A file that sweeps CC74
+    /// would otherwise ask for a new full rebuild of the table on every event,
+    /// and the table can be tens of thousands of entries. See that constant
+    /// for why the step is where it is -- it was eight steps once, and that
+    /// was coarse enough to swallow a controller move whole. Past
+    /// `max_param_variants` a channel takes the nearest copy that already
+    /// exists rather than failing or thrashing.
+
+[65] src/driver.rs:1109
+            // Out of slots. Rebuilding a stale one is much better than
+            // approximating, because an approximation is silent: this file
+            // asks for 67 distinct states, and approximating meant most of it
+            // rendered with whatever the first sixteen happened to be.
+            //
+            // A slot is only safe to rebuild if no channel has pointed at it
+            // during this block, since rows already written for earlier tiles
+            // still name it and the device would read the new contents under
+            // the old reference. Voices always read their channel's current
+            // variant, so nothing older than this block can be holding one.
+
+[66] src/driver.rs:1158
+    /// Queue the build of variant `i` from channel `c`'s current controllers.
+    /// Built at the end of the block rather than here: a table can be tens of
+    /// thousands of entries and the event loop is not the place for it.
+
+[67] src/driver.rs:1174
+    /// CC121, Reset All Controllers.
+    ///
+    /// **Resets far less than the name suggests.** The MMA specification lists
+    /// what it clears -- modulation, expression, the pedals, the RPN/NRPN
+    /// selector, the pitch wheel, and pressure -- and everything else a channel
+    /// carries survives. Bank, program, channel volume, pan and pitch bend
+    /// *sensitivity* are all explicitly not on that list.
+    ///
+    /// This used to reset all of them, and it is wrong by a lot on real files:
+    /// a file that sets a wide bend range through RPN 0 and then sends CC121 --
+    /// ordinary practice -- had its bends collapse from 24 semitones to 2, and
+    /// a channel turned down to CC7 = 40 jumped back to full scale. Checked
+    /// against BASSMIDI both ways; the tables are in
+    /// the development notes.
+    ///
+    /// The sound controllers (CC70-79) are not on the specification's list
+    /// either and are left alone here. That half is reasoned from the spec
+    /// rather than measured; this file sends none of them.
+
+[68] src/driver.rs:1207
+    /// Lay the vibrato and tremolo LFOs over the controller rows.
+    ///
+    /// Both are per channel, not per voice, so they can be evaluated on the
+    /// host: every voice on a channel shares one curve. That is the whole
+    /// reason modulation is cheap here. It is sampled once per gate tile, 32
+    /// frames or 0.67 ms, which is a 1.5 kHz sample rate for a curve that
+    /// moves at 5 Hz.
+    ///
+    /// Depth is the GM default of +/-50 cents at full wheel, scaled by CC77.
+    /// Rate is 5 Hz at CC76's centre and spans roughly 0.5 to 14 Hz.
+
+[69] src/driver.rs:1227
+                // Keep the phase running anyway, so switching the wheel on
+                // mid-note does not jump the curve to wherever it left off.
+
+[70] src/driver.rs:1250
+    /// Freeze this channel's bend into the factor the backends multiply by.
+    /// The power lives here, on the host, once per event rather than once per
+    /// voice per tile.
+
+[71] src/driver.rs:1254
+        // Bend, coarse tuning and fine tuning are three separate controls that
+        // all end up as one pitch multiply. They are summed in semitones here
+        // rather than applied in sequence, so the arithmetic stays exact.
+
+[72] src/driver.rs:1263
+    /// Fold CC7, CC11 and CC10 into the pair of gains a voice multiplies by.
+    ///
+    /// Volume and expression are squared, which is the General MIDI
+    /// definition: the controller is 40*log10(v/127) dB of attenuation, and
+    /// that is the same statement as an amplitude of (v/127)^2. Getting this
+    /// wrong is not subtle -- a linear reading makes every mid-level fader
+    /// setting several dB too loud.
+    ///
+    /// Pan is constant power, and multiplies whatever pan the region already
+    /// had rather than replacing it.
+
+[73] src/driver.rs:1274
+        // 14-bit where a file bothers to send the fine half, 7-bit otherwise:
+        // with the LSB at zero these are exactly msb/127.
+
+[74] src/driver.rs:1285
+        // The soft pedal is continuous rather than a switch, and takes off up
+        // to 6 dB at the bottom of its travel. A real una corda also darkens
+        // the tone; that part is not modelled.
+
+[75] src/driver.rs:1291
+        // Centre has to come out at exactly one on both sides, or a file that
+        // sends a redundant "pan centre" would quietly drop 3 dB and stop the
+        // unity fast path.

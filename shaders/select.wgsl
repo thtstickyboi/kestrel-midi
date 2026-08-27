@@ -1,15 +1,4 @@
-// Voice stealing: find the k-th smallest steal key in the pool.
-//
-// The key is `steal_key` in common.wgsl -- the note id, or the envelope level
-// with the id beneath it as a tiebreak. Either way it is a total order with no
-// ties, so the victim set is a pure function of the MIDI file and never of
-// scheduling. Getting there needs a k-th-smallest selection over it, done as an
-// MSB-first radix select: eight rounds of a 256-bin histogram, each round
-// pinning one more byte of the answer.
-//
-// Integer atomics are used for the histogram. That is not the float-atomic
-// problem ruled out for the mixdown: integer addition is exact and
-// order-independent, so the histogram is the same every run.
+// [1]
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var<storage, read> voices: array<u32>;

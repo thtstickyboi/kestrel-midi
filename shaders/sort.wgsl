@@ -1,26 +1,4 @@
-// Voice pool sort, run as part of compaction.
-//
-// Why this exists, measured rather than assumed. With a million voices on an
-// RTX 5060 the render pass spends 86 ms of its 147 ms inside the two sample
-// fetches, and the size of the sample pool barely moves that number: a 4 MiB
-// pool costs 145 ms and a 512 MiB pool 147 ms. So the cost is not DRAM
-// bandwidth, it is the rate at which the L1 can serve distinct 32-byte
-// sectors. Thirty-two lanes of a warp reading thirty-two unrelated samples
-// need thirty-two sectors; thirty-two lanes reading neighbouring positions in
-// the same sample need two or three.
-//
-// So the key is (region, envelope stage, phase bucket): region first so a warp
-// shares a sample, stage next to cut branch divergence, and a coarsened phase
-// last so the lanes that share a sample also share cache lines.
-//
-// Least-significant-bit-first, one bit per pass, each pass a stable binary
-// split built on the same prefix sum the compaction uses. One bit at a time is
-// more passes than a byte at a time would be, but each pass only moves an
-// 8-byte (key, index) pair, and the whole sort costs a couple of milliseconds
-// against a render pass measured in hundreds.
-//
-// Determinism: a binary split is stable by construction and uses no atomics,
-// so the permutation is a pure function of the pool contents.
+// [1]
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var<storage, read_write> pairs_in: array<vec2<u32>>;
@@ -56,8 +34,7 @@ fn build_keys(
     loop {
         if (i >= live) { break; }
         let stage = voices[F_ENV_STAGE * c + i];
-        // Dead voices get a region one past the last real one, so they sort
-        // to the end and the gather simply stops before reaching them.
+        // [2]
         var region = u.sort_dead_region;
         if (stage != ENV_DEAD) {
             region = min(voices[F_REGION * c + i], u.sort_dead_region - 1u);
@@ -79,9 +56,7 @@ fn scan_local(
 ) {
     let bit = state[S_SORT_BIT];
     let live = state[S_LIVE];
-    // Same grid-stride over blocks as `compact.wgsl::scan_local`, and for the
-    // same reason: the pool may hold more WG-sized blocks than one dispatch
-    // dimension can address.
+    // [3]
     let blocks = (live + WG - 1u) / WG;
     var block = wgid.x;
     loop {
@@ -179,9 +154,7 @@ fn split(
     }
 }
 
-/// Move the surviving voices into their sorted slots. One copy of the pool per
-/// block: this does the compaction and the reordering together, because the
-/// permutation already has the dead voices pushed past `S_LIVE_NEW`.
+/// Move the surviving voices into their sorted slots. One copy of the pool per \[4\]
 @compute @workgroup_size({{WG}})
 fn gather(
     @builtin(global_invocation_id) gid: vec3<u32>,
@@ -199,8 +172,7 @@ fn gather(
             for (var f = 0u; f < VOICE_FIELDS; f = f + 1u) {
                 voices_out[f * c + j] = voices[f * c + src];
             }
-            // Start offsets and the born-under variant only apply to the
-            // block a voice was born in.
+            // [5]
             voices_out[F_START_REL * c + j] = 0u;
             voices_out[F_BORN_VARIANT * c + j] = 0u;
             voices_out[F_STOP_REL * c + j] = 0u;

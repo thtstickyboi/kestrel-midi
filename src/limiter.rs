@@ -1,14 +1,4 @@
-//! Soft limiter, ported from the one OmniConverter already ships.
-//!
-//! `OmniConverter/Extensions/Audio/Limiter.cs`, originally from Kiva by
-//! Arduano. Black MIDI mixes clip constantly, and matching the curve the
-//! existing pipeline uses means a render through this backend sits at the same
-//! level as one through BASS or XSynth.
-//!
-//! Runs on the mixed stereo block on the host, not per voice, so it costs
-//! nothing at a million voices. State carries across blocks, and the update is
-//! a pure function of the previous state and the input, so it does not disturb
-//! bit-exact reproducibility.
+//! Soft limiter, ported from the one OmniConverter already ships. \[1\]
 
 #[derive(Debug, Clone)]
 pub struct Limiter {
@@ -114,9 +104,7 @@ impl Limiter {
     }
 }
 
-/// Hard clamp, always applied last so nothing leaves the renderer out of range.
-/// Returns how many samples it had to move, which is the number of samples that
-/// would otherwise have left the renderer clipped.
+/// Hard clamp, always applied last so nothing leaves the renderer out of range. \[2\]
 pub fn clamp_block(buf: &mut [f32]) -> u64 {
     let mut n = 0u64;
     for v in buf.iter_mut() {
@@ -128,24 +116,16 @@ pub fn clamp_block(buf: &mut [f32]) -> u64 {
     n
 }
 
-// ---------------------------------------------------------------------------
-// brickwall true-peak limiter
-// ---------------------------------------------------------------------------
+// [3]
 
 /// Which limiter runs on the mixed block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LimiterMode {
     /// No limiting. `clamp_block` still runs, so loud material hard-clips.
     Off,
-    /// The port of the realtime limiter OmniConverter ships, above.
-    ///
-    /// **Deprecated for rendering.** It does not bound its own output, so
-    /// `clamp_block` hard-clips behind it, and its 1/3 s release drags the
-    /// level down after every loud moment. Kept only for level-matching a
-    /// render against BASS or XSynth, which is the one thing it is better at.
+    /// The port of the realtime limiter OmniConverter ships, above. \[4\]
     Omni,
-    /// Lookahead true-peak brickwall. Guarantees the output never exceeds the
-    /// ceiling, and only pulls the gain down around the peak that needs it.
+    /// Lookahead true-peak brickwall. Guarantees the output never exceeds the \[5\]
     Brickwall,
 }
 
@@ -164,52 +144,15 @@ impl LimiterMode {
 const TP_PHASES: usize = 4;
 const TP_TAPS: usize = 8;
 
-/// Lookahead true-peak brickwall limiter.
-///
-/// The trouble with the follower above is that it is a *feedback* design: it
-/// sees a peak only once the peak has gone past, so it needs a long release to
-/// avoid distorting, and that release is what drags the level down for a third
-/// of a second after every loud moment. This one delays the audio and computes
-/// the gain from what is about to arrive, so a 1 ms transient costs about a
-/// millisecond of gain reduction and the material after it is left alone.
-///
-/// # Why the ceiling cannot be exceeded
-///
-/// Write `d[s]` for the detected true peak of input frame `s`, `L` for the
-/// lookahead, and let the output at time `t` be input frame `t - L`. Then:
-///
-/// * `env[t]` is the largest `d[s]` for `s` in `[t-L, t]`, a sliding maximum.
-/// * `gr[t]` is `ceiling / env[t]`, clamped to at most 1.
-/// * `ma[t]` is the mean of `gr[s]` over the same window, and the gain that
-///   gets applied is never above `ma[t]`.
-///
-/// For every `s` in that window, the window of `env[s]` is `[s-L, s]`, which
-/// contains `t-L`. So `env[s]` is at least `d[t-L]`, and every `gr[s]` in the
-/// average is therefore at most `ceiling / d[t-L]`. A mean of values that are
-/// all at most that is at most that, so the emitted sample cannot exceed the
-/// ceiling. The averaging is what keeps the gain continuous when a peak enters
-/// the window instead of stepping, and the argument says it costs nothing in
-/// safety to have it.
-///
-/// The detector is a symmetric FIR with its own group delay `g`, so what it
-/// reports at `s` describes input `s - g`. The audio is therefore delayed by
-/// `L + g` rather than `L`, which is exactly what makes `t - L - g` fall inside
-/// every window in the average. Getting that wrong does not fail quietly: with
-/// the delay left at `L` this let a spike through at 4.6x the ceiling.
-///
-/// The release is program dependent, in two stages; see `process`.
-///
-/// Costs `L + g` frames of latency; the render comes out delayed by that much.
+/// Lookahead true-peak brickwall limiter. \[6\]
 pub struct Brickwall {
     ceiling: f64,
     look: usize,
     release_coef: f64,
-    /// Attack and release coefficients of the sustained stage. Both zero when
-    /// the stage is disabled, which makes it a plain single-stage limiter.
+    /// Attack and release coefficients of the sustained stage. Both zero when \[7\]
     sustain_atk: f64,
     sustain_rel: f64,
-    /// Gain the sustained stage is holding: a slow envelope of the
-    /// requirement, in both directions, so brief peaks barely move it.
+    /// Gain the sustained stage is holding: a slow envelope of the \[8\]
     g_slow: f64,
     /// Gain the fast stage is holding, on top of the sustained one.
     g_fast: f64,
@@ -228,14 +171,13 @@ pub struct Brickwall {
     hist: [[f64; TP_TAPS]; 2],
     /// Polyphase coefficients, indexed by phase then tap.
     poly: [[f64; TP_TAPS]; TP_PHASES],
-    /// Frames the audio is delayed by: the lookahead plus the detector's own
-    /// group delay.
+    /// Frames the audio is delayed by: the lookahead plus the detector's own \[9\]
     delay_frames: usize,
     true_peak: bool,
     idx: u64,
     /// Largest true peak seen at the input, for reporting.
     pub peak_in: f64,
-    /// Smallest gain the limiter had to apply, for reporting.
+    /// Smallest gain the limiter had to apply, for reporting. **Not wired up** \[10\]
     pub min_gain: f64,
 }
 
@@ -251,10 +193,7 @@ impl Brickwall {
         let sr = sample_rate as f64;
         let look = ((lookahead_ms * 1e-3 * sr).round() as usize).max(1);
         let rel = (release_ms * 1e-3 * sr).max(1.0);
-        // The sustained stage engages over its own time constant and lets go
-        // over four times that, so it settles onto a steady loud passage and
-        // then takes its time coming back rather than breathing with the
-        // material. Zero disables it and leaves a plain single-stage limiter.
+        // [11]
         let (sustain_atk, sustain_rel) = if sustain_ms > 0.0 {
             let a = (sustain_ms * 1e-3 * sr).max(1.0);
             (
@@ -264,15 +203,9 @@ impl Brickwall {
         } else {
             (0.0, 0.0)
         };
-        // One-pole release. Expressed as a time constant so that a given
-        // --limiter-release means the same thing at any sample rate.
+        // [12]
         let release_coef = 1.0 - (-1.0 / rel).exp();
-        // The oversampler is a symmetric FIR, so its output describes the input
-        // this many samples back. The audio has to be delayed by the lookahead
-        // *plus* that, or the first few entries of the moving average describe
-        // inputs that do not include the sample being emitted -- and when the
-        // required gain is tiny, a handful of stray 1.0s in the mean dominate
-        // it. That is not a small error: it measured 4.6x over the ceiling.
+        // [13]
         let group = if true_peak { TP_TAPS / 2 - 1 } else { 0 };
         let delay_frames = look + group;
         Brickwall {
@@ -305,10 +238,7 @@ impl Brickwall {
         self.delay_frames
     }
 
-    /// True peak of one frame: the largest magnitude of the 4x oversampled
-    /// signal, taken across both channels so the stereo image is preserved.
-    /// With `true_peak` off this is the plain sample magnitude, which misses
-    /// inter-sample overshoot but costs nothing.
+    /// True peak of one frame: the largest magnitude of the 4x oversampled \[14\]
     fn detect(&mut self, l: f64, r: f64) -> f64 {
         if !self.true_peak {
             return l.abs().max(r.abs());
@@ -381,29 +311,7 @@ impl Brickwall {
             self.gr_pos = (self.gr_pos + 1) % self.gr_ring.len();
             let ma = self.gr_sum / self.gr_ring.len() as f64;
 
-            // Program-dependent release, as two stages.
-            //
-            // A single release time has to choose. Long, and the level stays
-            // down for a third of a second after every transient, which is
-            // pumping. Short, and on sustained loud material the gain
-            // re-attacks on every peak and lets go milliseconds later, which
-            // is reshaping the waveform rather than limiting it.
-            //
-            // The slow stage moves at its own pace in both directions, so a
-            // brief transient barely touches it and a sustained loud passage
-            // settles it. The fast stage then handles only what is left over
-            // -- the transient part, which is brief, so it can let go quickly
-            // without the gain moving audibly. As the slow stage catches up on
-            // a sustained passage, `req` climbs back towards 1 and the fast
-            // stage stops doing anything.
-            //
-            // What this does *not* do is stop the gain dipping at every peak
-            // over the ceiling; nothing can, and that is the attack, not the
-            // release. It makes the depth the fast stage works over small.
-            //
-            // Safety is unaffected: the fast stage is clamped to `req` on the
-            // way down, so `g_fast <= ma / g_slow` and the product is at most
-            // `ma`, whatever the slow stage is doing.
+            // [15]
             if self.sustain_atk > 0.0 {
                 let c = if ma < self.g_slow {
                     self.sustain_atk
@@ -435,11 +343,7 @@ impl Brickwall {
     }
 }
 
-/// A 4x polyphase interpolator for true-peak detection: a Blackman-windowed
-/// sinc, split by phase. BS.1770-4 specifies a longer filter than this; eight
-/// taps a phase catches the great majority of inter-sample overshoot at a
-/// fraction of the cost, and this is a detector, never in the signal path.
-/// Computed rather than tabulated so the window and the cutoff stay visible.
+/// A 4x polyphase interpolator for true-peak detection: a Blackman-windowed \[16\]
 fn design_polyphase() -> [[f64; TP_TAPS]; TP_PHASES] {
     let mut out = [[0.0f64; TP_TAPS]; TP_PHASES];
     let n = (TP_TAPS * TP_PHASES) as f64;
@@ -457,10 +361,7 @@ fn design_polyphase() -> [[f64; TP_TAPS]; TP_PHASES] {
                 + 0.08 * (4.0 * std::f64::consts::PI * k / (n - 1.0)).cos();
             *c = sinc * w;
         }
-        // Normalise each phase to unity gain. Without this the window pulls
-        // every phase down -- phase zero, which should be a plain delay, comes
-        // out at 0.81 -- so the detector under-reports the peak it is there to
-        // find and the limiter quietly under-corrects.
+        // [17]
         let sum: f64 = phase.iter().sum();
         if sum.abs() > 1e-12 {
             for c in phase.iter_mut() {
@@ -478,9 +379,7 @@ mod tests {
     #[test]
     fn quiet_signal_passes_through_scaled() {
         let mut lim = Limiter::new(48000);
-        // The loudness follower falls with a 1/3-second time constant, so it
-        // needs a couple of seconds to reach the 0.4 floor. Once there, quiet
-        // material is divided by 0.4 * 2 = 0.8.
+        // [18]
         let mut buf = vec![0.1f32; 48000 * 6];
         lim.process(&mut buf);
         for &v in &buf[buf.len() - 1000..] {
@@ -512,15 +411,12 @@ mod tests {
         assert_eq!(make(), make());
     }
 
-    /// The whole point of a brickwall: whatever goes in, nothing comes out
-    /// above the ceiling. If this ever fails, `clamp_block` starts hard-clipping
-    /// and hard clipping is what a click is.
+    /// The whole point of a brickwall: whatever goes in, nothing comes out \[19\]
     #[test]
     fn brickwall_never_exceeds_the_ceiling() {
         for ceiling in [1.0f64, 0.5] {
             let mut bw = Brickwall::new(48000, ceiling, 2.0, 60.0, 400.0, true);
-            // Loud sustained tone with violent transients on top, of the kind
-            // a saturated black MIDI mix produces.
+            // [20]
             let mut buf: Vec<f32> = (0..48000 * 2)
                 .map(|i| {
                     let t = i / 2;
@@ -543,10 +439,7 @@ mod tests {
         }
     }
 
-    /// The reason it exists. A brief transient must not pull down the material
-    /// after it: that is the pumping the follower above is prone to, because it
-    /// only sees a peak once the peak has gone past and needs a third of a
-    /// second to recover.
+    /// The reason it exists. A brief transient must not pull down the material \[21\]
     #[test]
     fn brickwall_recovers_quickly_after_a_transient() {
         let quiet = 0.5f32;
@@ -574,8 +467,7 @@ mod tests {
             "quiet material before the transient was attenuated: {}",
             level(0.02)
         );
-        // 250 ms after it, the follower above would still be recovering. This
-        // one has to be back.
+        // [22]
         assert!(
             (level(0.35) - quiet).abs() < 0.02,
             "still ducking 250 ms after a 1 ms transient: {}",
@@ -583,8 +475,7 @@ mod tests {
         );
     }
 
-    /// True-peak detection has to catch overshoot that sample-peak detection
-    /// misses, or the name means nothing.
+    /// True-peak detection has to catch overshoot that sample-peak detection \[23\]
     #[test]
     fn true_peak_detection_catches_intersample_overshoot() {
         // A half-Nyquist tone whose samples sit exactly at full scale.
@@ -592,9 +483,7 @@ mod tests {
             (0..48000 * 2)
                 .map(|i| {
                     let t = (i / 2) as f64;
-                    // Samples land on +/-1.0 while the waveform between them
-                    // reaches sqrt(2). A sample-peak limiter sees nothing to
-                    // do; a true-peak one has 3 dB to take off.
+                    // [24]
                     ((t * std::f64::consts::PI / 2.0 + std::f64::consts::PI / 4.0).sin()
                         * std::f64::consts::SQRT_2) as f32
                 })
@@ -625,23 +514,11 @@ mod tests {
         assert_eq!(run(), run());
     }
 
-    /// The point of the sustained stage.
-    ///
-    /// A short release is what keeps the material after a transient at full
-    /// level, but on *sustained* loud material it makes the gain re-attack on
-    /// every peak and let go again milliseconds later. A gain moving that fast
-    /// is not limiting the waveform, it is reshaping it. The slow stage is
-    /// supposed to absorb the sustained part of the reduction so the fast one
-    /// idles near unity and the gain holds still.
-    ///
-    /// Measured as the steadiness of the gain the limiter actually applied,
-    /// recovered by dividing output by input, which is the direct statement of
-    /// the property and does not conflate the source's own dynamics with it.
+    /// The point of the sustained stage. \[25\]
     #[test]
     fn the_sustained_stage_holds_the_gain_steady_on_a_loud_passage() {
         let wobble = |sustain_ms: f64| -> f64 {
-            // Two tones a 50 Hz beat apart, far above the ceiling. Nothing
-            // here is a transient: all of the reduction is sustained.
+            // [26]
             let src: Vec<f32> = (0..48000 * 2 * 2)
                 .map(|i| {
                     let t = (i / 2) as f64 / 48000.0;
@@ -655,9 +532,7 @@ mod tests {
             let mut bw = Brickwall::new(48000, 1.0, 2.0, 5.0, sustain_ms, true);
             let d = bw.latency() * 2;
             bw.process(&mut buf);
-            // Recover the applied gain, over the back half so the slow stage
-            // has settled, and only where the input is big enough that the
-            // division is not dominated by rounding near a zero crossing.
+            // [27]
             let start = src.len() / 2;
             let g: Vec<f64> = (start..src.len() - d)
                 .filter(|&k| src[k].abs() > 4.0)
@@ -671,17 +546,14 @@ mod tests {
 
         let single = wobble(0.0);
         let staged = wobble(400.0);
-        // A fifth steadier, not an order of magnitude: the gain still has to
-        // dip at every peak over the ceiling, and that is the attack. What the
-        // stage removes is the depth the fast release works over.
+        // [28]
         assert!(
             staged < single * 0.85,
             "the sustained stage did not steady the gain: it wobbles by              {staged:.4} with the stage and {single:.4} without"
         );
     }
 
-    /// And it must not have cost the thing the fast release was for: a brief
-    /// transient still has to let go quickly.
+    /// And it must not have cost the thing the fast release was for: a brief \[29\]
     #[test]
     fn the_sustained_stage_does_not_reintroduce_pumping() {
         let quiet = 0.5f32;

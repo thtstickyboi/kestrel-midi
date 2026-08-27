@@ -1,12 +1,4 @@
-//! SoundFont 2 loader.
-//!
-//! Parses the `pdta` hunk in full (it is small, a few MB even for a 10 GB
-//! soundfont), works out which samples the presets actually reference, and
-//! then pulls only those byte ranges out of `smpl`. A 10 GB soundfont where
-//! one preset is in use costs one preset's worth of VRAM.
-//!
-//! Modulators are not implemented. The one that matters in practice, velocity
-//! to initial attenuation, is applied directly in `bank::velocity_atten_cb`.
+//! SoundFont 2 loader. \[1\]
 
 use crate::bank::*;
 use crate::config::Config;
@@ -41,7 +33,26 @@ const G_VEL_RANGE: u16 = 44;
 const G_STARTLOOP_ADDRS_COARSE: u16 = 45;
 const G_KEYNUM: u16 = 46;
 const G_VELOCITY: u16 = 47;
+const G_MOD_ENV_TO_PITCH: u16 = 7;
+const G_MOD_ENV_TO_FILTER_FC: u16 = 11;
+const G_DELAY_MOD_ENV: u16 = 25;
+const G_ATTACK_MOD_ENV: u16 = 26;
+const G_HOLD_MOD_ENV: u16 = 27;
+const G_DECAY_MOD_ENV: u16 = 28;
+const G_SUSTAIN_MOD_ENV: u16 = 29;
+const G_RELEASE_MOD_ENV: u16 = 30;
+const G_MOD_LFO_TO_PITCH: u16 = 5;
+const G_VIB_LFO_TO_PITCH: u16 = 6;
+const G_MOD_LFO_TO_VOLUME: u16 = 13;
+const G_DELAY_MOD_LFO: u16 = 21;
+const G_FREQ_MOD_LFO: u16 = 22;
+const G_DELAY_VIB_LFO: u16 = 23;
+const G_FREQ_VIB_LFO: u16 = 24;
+
 const G_INITIAL_ATTENUATION: u16 = 48;
+
+/// Decibels of attenuation per unit of SF2 generator 48. \[2\]
+const SF2_ATTENUATION_DB_PER_CB: f32 = 0.04;
 const G_ENDLOOP_ADDRS_COARSE: u16 = 50;
 const G_COARSE_TUNE: u16 = 51;
 const G_FINE_TUNE: u16 = 52;
@@ -79,13 +90,14 @@ fn is_absolute_only(op: u16) -> bool {
 fn default_generators() -> [i16; GEN_COUNT] {
     let mut g = [0i16; GEN_COUNT];
     g[G_INITIAL_FILTER_FC as usize] = 13500;
-    g[21] = -12000; // delayModLFO
-    g[23] = -12000; // delayVibLFO
-    g[25] = -12000; // delayModEnv
-    g[26] = -12000;
-    g[27] = -12000;
-    g[28] = -12000;
-    g[30] = -12000;
+    g[G_DELAY_MOD_LFO as usize] = -12000;
+    g[G_DELAY_VIB_LFO as usize] = -12000;
+    // [3]
+    g[G_DELAY_MOD_ENV as usize] = -12000;
+    g[G_ATTACK_MOD_ENV as usize] = -12000;
+    g[G_HOLD_MOD_ENV as usize] = -12000;
+    g[G_DECAY_MOD_ENV as usize] = -12000;
+    g[G_RELEASE_MOD_ENV as usize] = -12000;
     g[G_DELAY_VOL_ENV as usize] = -12000;
     g[G_ATTACK_VOL_ENV as usize] = -12000;
     g[G_HOLD_VOL_ENV as usize] = -12000;
@@ -313,8 +325,7 @@ pub fn load(path: impl AsRef<Path>, cfg: &Config) -> Result<Bank> {
     let mut presets: Vec<Preset> = Vec::new();
     let mut used_samples: BTreeSet<u32> = BTreeSet::new();
 
-    // phdr, pbag, inst, ibag all carry a terminal record whose index bounds
-    // the previous one.
+    // [4]
     for pi in 0..phdrs.len().saturating_sub(1) {
         let ph = &phdrs[pi];
         let bag_lo = ph.bag_ndx as usize;
@@ -352,8 +363,7 @@ pub fn load(path: impl AsRef<Path>, cfg: &Config) -> Result<Bank> {
             }
 
             let Some(inst_idx) = instrument else {
-                // A zone with no instrument terminal generator is the global
-                // zone, and only the first zone may be global.
+                // [5]
                 if first_zone {
                     preset_global = zone;
                     preset_global_set = zone_set;
@@ -442,8 +452,7 @@ pub fn load(path: impl AsRef<Path>, cfg: &Config) -> Result<Bank> {
                     None => continue,
                 };
 
-                // Preset generators offset the instrument's, except for the
-                // ones the spec reserves to instrument level.
+                // [6]
                 let mut f = i_gen;
                 for op in 0..GEN_COUNT {
                     if p_set[op] && !is_absolute_only(op as u16) {
@@ -485,11 +494,18 @@ pub fn load(path: impl AsRef<Path>, cfg: &Config) -> Result<Bank> {
     )?;
 
     let mut bank = Bank {
+        uses_rand: false,
+        uses_lfo: false,
+        uses_mod_env: false,
         pool,
         pool_rate,
         samples,
         regions,
         params: Vec::new(),
+        menv: Vec::new(),
+        menv_factors: Vec::new(),
+        menv_factor_half: 0,
+        menv_log2: Vec::new(),
         gain_table: Vec::new(),
         delay_frames: Vec::new(),
         key_ok: Vec::new(),
@@ -532,6 +548,13 @@ fn intersect(a: (u8, u8), b: (u8, u8)) -> Option<(u8, u8)> {
 fn build_region(g: &[i16; GEN_COUNT], sample: u32, key: (u8, u8), vel: (u8, u8)) -> Region {
     let sustain_cb = g[G_SUSTAIN_VOL_ENV as usize] as f32;
     Region {
+        // [7]
+        rand_lo: 0.0,
+        rand_hi: 1.0,
+        xfin_lo: 0,
+        xfin_hi: 0,
+        xfout_lo: 127,
+        xfout_hi: 127,
         sample,
         key_lo: key.0,
         key_hi: key.1,
@@ -543,9 +566,26 @@ fn build_region(g: &[i16; GEN_COUNT], sample: u32, key: (u8, u8), vel: (u8, u8))
         coarse_tune: g[G_COARSE_TUNE as usize],
         fine_tune: g[G_FINE_TUNE as usize],
         scale_tuning: g[G_SCALE_TUNING as usize],
-        attenuation_cb: g[G_INITIAL_ATTENUATION as usize] as f32,
-        // SF2 has no `amp_veltrack`; its velocity-to-attenuation
-        // modulator is exactly the full-tracking case.
+        // [8]
+        mod_lfo_delay: timecents_to_secs(g[G_DELAY_MOD_LFO as usize] as f32),
+        vib_lfo_delay: timecents_to_secs(g[G_DELAY_VIB_LFO as usize] as f32),
+        mod_lfo_hz: cents_to_hz(g[G_FREQ_MOD_LFO as usize] as f32),
+        vib_lfo_hz: cents_to_hz(g[G_FREQ_VIB_LFO as usize] as f32),
+        // [9]
+        mod_env_delay: timecents_to_secs(g[G_DELAY_MOD_ENV as usize] as f32),
+        mod_env_attack: timecents_to_secs(g[G_ATTACK_MOD_ENV as usize] as f32),
+        mod_env_hold: timecents_to_secs(g[G_HOLD_MOD_ENV as usize] as f32),
+        mod_env_decay: timecents_to_secs(g[G_DECAY_MOD_ENV as usize] as f32),
+        mod_env_sustain: 1.0 - (g[G_SUSTAIN_MOD_ENV as usize] as f32 / 1000.0).clamp(0.0, 1.0),
+        mod_env_release: timecents_to_secs(g[G_RELEASE_MOD_ENV as usize] as f32),
+        mod_env_to_pitch: g[G_MOD_ENV_TO_PITCH as usize] as f32,
+        mod_env_to_filter: g[G_MOD_ENV_TO_FILTER_FC as usize] as f32,
+        mod_lfo_to_pitch: g[G_MOD_LFO_TO_PITCH as usize] as f32,
+        vib_lfo_to_pitch: g[G_VIB_LFO_TO_PITCH as usize] as f32,
+        mod_lfo_to_volume: g[G_MOD_LFO_TO_VOLUME as usize] as f32,
+        attenuation_cb: g[G_INITIAL_ATTENUATION as usize] as f32
+            * (SF2_ATTENUATION_DB_PER_CB * 10.0),
+        // [10]
         amp_veltrack: 100.0,
         pan: (g[G_PAN as usize] as f32 / 500.0).clamp(-1.0, 1.0),
         loop_mode: match g[G_SAMPLE_MODES as usize] & 3 {
@@ -578,8 +618,7 @@ fn build_region(g: &[i16; GEN_COUNT], sample: u32, key: (u8, u8), vel: (u8, u8))
     }
 }
 
-/// Frames of silence between pool entries so the interpolator can read past
-/// the end of a sample without touching its neighbour.
+/// Frames of silence between pool entries so the interpolator can read past \[11\]
 const POOL_GUARD: u32 = 8;
 
 fn build_pool(
@@ -590,9 +629,7 @@ fn build_pool(
     regions: &mut [Region],
     cfg: &Config,
 ) -> Result<(Vec<i16>, Vec<SampleInfo>, u32)> {
-    // Decide the pool rate. Start at the output rate and halve it until the
-    // estimated pool fits the budget. Degrade the pool rather than fail the
-    // load: a downsampled render beats no render.
+    // [12]
     let mut pool_rate = if cfg.resample_pool { cfg.sample_rate } else { 0 };
 
     let raw_frames: u64 = used
@@ -657,6 +694,8 @@ fn build_pool(
         let src_rate = sh.rate.max(1);
         let mut loop_start = sh.start_loop.saturating_sub(sh.start);
         let mut loop_end = sh.end_loop.saturating_sub(sh.start);
+        // [13]
+        let declared_loop = sh.end_loop > sh.start_loop;
 
         let data = if pool_rate != 0 && pool_rate != src_rate {
             let ratio = pool_rate as f64 / src_rate as f64;
@@ -682,6 +721,7 @@ fn build_pool(
             len,
             loop_start,
             loop_end,
+            declared_loop,
             rate: if pool_rate != 0 { pool_rate } else { src_rate },
             root_key: sh.original_pitch.min(127),
             correction_cents: sh.pitch_correction as f32,

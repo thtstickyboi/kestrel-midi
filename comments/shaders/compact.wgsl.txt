@@ -1,0 +1,59 @@
+# Comments extracted from shaders/compact.wgsl
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] shaders/compact.wgsl:1
+// Pass 4 of 4: compact.
+//
+// Exclusive prefix sum over the liveness mask, then a stream compaction that
+// copies survivors into the back buffer. Order is preserved, so which voices
+// died never changes the order of the ones that lived.
+//
+// Three entry points, run in sequence:
+//   scan_local   one workgroup per WG voices, scans the mask locally
+//   scan_blocks  one workgroup total, scans the per-workgroup totals
+//   scatter      moves survivors, and writes the sort key when sorting is on
+//
+// When voice sorting is on, `scatter` is not used at all: the counting half
+// still runs to produce the live count, and `sort.wgsl` does the compaction
+// and the reordering together in a single copy of the pool.
+
+[2] shaders/compact.wgsl:37
+    // One block per WG voices, but the grid is allowed to be smaller than the
+    // block count: a dispatch dimension is capped at 65,535 on D3D12 and the
+    // pool may hold more than that many blocks. A workgroup walks the blocks
+    // it owns. `block` is derived only from workgroup-uniform values, so the
+    // barriers below stay in uniform control flow, and a block's result never
+    // depends on which workgroup drew it, so the output is grid-independent.
+
+[3] shaders/compact.wgsl:72
+        // Nothing after the scan reads another lane's slot, but the next
+        // round overwrites all of them, so hold the whole workgroup here.
+
+[4] shaders/compact.wgsl:133
+                // Start offsets and the born-under variant only apply to
+                // the block a voice was born in.
+
+[5] shaders/compact.wgsl:138
+                // Sort key: region first so neighbouring invocations read the
+                // same sample data, envelope stage second to cut divergence.
+
+[6] shaders/compact.wgsl:148
+// Marks the k oldest voices dead, where the threshold came out of the radix
+// select in select.wgsl. Note ids are unique, so "note_id <= threshold" names
+// exactly k voices.
+
+[7] shaders/compact.wgsl:169
+            // Not killed here. Cutting every victim at frame zero is what put
+            // a step at the block boundary; instead each one stops at a frame
+            // of its own and fades out there. Victims are a contiguous range
+            // of note ids, so the low word spreads them evenly across the
+            // block, and it needs no ordering or coordination to compute.
+
+[8] shaders/compact.wgsl:181
+// Publish the compacted count. Separate dispatch so the scatter above is done
+// reading the old count before it changes.

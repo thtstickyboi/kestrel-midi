@@ -7,7 +7,7 @@ use kestrel::limiter::LimiterMode;
 use kestrel::config::{
     AdmitRule, BackendKind, Config, EnvelopeCurve, Interpolation, StealRule,
 };
-use kestrel::{cpu::CpuSynth, driver::Driver, gpu, load_bank, testkit, wav};
+use kestrel::{bank::Bank, cpu::CpuSynth, driver::Driver, gpu, load_bank, testkit, wav};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -33,16 +33,28 @@ enum Cmd {
         block: u32,
         #[arg(long, default_value_t = 48000)]
         rate: u32,
-        /// Voices each note-on spawns, for the memory projection. One is right
-        /// for most black MIDI soundfonts; a layered bank is higher and the
-        /// figures scale with it.
-        #[arg(long, default_value_t = 1)]
-        layers: u32,
+        /// Voices each note-on spawns, for the memory projection. 2 is right
+        /// for any stereo library, because a stereo sample becomes two
+        /// hard-panned mono regions; a compact mono bank is 1, and a layered
+        /// one is higher. The figures scale with it.
+        ///
+        /// Named apart from `render --layers`, which is a different quantity:
+        /// that one caps voices per note-on, this one describes how many the
+        /// soundfont actually spawns.
+        #[arg(long = "sf-layers", default_value_t = 2)]
+        sf_layers: u32,
         /// The soundfont's release time, in seconds. Sets the window the voice
         /// estimate counts over; a voice outlives its note-off by roughly this
         /// long, and in black MIDI that is nearly its whole life.
-        #[arg(long, default_value_t = 1.0)]
-        release: f64,
+        #[arg(long = "sf-release", default_value_t = 1.0)]
+        sf_release: f64,
+        /// Read `--sf-layers` and `--sf-release` off this soundfont instead of
+        /// taking them on trust. Both describe the soundfont, so neither is
+        /// something the caller should have to know: layers is how many
+        /// regions a note-on actually matches, and release is `ampeg_release`,
+        /// which the loader has already parsed.
+        #[arg(short = 's', long = "soundfont")]
+        soundfont: Option<PathBuf>,
     },
     /// Compare two WAV files and report the null-test difference.
     Null {
@@ -73,9 +85,18 @@ enum Cmd {
 struct RenderArgs {
     /// Input MIDI file.
     midi: PathBuf,
-    /// Soundfont, .sf2 or .sfz.
-    #[arg(short = 's', long = "soundfont")]
-    soundfont: PathBuf,
+    /// Soundfont, .sf2 or .sfz. Repeat to layer: each one is merged on top of
+    /// the ones before it, and its presets replace anything already at the same
+    /// bank and program. A General MIDI .sf2 followed by a piano .sfz gives GM
+    /// with that piano on program 0, which is the usual arrangement.
+    #[arg(short = 's', long = "soundfont", required = true, num_args = 1..)]
+    soundfont: Vec<PathBuf>,
+    /// Programs of bank 0 the *last* `-s` should take over, comma separated,
+    /// e.g. `0,1` for both grand pianos. Ranges with `-`, so `0-7` is the whole
+    /// GM piano family. Without this it takes only the program it declares,
+    /// which for an .sfz is program 0.
+    #[arg(long = "sf-programs", value_name = "LIST")]
+    sf_programs: Option<String>,
     /// Output WAV.
     #[arg(short = 'o', long = "out")]
     out: PathBuf,
@@ -150,6 +171,24 @@ struct RenderArgs {
     /// Turn the per-voice low-pass filter off.
     #[arg(long = "no-filter")]
     no_filter: bool,
+    /// Step channel volume and expression at gate-tile boundaries instead of
+    /// ramping across them. Restores pre-0.2.5 behaviour exactly, including
+    /// the click an abrupt CC7/CC11 move puts in every sounding voice.
+    #[arg(long = "no-gain-ramp")]
+    no_gain_ramp: bool,
+    /// Switch biquad coefficients instantly at gate-tile boundaries instead of
+    /// ramping across them. Restores pre-0.2.5 behaviour exactly, including the
+    /// filter ringing an abrupt CC71/CC74 move causes.
+    #[arg(long = "no-filter-ramp")]
+    no_filter_ramp: bool,
+    /// Do not evaluate SF2 vibrato and tremolo LFOs. Restores pre-0.2.5
+    /// behaviour, in which they were read from the file and discarded.
+    #[arg(long = "no-lfo")]
+    no_lfo: bool,
+    /// Do not evaluate the SF2 modulation envelope. Restores pre-0.2.5
+    /// behaviour, in which its generators were read and discarded.
+    #[arg(long = "no-mod-env")]
+    no_mod_env: bool,
     /// Do not re-sort the voice pool during compaction. Much slower at high
     /// voice counts; only useful for measuring what the sort buys.
     #[arg(long = "no-sort")]
@@ -207,6 +246,10 @@ impl RenderArgs {
             limiter_sustain_ms: self.limiter_sustain_ms,
             limiter_true_peak: !self.no_true_peak,
             filter_enabled: !self.no_filter,
+            gain_ramp: !self.no_gain_ramp,
+            filter_ramp: !self.no_filter_ramp,
+            lfo_enabled: !self.no_lfo,
+            mod_env_enabled: !self.no_mod_env,
             sort_voices: !self.no_sort,
             resample_pool: !self.no_resample_pool,
             sample_pool_budget: self.pool_budget << 20,
@@ -230,6 +273,18 @@ impl RenderArgs {
         if self.no_limiter {
             cfg.limiter_mode = LimiterMode::Off;
         }
+        // The raw mix is only observable when nothing bounds it and the
+        // container can hold it. `--limiter off --format float32` is that
+        // pair, and it is the pair people reach for to measure what the synth
+        // actually produced -- so the final clamp comes off for it and stays
+        // on everywhere else. pcm16 has no representation for |x| > 1, so it
+        // keeps the clamp whatever the limiter is doing.
+        // `--no-limiter` and `--limiter off` are two spellings of the same
+        // thing and both have to count, or the flag people actually type is
+        // the one that keeps clipping.
+        let unlimited = !cfg.limiter || cfg.limiter_mode == LimiterMode::Off;
+        cfg.clamp_output = !(unlimited && self.format == "float32");
+
         cfg.steal_rule = StealRule::parse(&self.steal)
             .with_context(|| format!("unknown steal rule {:?}", self.steal))?;
         cfg.admit_rule = AdmitRule::parse(&self.admit)
@@ -256,9 +311,10 @@ fn main() -> Result<()> {
             path,
             block,
             rate,
-            layers,
-            release,
-        } => info(path, block, rate, layers, release),
+            sf_layers,
+            sf_release,
+            soundfont,
+        } => info(path, block, rate, sf_layers, sf_release, soundfont),
         Cmd::Null { a, b, threshold } => null(a, b, threshold),
         Cmd::GpuInfo => gpu::print_adapters(),
         Cmd::GenAssets {
@@ -269,11 +325,86 @@ fn main() -> Result<()> {
     }
 }
 
+/// Parse `--sf-programs`: a comma-separated list of programs and `a-b` ranges.
+fn parse_programs(spec: &str) -> Result<Vec<u16>> {
+    let mut out = Vec::new();
+    for part in spec.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        match part.split_once('-') {
+            Some((a, b)) => {
+                let (a, b): (u16, u16) = (a.trim().parse()?, b.trim().parse()?);
+                if a > b {
+                    bail!("--sf-programs range {part:?} runs backwards");
+                }
+                out.extend(a..=b);
+            }
+            None => out.push(part.parse()?),
+        }
+    }
+    if out.is_empty() {
+        bail!("--sf-programs is empty");
+    }
+    if let Some(bad) = out.iter().find(|p| **p > 127) {
+        bail!("--sf-programs {bad} is out of range; GM programs are 0-127");
+    }
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
+/// Load one or more soundfonts and layer them in order.
+///
+/// Each is merged on top of the ones before it, so a preset at the same bank
+/// and program replaces the earlier one. `--sf-programs` applies to the last
+/// soundfont only, which is the one doing the overriding.
+fn load_layered(paths: &[PathBuf], programs: Option<&str>, cfg: &Config) -> Result<Bank> {
+    let (first, rest) = paths.split_first().context("no soundfont given")?;
+    let mut bank = load_bank(first, cfg)?;
+    if rest.is_empty() {
+        if let Some(spec) = programs {
+            let progs = parse_programs(spec)?;
+            bank.remap_to_programs(&progs)?;
+            bank.build_params(cfg);
+            bank.finish();
+        }
+        return Ok(bank);
+    }
+    log::info!("layer 1: {}", bank.describe());
+    for (i, p) in rest.iter().enumerate() {
+        let mut top = load_bank(p, cfg)?;
+        log::info!("layer {}: {}", i + 2, top.describe());
+        // Only the last layer is remapped: it is the override.
+        if i + 1 == rest.len() {
+            if let Some(spec) = programs {
+                let progs = parse_programs(spec)?;
+                top.remap_to_programs(&progs)?;
+            }
+        }
+        bank.merge(top);
+    }
+    // Everything derived is rebuilt from the merged whole.
+    bank.build_params(cfg);
+    bank.finish();
+    Ok(bank)
+}
+
 fn render(args: RenderArgs) -> Result<()> {
-    let (cfg, kind) = args.to_config()?;
+    let (mut cfg, kind) = args.to_config()?;
 
     let t0 = Instant::now();
-    let bank = Arc::new(load_bank(&args.soundfont, &cfg)?);
+    let bank = Arc::new(load_layered(&args.soundfont, args.sf_programs.as_deref(), &cfg)?);
+    // A soundfont that drives no LFO should not pay for the machinery. This
+    // turns the shader constant off, so the whole evaluation compiles away
+    // rather than being branched over per voice per reduce tile.
+    if !bank.uses_lfo {
+        cfg.lfo_enabled = false;
+    }
+    if !bank.uses_mod_env {
+        cfg.mod_env_enabled = false;
+    }
     log::info!("loaded {} in {:.2?}", bank.describe(), t0.elapsed());
 
     let mut driver = Driver::open(&cfg, bank.clone(), &args.midi)?;
@@ -396,6 +527,12 @@ fn render(args: RenderArgs) -> Result<()> {
         driver.stats.dropped,
         driver.stats.peak
     );
+    if !cfg.clamp_output {
+        log::info!(
+            "final clamp is off: the limiter is off and the format is float32,              so the file holds the raw mix and may exceed +/-1.0. Peak was {:.3}.",
+            driver.stats.peak
+        );
+    }
     if driver.stats.clipped > 0 {
         log::warn!(
             "{} samples were hard-clipped at full scale ({:.4}% of the render);              each one is a discontinuity the limiter let through.              --limiter brickwall cannot produce them.",
@@ -418,8 +555,74 @@ fn fmt_bytes(b: u64) -> String {
     format!("{v:.2} {}", U[i])
 }
 
-fn info(path: PathBuf, block: u32, rate: u32, layers: u32, release: f64) -> Result<()> {
+/// Read the two soundfont-shaped figures `info` needs off the soundfont.
+///
+/// They were flags a caller had to supply, and there was no way to find the
+/// right values short of rendering and dividing: layers is 2 for a stereo
+/// library because a stereo sample becomes two hard-panned mono regions, 1 for
+/// a compact mono bank, more for a layered one. Guessing low is the dangerous
+/// direction -- it reports a file needing half the pool it does.
+///
+/// Layers is the median over a spread of keys and velocities rather than one
+/// probe, because a library can be sparse at the extremes: a bottom octave
+/// with no samples would read as 0 and a single velocity split as 1.
+///
+/// Release is a high percentile rather than the maximum. The estimate is about
+/// how long the pool stays occupied, and one long region -- a pedal noise, a
+/// release sample -- should not stand for the whole instrument.
+fn derive_from_soundfont(sf: &std::path::Path, cfg: &Config) -> Result<(u32, f64, String)> {
+    let bank = kestrel::load_bank(sf, cfg)?;
+    let mut counts: Vec<usize> = Vec::new();
+    let mut out = Vec::new();
+    // The seed advances across probes so a library using `lorand`/`hirand`
+    // is sampled across its random slices rather than being asked the same
+    // question repeatedly. The median below then reflects what a real render
+    // sees; a fixed seed would report one slice's layer count as the whole
+    // instrument's.
+    let mut seed = 0u64;
+    for key in (21u8..=108).step_by(3) {
+        for vel in [8u8, 32, 64, 96, 127] {
+            out.clear();
+            bank.note_on(0, key, vel, seed, cfg, 255, &mut out);
+            seed += 1;
+            if !out.is_empty() {
+                counts.push(out.len());
+            }
+        }
+    }
+    counts.sort_unstable();
+    let layers = counts.get(counts.len() / 2).copied().unwrap_or(1).max(1) as u32;
+
+    let mut rel: Vec<f32> = bank.regions.iter().map(|r| r.release).collect();
+    rel.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let release = if rel.is_empty() {
+        1.0
+    } else {
+        rel[(rel.len() * 9 / 10).min(rel.len() - 1)] as f64
+    };
+    let name = sf
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| sf.display().to_string());
+    Ok((layers, release, name))
+}
+
+fn info(
+    path: PathBuf,
+    block: u32,
+    rate: u32,
+    layers: u32,
+    release: f64,
+    soundfont: Option<PathBuf>,
+) -> Result<()> {
     let cfg = Config::default();
+    let (layers, release, derived) = match &soundfont {
+        Some(sf) => {
+            let (l, r, what) = derive_from_soundfont(sf, &cfg)?;
+            (l, r, Some(what))
+        }
+        None => (layers, release, None),
+    };
     let ext = path
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
@@ -471,13 +674,15 @@ fn info(path: PathBuf, block: u32, rate: u32, layers: u32, release: f64) -> Resu
                 kestrel::midi::Event::Program { .. } => 3,
                 kestrel::midi::Event::PitchBend { .. } => 4,
                 kestrel::midi::Event::Tempo(_) => 5,
+                kestrel::midi::Event::DrumPart { .. } | kestrel::midi::Event::ResetParts => 7,
                 kestrel::midi::Event::Other => 6,
             };
             counts[i] += 1;
         }
         println!(
-            "note-on {} note-off {} cc {} program {} bend {} tempo {} other {}",
-            counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6]
+            "note-on {} note-off {} cc {} program {} bend {} tempo {} sysex {} other {}",
+            counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[7],
+            counts[6]
         );
         if counts[2] > 0 {
             use kestrel::driver::{cc_role, CcRole};
@@ -540,14 +745,20 @@ fn info(path: PathBuf, block: u32, rate: u32, layers: u32, release: f64) -> Resu
         }
 
         // 24 B per candidate layer plus 12 B per note-on is what the driver
-        // holds for a block while it waits to admit it. See ADMISSION.md. The
+        // holds for a block while it waits to admit it. See the development notes. The
         // process peak runs above this -- the spawn list, the backend's copy
         // and the per-track read buffers are all on top, and on the reference
         // file that came to about 1.35x -- so treat it as a floor.
         let per_note = 24 * layers as u64 + 12;
         let bytes = peak_block * per_note;
         println!();
-        println!("at --block {block}, --layers {layers}, {rate} Hz:");
+        println!(
+            "at --block {block}, {rate} Hz, --sf-layers {layers}, --sf-release {release:.2}s"
+        );
+        match &derived {
+            Some(name) => println!("  the last two read from {name}"),
+            None => println!("  the last two assumed; pass -s <soundfont> to read them off it"),
+        }
         println!(
             "  busiest block  {:>14} note-ons, at {:.2}s",
             peak_block,

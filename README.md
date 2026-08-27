@@ -26,28 +26,24 @@ the SF2 parser to the limiter. I directed the work, made the design calls, ran
 the renders and decided what was acceptable, but I did not hand-write this code
 and I have not read every line of it.
 
-What that means for you, concretely:
-
 - **No human has line-by-line reviewed this code.** Not me, not anyone. If you
   are the sort of person who reads a diff before running it, read this one.
-- **It was developed against a test suite**, which is *not* included in this
-  repository: null tests against a separate single-threaded CPU reference
-  implementation, byte-for-byte determinism checks, phase-accumulator precision
-  tests, and envelope curves checked against analytically computed ones. The
-  GPU path matched the CPU reference to better than -100 dB. That is real
-  verification and it caught real bugs -- but you are taking my word for it,
-  because the evidence is not in this repo.
-- **The corners are where it will break.** The paths that got exercised
-  constantly -- SF2 loading, the render loop, voice stealing under saturation --
-  are in decent shape. Unusual soundfonts, exotic SFZ opcodes and malformed
-  MIDI are much less certain.
-- **Check the output yourself.** Do not put this in a pipeline you care about
-  and assume the WAV is fine. Scan it. `kestrel null` exists precisely so you
-  can diff a render against a reference you trust.
+- **It was developed against a test suite that is not in this repository:**
+  null tests against a separate single-threaded CPU reference, byte-for-byte
+  determinism checks, phase-accumulator precision tests, and envelope curves
+  checked against analytically computed ones. The GPU path matches the CPU
+  reference to better than -98 dB. That is real verification and it caught real
+  bugs -- but you are taking my word for it, because the evidence is not here.
+- **The corners are where it will break.** SF2 loading, the render loop and
+  voice stealing under saturation are exercised constantly and are in decent
+  shape. Unusual soundfonts, exotic SFZ opcodes and malformed MIDI are much
+  less certain.
+- **Check the output yourself.** `kestrel null` exists precisely so you can
+  diff a render against a reference you trust.
 
 I am not claiming this is production software. I am claiming it renders black
-MIDI fast and the output sounded right to me. Use it accordingly, and please
-open an issue when it breaks, because it will.
+MIDI fast and the output sounded right to me. Please open an issue when it
+breaks, because it will.
 
 ---
 
@@ -57,569 +53,355 @@ open an issue when it breaks, because it will.
 |---|---|
 | **Rust** | 1.80 or newer, from [rustup.rs](https://rustup.rs) |
 | **GPU** | Anything with a working Vulkan, DX12 or Metal driver |
-| **VRAM** | Depends on the soundfont and `--max-voices`; see below. Tuned against 8 GB |
-| **OS** | Windows, Linux, macOS. Only Windows has been *run*; see below |
+| **VRAM** | Depends on the soundfont and `--max-voices`; see *Memory*. Tuned against 8 GB |
+| **OS** | Windows, Linux, macOS. Only Windows has been *run* |
 
-There are no system libraries to install and nothing to download separately.
-Every dependency comes from crates.io, and the shaders are compiled into the
-binary.
+No system libraries, nothing to download separately. Every dependency comes
+from crates.io and the shaders are compiled into the binary.
 
-**Tested on NVIDIA and Intel, both on Windows via Vulkan.** The two agree:
-rendering the same file on an RTX 5060 and on an Intel iGPU nulls at
-**-111 dB peak, -127 dB RMS**, and each device is byte-identical with itself
-across runs. That is worth more than it sounds -- WGSL is compiled by your
-driver, not by cargo, so Intel's shader compiler is an entirely separate path
-from NVIDIA's, and the two producing the same audio is real evidence the
-shaders are portable.
+**Tested on NVIDIA and Intel, both on Windows via Vulkan.** Rendering the same
+file on an RTX 5060 and on an Intel iGPU nulls at **-111 dB peak**, and each
+device is byte-identical with itself across runs. WGSL is compiled by your
+driver rather than by cargo, so two vendors' shader compilers agreeing is real
+evidence the shaders are portable.
 
-Linux and macOS **compile** clean -- `cargo check --all-targets` passes for
-`x86_64-unknown-linux-gnu` and `aarch64-apple-darwin`, which type-checks wgpu's
-Vulkan and Metal backends along with everything else. Neither has been linked
-or run, so that is one step short of a guarantee. There is no platform-specific
-code in the crate and no C dependencies, which is the reason to expect it to
-work rather than a promise that it does.
+Linux and macOS **compile** clean for `x86_64-unknown-linux-gnu` and
+`aarch64-apple-darwin`, which type-checks wgpu's Vulkan and Metal backends.
+Neither has been linked or run. AMD and Apple silicon are unrun. If you are
+first on one of those, please open an issue either way -- a report that it
+simply worked is as useful as a crash.
 
-AMD, Apple silicon and Linux are still unrun. If you are first on one of
-those, please open an issue either way; a report that it simply worked is as
-useful as a crash.
+Integrated GPUs are slower but usable: an Intel part held 2.95x realtime
+against the 5060's 32.5x on the same 100k-note file, about what shared DDR5
+against dedicated VRAM predicts for a bandwidth-bound workload. Kestrel prefers
+a discrete GPU when both are present.
 
-Integrated GPUs are slower but genuinely usable -- the Intel part held 2.95x
-realtime against the 5060's 32.5x on the same 100k-note file, which is about
-what shared DDR5 against dedicated VRAM predicts for a bandwidth-bound
-workload. Kestrel prefers a discrete GPU when both are present, so you will not
-land on the slow one by accident.
+There is a **complete CPU backend** -- the reference implementation the GPU path
+was built against. It is far slower and single-threaded. Use `--backend cpu` if
+you have no usable GPU, or to check a suspicious render against something
+simpler.
 
-Kestrel requests whatever limits your adapter reports rather than demanding a
-fixed set, and it checks the ones it can before allocating: if the render pass
-needs more workgroup storage than your card offers, or `--max-voices` implies a
-voice pool larger than your card will bind, it stops and tells you which flag to
-lower. It does not degrade quietly.
+### Memory
 
-That second ceiling is per-card, and it is worth knowing where it comes from.
+Kestrel requests whatever limits your adapter reports and checks them before
+allocating. If the render pass needs more workgroup storage than your card
+offers, or `--max-voices` implies a pool larger than your card will bind, it
+stops and names the flag to lower. It does not degrade quietly.
+
+**VRAM is usually the binding constraint, not compute.** The startup line
+prints the breakdown:
+
+```
+gpu: NVIDIA GeForce RTX 5060 Laptop GPU (Vulkan) | 1097.0 MiB of device buffers
+(757.1 MiB sample pool, 240.0 MiB voice pool for 1310720 voices, 64.0 MiB partials)
+```
+
+Three things allocate: the **voice pool**, sized by `--max-voices` and scaling
+linearly (240 MiB at the 1,048,576 default); the **partial buffers** used by the
+mixdown, 64 MiB at the defaults; and the **sample pool**, your soundfont
+resampled to one rate, which for a large multi-sampled piano runs to hundreds of
+megabytes. If the sample pool will not fit within `--pool-budget` (2 GB by
+default) Kestrel halves its sample rate until it does, on the grounds that a
+downsampled render beats no render.
+
 The voice pool is one storage buffer, and every adapter caps how much of a
-single buffer a shader may bind at once. At 96 bytes per slot, and with the pool
-holding `--max-voices` *plus* the `--steal-percent` fade headroom, a 2 GiB
-binding limit works out to **17,895,696 voices** at the defaults -- that is what
-an RTX 5060 allows. An Intel RaptorLake-S iGPU reports 1 GiB and so allows
-8,947,848. Kestrel reads the limit off the device, so the error names the figure
-for *your* card and *your* `--steal-percent` rather than a number from this
-page. The dispatch grid is not a factor: every per-voice pass strides over the
-pool, so the grid never has to cover it.
-
-The cap is on the pool, not on the piece. A file with more simultaneous notes
-than the pool holds still renders, with the excess stolen and dropped, which is
-what the pool does at any size.
-
-The GPU is the point, but there is a **complete CPU backend** -- it is the
-reference implementation the GPU path was built against, so it produces correct
-output on any machine. It is far slower and it is single-threaded. Use
-`--backend cpu` if you have no usable GPU, or to check a suspicious render
-against something simpler.
-
-**VRAM is usually the binding constraint, not compute.** You do not have to
-guess at it -- Kestrel prints the exact breakdown on startup:
-
-```
-gpu: NVIDIA GeForce RTX 5060 Laptop GPU (Vulkan) | 339.6 MiB of device buffers
-(0.0 MiB sample pool, 240.0 MiB voice pool for 1310720 voices, 64.0 MiB partials)
-```
-
-Three things allocate:
-
-- **The voice pool**, sized by `--max-voices`. The default of 1,048,576 costs
-  240 MiB. It scales linearly, so 4M voices costs roughly 960 MiB, and a pool
-  at a 2 GiB binding limit costs 4 GiB here plus 512 MiB of scan and sort
-  scratch.
-- **The partial buffers** used by the mixdown, sized by `--render-workgroups`
-  and `--block`. 64 MiB at the defaults.
-- **The sample pool**, which is your entire soundfont resampled to one rate. A
-  large multi-sampled piano runs to hundreds of megabytes.
+single buffer a shader may bind. That is the ceiling on `--max-voices`:
+**16,519,104** on an RTX 5060 at the default `--steal-percent`, 8,259,552 on an
+Intel RaptorLake-S iGPU. `kestrel gpu-info` prints the figure for *your* card.
+The cap is on the pool, not on the piece -- a file with more simultaneous notes
+than the pool holds still renders, with the excess stolen and dropped.
 
 **Host RAM is a separate constraint, and on very large files it is the binding
-one.** A block is admitted as a whole, so every note-on inside it is held in
-memory until the block ends. That scales with `--block`: a 6.6 GB, 824M-note
-file has one 512-frame block carrying 94 million note-ons, which costs about
-4.8 GiB at `--block 512` and roughly eight times that at the 4096 default. If a
-render dies with a failed allocation rather than a GPU error, lower `--block`
--- 512, 256 and 128 are all valid, 128 being the floor. Lowering `--max-voices`
-does *not* help, because the block is considered in full before admission thins
-it.
-
-If the sample pool will not fit within `--pool-budget` (2 GB by default),
-Kestrel halves its sample rate until it does rather than failing, on the
-grounds that a downsampled render beats no render. Lower that budget on a
-smaller card, and lower `--max-voices` with it.
+one.** A block is admitted as a whole, so every note-on inside it is held until
+the block ends. That scales with `--block`: a 6.6 GB, 824M-note file has one
+512-frame block carrying 94 million note-ons, about 4.8 GiB at `--block 512` and
+roughly eight times that at the 4096 default. If a render dies with a failed
+allocation rather than a GPU error, lower `--block` (128 is the floor).
+Lowering `--max-voices` does *not* help, because the block is considered in full
+before admission thins it.
 
 ## Building
 
 ```bash
 git clone https://github.com/thtstickyboi/kestrel-midi.git
-```
-
-```bash
 cd kestrel-midi && cargo build --release
 ```
 
-Build it in **release mode**. The debug build is not merely slower, it is
-unusable for real files.
+Build in **release mode**. The debug build is not merely slower, it is unusable
+for real files. The binary lands at `target/release/kestrel` and is
+self-contained.
 
-The binary lands at `target/release/kestrel`, or `target\release\kestrel.exe`
-on Windows. It is self-contained, so you can copy it anywhere.
-
-Check that your GPU was found before anything else:
+Check your GPU was found before anything else:
 
 ```bash
 kestrel gpu-info
 ```
 
-If that lists no adapter, your driver is the problem, and `--backend cpu` is
-the fallback.
+If that lists no adapter, your driver is the problem and `--backend cpu` is the
+fallback.
 
 ## Running
-
-The basic form:
 
 ```bash
 kestrel render input.mid -s soundfont.sfz -o output.wav
 ```
 
-`-s` takes a `.sf2` or a `.sfz`. Output is 32-bit float WAV by default; pass
-`--format pcm16` for 16-bit.
+`-s` takes a `.sf2` or a `.sfz`, and may be **repeated to layer** -- see
+*General MIDI*. Output is 32-bit float WAV by default; `--format pcm16` for
+16-bit.
 
-An SFZ library's sample files may be WAV or FLAC. Which one is decided by
-reading the file, not by its extension, because libraries ship FLAC under names
-of their own invention and dispatching on the name silently drops every region
-that uses one.
+An SFZ library's samples may be WAV or FLAC. Which one is decided by reading the
+file rather than its extension, because libraries ship FLAC under names of their
+own invention and dispatching on the name silently drops every region that uses
+one.
 
-A more realistic invocation for a large file:
-
-```bash
-kestrel render huge.mid -s piano.sfz -o out.wav --max-voices 2000000 --profile
-```
-```bash
-kestrel render huge.mid -s piano.sfz -o out.wav --limiter brickwall --profile
-```
-
-### The flags that actually matter
+### The flags that matter
 
 | Flag | Default | What it does |
 |---|---|---|
 | `--backend` | `gpu` | `cpu` is the reference implementation: correct, slow, single-threaded. |
+| `--max-voices N` | `1048576` | Ceiling on simultaneous voices. The single biggest lever on both VRAM and speed. The maximum is whatever your card will bind; `gpu-info` prints yours. |
 | `--block N` | `4096` | Frames per render block. Also sets how many note-ons are held in host RAM at once; lower it if a huge file exhausts memory. |
-| `--max-voices N` | `1048576` | Ceiling on simultaneous voices. The single biggest lever on both VRAM and speed. The maximum is whatever your card will bind; it is 17,895,696 on an RTX 5060 at the default `--steal-percent`, and the error names yours. |
 | `--interp` | `linear` | `nearest`, `linear` or `cubic`. Cubic costs roughly double the bandwidth. |
 | `--seconds N` | off | Stop after N seconds of output. Use this constantly while experimenting. |
-| `--profile` | off | Per-pass GPU timings, once per wall-clock second. |
-| `--block-csv` | off | One CSV row per block: voices alive at the admission decision, layers queued and admitted, voices stolen and dropped, output RMS and peak. The audio is downstream of these numbers, so read them rather than the waveform when level moves at the block rate. |
 | `--limiter` | `brickwall` | `brickwall`, `omni` or `off`. See *Limiting*. |
-| `--steal` | `quietest` | `quietest`, `oldest` or `drop-new`. See *Voice stealing*. |
-| `--admit` | `loudest` | `loudest` or `even`. Which note-ons survive when a block oversubscribes the pool. See *Admission*. |
+| `--steal` | `quietest` | `quietest`, `oldest` or `drop-new`. |
+| `--admit` | `loudest` | `loudest` or `even`. Which note-ons survive when a block oversubscribes the pool. |
+| `--steal-percent` | `25` | How much of the pool one block may replace. |
 | `--volume X` | `1.0` | Pre-limiter gain. |
-| `--rate N` | `48000` | Output sample rate. |
 | `--format` | `float32` | `float32` or `pcm16`. |
 | `--nan-guard` | off | Check every block for NaN and Inf. **Off in release builds**, so a clean exit is not by itself proof the WAV is finite. |
+| `--profile` | off | Per-pass GPU timings, once per wall-clock second. |
+| `--block-csv` | off | One CSV row per block: voices alive at admission, layers queued and admitted, stolen, dropped, output RMS and peak. Read these rather than the waveform when level moves at the block rate. |
 | `--gpu-backend`, `--gpu-adapter` | off | Force a specific API or card on multi-GPU machines. |
 
-`kestrel render --help` lists everything, including the tuning knobs
-(`--block`, `--workgroup`, `--reduce-tile`, `--pool-budget`) that are best left
-alone unless you are measuring.
+`kestrel render --help` lists everything, including tuning knobs
+(`--workgroup`, `--reduce-tile`, `--pool-budget`) best left alone unless you are
+measuring.
 
 ### The other commands
 
 ```bash
-kestrel gpu-info                  # adapters, their limits, and each one's --max-voices ceiling
-kestrel info file.sf2             # dump what the loader made of a soundfont
+kestrel gpu-info                  # adapters, limits, and each one's --max-voices ceiling
+kestrel info file.sf2             # what the loader made of a soundfont
 kestrel info file.mid             # ...or of a MIDI: note counts, CC usage, tempo, density
 kestrel null a.wav b.wav          # peak difference between two renders, in dB
 kestrel gen-assets dir/           # write synthetic soundfonts and MIDI
 ```
 
-`kestrel info` is the first thing to reach for when a render sounds wrong. It
+`kestrel info` is the first thing to reach for when a render sounds wrong: it
 tells you what Kestrel *thinks* your file contains, which is often not what you
-think it contains.
-
-On a MIDI it also sizes the job before you start it. Pass the settings you mean
-to render with:
+think it contains. On a MIDI it also sizes the job before you start it:
 
 ```bash
-kestrel info huge.mid --block 512 --layers 2 --release 1.5
+kestrel info huge.mid --block 512 --sf-layers 2 --sf-release 1.5
 ```
 
 ```
-at --block 512, --layers 2, 48000 Hz:
+at --block 512, --sf-layers 2, 48000 Hz:
   busiest block        94289755 note-ons, at 286.66s
   host memory          5.27 GiB for that block, at least
   peak 1.50s span     386892142 voices, at 285.30s -- roughly what a pool
                                 must hold for nothing to be stolen
 ```
 
-The first two lines are the ones that decide whether a render survives: a block
-is admitted whole, so every note-on in it is held until the block ends, and that
-is what a failed allocation is. The third estimates the pool the file wants.
-`--layers` is voices per note-on, one for most black MIDI banks and two for a
-velocity-split piano; `--release` is the soundfont's release time, since in this
-repertoire a voice's life is almost entirely its release tail. On a file whose
-measured requirement was 14,035,344 voices, `--layers 2 --release 1.5` estimates
-13,943,010.
-
-**When to stop using the defaults.** Read those three lines and act on them:
-
 | what `info` says | what to do |
 |---|---|
 | peak span under `--max-voices` | nothing. The defaults will not drop or steal a single voice |
-| peak span above it | raise `--max-voices` towards that figure, up to the ceiling `gpu-info` prints for your card |
+| peak span above it | raise `--max-voices` towards it, up to the ceiling `gpu-info` prints |
 | host memory in the gigabytes | lower `--block`. Not `--max-voices` -- that does not help |
 
-For anything that is not black MIDI the first row is the answer and there is
-nothing to tune: a pool that never fills means admission and voice stealing
-never run at all.
+Pass `-s <soundfont>` and `info` reads `--sf-layers` and `--sf-release` off it
+rather than taking them on trust. For anything that is not black MIDI the first
+row is the answer and there is nothing to tune.
 
-`gpu-info` prints each adapter's `--max-voices` ceiling directly rather than
-leaving you to divide its buffer limit by hand. The voice pool is one storage
-buffer, so how much of one buffer an adapter will bind is what caps the flag.
+## General MIDI
 
-`gen-assets` writes reproducible synthetic material for benchmarking. Add
-`--big-mb 512` for a sample pool too large to sit in cache, and
-`--sustained 1500000` for a MIDI that holds the voice pool permanently full:
+New in 0.2.5, and **rudimentary**. An ordinary GM file will play, and it will
+play far closer to what you expect than 0.2.4 managed, but this is a first pass
+and it is not guaranteed to render a file the way a GM synth would. Treat it as
+usable and unfinished, not as a supported format. What is listed below is what
+was built and checked; what is under *Where it is still wrong* is what is known
+to be off, and there is very likely more that has not been found yet.
+
+**Soundfonts layer.** `-s` is repeatable and merges in order, each one replacing
+anything already at the same bank and program:
 
 ```bash
-kestrel gen-assets bench --big-mb 512 --sustained 1500000
+kestrel render gm.mid -s general-midi.sf2 -s piano.sfz --sf-programs 0-1 -o out.wav
 ```
 
-```bash
-kestrel render bench/sustained1500000.mid -s bench/big512.sf2 -o bench.wav --profile --seconds 10
-```
+`--sf-programs` places the *last* soundfont on the programs you name, ranges
+included, so a one-preset SFZ piano can cover the whole piano family. Without it
+a soundfont takes only the program it declares -- which for an `.sfz` is program
+0, GM's Acoustic Grand, so the common case needs no flag.
+
+Implemented: program change, bank select with the General MIDI fallback to bank
+0, drum kits in bank 128 with their own fallback ladder, channel volume,
+expression, pan, the sustain and sostenuto pedals, pitch bend, RPN 0/1/2 (bend
+range, fine and coarse tuning), CC71-75, CC120, CC121 and CC123-127. SF2 vibrato
+and tremolo LFOs are applied, as is the SF2 modulation envelope with both its
+pitch and filter destinations.
+
+### Where it is still wrong
+
+Measured against a reference GM synth on one 17,000-note file. None of these
+stops a render; all of them mean it will not match what you are used to.
+
+- **Everything is about 2 dB loud**, consistently, and nobody knows why. It is a
+  global gain difference rather than a balance error, so `--volume 0.78`
+  level-matches it for comparison purposes. Unexplained.
+- **Several channels come out noticeably brighter** than the reference -- 1.2 to
+  1.4 times its spectral centroid. Ruled out as causes: the lowpass cutoff
+  (measured exact at four settings), interpolation, and the envelopes. Cause
+  unknown.
+- **The sample pool is resampled to one rate at load**, which band-limits a
+  soundfont whose samples are recorded lower. On a 22 kHz General MIDI set that
+  removes everything above 11 kHz, where the reference has content there.
+  `--no-resample-pool` keeps the samples at their own rate and closes it.
+- **Only three SysEx messages are acted on**: the GS *use for rhythm part*, GS
+  Reset and GM System On/Off. Master volume, part parameters and every bulk dump
+  are ignored.
+- **Effects are not implemented**, so CC91 reverb and CC93 chorus sends do
+  nothing -- see *Known limitations*.
+- **`modLfoToFilterFc` is not implemented.**
+- **Rapid CC11 gating reaches digital silence** where the reference does not,
+  because channel volume is not smoothed over as long a window.
+- The note-boundary click under *Known limitations* hits GM presets hardest,
+  because synth-lead and wavetable patches are exactly the ones with no attack
+  or release of their own.
 
 ## Limiting
 
 Black MIDI mixes clip constantly -- a saturated section can peak at hundreds of
 times full scale -- so what happens at the ceiling matters more than usual.
 
-**`brickwall`** (default) is a lookahead true-peak limiter. It sees peaks
-before they arrive and cannot exceed its ceiling, so nothing downstream ever
-has to hard-clip. `--ceiling-db`, `--lookahead-ms` and `--limiter-release-ms`
-control it. The lookahead is also the render latency, which for an offline
-renderer costs nothing.
+**`brickwall`** (default) is a lookahead true-peak limiter. It sees peaks before
+they arrive and cannot exceed its ceiling, so nothing downstream ever has to
+hard-clip. `--ceiling-db`, `--lookahead-ms` and `--limiter-release-ms` control
+it. The lookahead is also the render latency, which for an offline renderer
+costs nothing.
 
 **`omni`** is a port of the realtime limiter OmniConverter ships, originally
-from Kiva. It is a feedback follower: it only sees a peak once the peak has
-already passed, which is why it needs a third of a second of release, and that
-release audibly drags the level down after every loud moment. It also does not
-bound its own output, so samples still get clipped behind it. **Keep it only
-for level-matching a render against BASS or XSynth**, which is the one thing it
-does better.
+from Kiva. It is a feedback follower: it sees a peak only once the peak has
+passed, which is why it needs a third of a second of release, and that release
+audibly drags the level down after every loud moment. It also does not bound its
+own output. **Keep it only for level-matching a render against BASS or XSynth.**
 
-**`off`** disables limiting. Your mix will clip. Combine with `--volume` if you
-want to handle headroom yourself.
+**`off`** disables limiting. Your mix will clip.
 
-## Admission
+## Admission and voice stealing
 
 Stealing decides who dies. **Admission decides who never starts**, and on a
 saturated file that is the bigger number by an order of magnitude -- on a
-44.7M-note file against a 32,767-voice pool, 83.7M note-ons were dropped
-against 5.7M voices stolen. Whatever rule governs admission is deciding most of
-what you hear.
+44.7M-note file against a 32,767-voice pool, 83.7M note-ons were dropped against
+5.7M voices stolen.
 
-How much of that you face at all is a function of pool size, and the pool can be
-far larger than the default. On that same 44.7M-note file against an RTX 5060:
+How much of that you face is a function of pool size, and the pool can be far
+larger than the default. On that same file:
 
 | `--max-voices` | dropped | stolen | realtime |
 |---|---|---|---|
 | 1,048,576 (default) | 18,682,538 | 57,113,653 | 1.43x |
 | 13,421,568 | 0 | 2,732,530 | -- |
-| 17,895,696 | **0** | **0** | 0.67x |
+| 16,519,104 | **0** | **0** | 0.67x |
 
-That file's true peak is **14,035,344 simultaneous voices**, and the bottom row
-is the first pool that neither drops nor steals anything: every note sounding,
-none refused and none cut short. It costs 5.3 GiB of VRAM and 2.1x the wall
-time.
+Its true peak is 14,035,344 simultaneous voices, and the bottom row is the first
+pool that neither drops nor steals: every note sounding, none refused and none
+cut short, for 5.3 GiB of VRAM and 2.1x the wall time. Admission stops mattering
+well before stealing does, and an oversized pool costs memory rather than time.
 
-Two things are worth taking from the middle row. Admission stops mattering well
-before stealing does -- a pool can admit every note-on and still be under enough
-pressure to steal millions of voices. And an oversized pool costs memory rather
-than time: 17,895,696 slots took 196.4 s against 14,000,000's 196.0 s, a 28%
-larger pool for 0.2% more wall time, because every dispatch is sized from the
-voices that are live and not from the pool. So overshoot `--max-voices` if the
-VRAM is there. It is a far bigger lever than the choice of admission rule.
+**`--admit loudest`** (default) ranks an oversubscribed block by opening
+amplitude and keeps the loudest; **`even`** thins the block evenly. At small
+pools `loudest` measurably wins -- at 32,767 voices, -10.065 dB RMS against
+`even`'s -11.225 at an identical peak, which is what "the long loud notes
+survived" looks like as a number -- and the gap narrows as the pool grows, to
+within 0.01 dB at the default. There is no duration term: ranking is purely by
+opening amplitude, so a loud note cut short and a loud note held look the same.
 
-**`loudest`** (default) cuts an oversubscribed block into 64 time strata and
-ranks *within* each one, so every stratum keeps its own share. Ranking the
-block as a whole does not work: the loudest notes have no reason to be spread
-evenly in time, they cluster on chords and downbeats, and the admitted set then
-piles up at the block's opening and thins toward its end -- audible as pumping
-at the block rate on material dropping around half its voices. A stratum is
-1.3 ms, far too short to cluster audibly, and wide enough that ranking inside
-it is still a real choice.
+**`--steal quietest`** (default) kills the voices with the lowest envelope
+level, ties broken by note id. **`oldest`** kills the earliest-started, which
+sounds backwards under saturation and is: the oldest voices are the mature,
+sounding ones. **`drop-new`** refuses the incoming note instead.
 
-The rank itself is a 64-bit key: the note's opening amplitude on a logarithmic
-scale, then a scrambled candidate index as a tiebreak. The amplitude term is
-the voice's real opening gain -- it already carries the velocity, the region's
-own attenuation and its pan -- rather than a raw velocity byte. The scramble
-makes the key a total order with no ties, so the admitted set is a pure
-function of the input.
-
-Both halves of that sentence were wrong before 0.2.4, and between them they
-were the largest source of block-rate pumping in the renderer.
-
-The amplitude term used to be `(gain_l + gain_r)` clamped to 1.0 and quantised.
-A loud soundfont at unity volume puts nearly every voice above 1.0, so the
-field **saturated**: on a loud sampled piano the queued mean measured 32,470
-of a possible 32,767 and the admitted mean 32,767.00 exactly.
-Carrying no information, it left the tiebreak deciding almost every
-comparison. It is now taken from the float's own bit pattern, which is
-monotonic in the value and whose exponent field is literally log2 -- a
-logarithmic rank for one shift, with nothing to saturate against.
-
-The tiebreak used to be the raw note id. Ids are handed out in time order, so
-every tie resolved toward the later note -- a rank that is a function of *when
-a note arrives*, applied inside time strata whose entire purpose is to keep
-rank and time independent.
-
-And there used to be a third field, ranked above both: whether the note was
-still sounding at the end of *this block*. That is a fact about where in the
-block a note falls rather than about the note, and for the tick-length notes
-black MIDI is made of it is very nearly a function of position alone. Its
-justification was that a note whose note-off has already arrived is cheap to
-drop because nothing is lost past the block boundary, which holds only if
-release is instant. A sampled piano releases over seconds, so the release tail
-*is* the voice. It was removed.
-
-Measured as amplitude modulation at the block rate over the worst six seconds
-of a saturated section, limiter off:
-
-| | AM depth | peak-to-trough |
-|---|---|---|
-| before | 26.31% | 4.68 dB |
-| tiebreak and amplitude fixed | 16.49% | 2.89 dB |
-| **and the block-relative field removed** | **1.23%** | **0.21 dB** |
-| `--admit even`, which ranks by nothing | 1.33% | 0.23 dB |
-
-1.23% against a 1.33% floor means there is no block-rate component left for
-admission to remove. The within-block level profile spans 0.66 dB where it
-spanned 5.71 dB before.
-
-**`even`** thins the block by position in time and ignores what each note is,
-which is what the renderer did before ranking existed. It is blind in a
-specific way: a fortissimo whole note and a 10 ms grace note have identical
-odds of survival.
-
-Measured at `--max-voices 32767`, `loudest` against `even`:
-
-| | `even` | `loudest` |
-|---|---|---|
-| RMS | -11.225 dB | **-10.065 dB** |
-| crest factor | 11.225 dB | **10.065 dB** |
-| samples above 0.01 | 88.7% | **93.7%** |
-
-A higher RMS at an identical peak, with a lower crest factor, is what "the long
-loud notes survived" looks like as a number.
-
-Those figures date from 0.2.2 and a smaller pool, and the gap narrows sharply
-as the pool grows: at the default 1,048,576 voices the two rules now render
-within 0.01 dB RMS of each other. The difference `loudest` buys is
-largest exactly where the pool is smallest relative to the material, which is
-also where it matters most.
-
-One limit worth knowing: **there is no duration term at all.** The
-block-relative field removed above was the only thing standing in for "this
-note will actually sound for a while", crude as it was. Ranking is now purely
-by opening amplitude, so a loud note cut short and a loud note held both look
-the same to it. Expressing duration properly needs one block of lookahead --
-free for offline rendering, and unlike the field it replaces it would be a
-property of the note rather than of the block.
-
-## Voice stealing
-
-When more notes arrive than the pool can hold, something has to give. The rule
-is fixed and deterministic, never dependent on scheduling order, because that
-would make renders non-reproducible.
-
-**`quietest`** (default) kills the voices with the lowest envelope level, ties
-broken by note id. These contribute least to the mix.
-
-**`oldest`** kills the earliest-started voices. This sounds backwards under
-saturation and it is: the oldest voices are the mature, sounding ones, while
-the survivors are whichever were struck most recently and are therefore still
-silent.
-
-**`drop-new`** refuses the incoming note instead of killing an existing one.
-
-`--steal-percent` (25 by default) caps how much of the pool a single block may
-replace. This matters more than it sounds. Unbounded, a block whose note-ons
-outnumber the pool replaces *every* voice, so no voice outlives the block it
-was born in and a saturated passage renders as a stream of 85 ms attack
-fragments instead of notes. Setting it to 100 restores that behaviour, which is
-useful only for hearing the difference.
+**`--steal-percent`** (25) caps how much of the pool one block may replace.
+Unbounded, a block whose note-ons outnumber the pool replaces *every* voice, so
+no voice outlives the block it was born in and a saturated passage renders as a
+stream of 85 ms attack fragments instead of notes.
 
 ## How it works
 
 One command buffer per audio block, five compute passes: **steal**, **spawn**,
 **render**, **reduce**, **compact**. The host parses MIDI and resolves presets,
-which is branchy table-lookup work that stays on the CPU permanently, and the
-device does everything per-voice and per-sample.
+which is branchy table-lookup work that stays on the CPU permanently; the device
+does everything per-voice and per-sample.
 
-A few decisions worth knowing about if you plan to read the code:
-
-**Renders are byte-identical.** Two runs of the same file with the same
-settings produce bitwise identical WAVs. Nothing in the render path uses a
-floating-point atomic, because float atomics are non-deterministic in ordering.
-The mixdown is a fixed-order tree reduction into per-workgroup partial buffers
-that no other workgroup touches; voice slots are assigned by index rather than
-from an atomic counter; the pool sort is a stable radix sort. The only atomics
-in the codebase are integer histogram bins, where addition is exact and
-order-independent.
+**Renders are byte-identical.** Two runs of the same file with the same settings
+produce bitwise identical WAVs. Nothing in the render path uses a floating-point
+atomic, because float atomics are non-deterministic in ordering: the mixdown is
+a fixed-order tree reduction into per-workgroup partial buffers no other
+workgroup touches, voice slots are assigned by index rather than from an atomic
+counter, and the pool sort is a stable radix sort. The only atomics in the
+codebase are integer histogram bins.
 
 **Phase is 32.32 fixed point**, not float. f32 loses fractional resolution past
-2^24 samples, which is audible as detuning on long samples, and f64 costs real
-throughput on consumer NVIDIA parts. WGSL has no portable u64, so the device
-holds it as two u32 lanes.
+2^24 samples, audible as detuning on long samples, and f64 costs real throughput
+on consumer NVIDIA parts. WGSL has no portable u64, so the device holds it as
+two u32 lanes.
 
 **The voice pool is structure-of-arrays** inside a single storage buffer: field
-`f` of voice `i` lives at `f * capacity + i`. It is re-sorted by sample region
-every block during compaction, so neighbouring invocations hit the same cache
-lines. This workload is memory-bandwidth bound -- roughly 20 flops per voice
-per frame against one scattered global read -- so the access pattern is worth
-far more than the arithmetic.
+`f` of voice `i` at `f * capacity + i`. It is re-sorted by sample region every
+block during compaction so neighbouring invocations hit the same cache lines.
+This workload is memory-bandwidth bound -- roughly 20 flops per voice per frame
+against one scattered global read -- so the access pattern is worth far more
+than the arithmetic.
 
 **Note-offs do not search the pool.** The pool is reordered every block, so a
-voice cannot be found by index. Instead the lookup is inverted: the host
-publishes a small table of how many note-offs each (channel, key) has seen, and
-each voice compares its own ordinal against it.
+voice cannot be found by index. The lookup is inverted: the host publishes a
+table of how many note-offs each (channel, key) has seen, and each voice
+compares its own ordinal against it.
 
 ## Known limitations
 
-- **No effects.** No reverb, no chorus. The controllers that would need them
-  (CC91 reverb, CC93 chorus, CC94 celeste, CC95 phaser) are recognised but do
-  nothing. Run `kestrel info` on a MIDI first: it lists every controller the
-  file uses, marks the unimplemented ones `MISSING`, and tells you what
-  percentage of the file's controller events fall in that bucket.
+- **No effects.** No reverb, no chorus. CC91, CC93, CC94 and CC95 are
+  recognised and do nothing. `kestrel info` on a MIDI marks the unimplemented
+  controllers `MISSING` and reports what share of the file's controller events
+  fall in that bucket.
+- **Note boundaries can click on presets with no attack or release.** Kestrel
+  starts and stops a voice on its exact frame, where other synths apply a few
+  milliseconds of fade. On a preset whose volume envelope is all defaults over a
+  looped waveform -- a synth lead or a square-wave bass -- every note-on and
+  note-off is then a step discontinuity, which reads as grit over the tone. It
+  is the largest known audible gap and is next.
+- **No realtime playback**, and **no host integration**: offline rendering to
+  WAV only, no C ABI and no plugin build.
 - **Notes can keep sounding after the music stops, on some soundfonts.**
-  Reported on a 44.7M-note file: from roughly two thirds of the way in, notes
-  sound in a region with no note-ons behind them. It reproduces at every pool
-  size tried and on one soundfont but not another, which is the clue --
-  suspicion is that note-offs arriving while the sustain pedal (CC64) is down
-  are deferred and never released if the pedal does not come back up. Those
-  voices then sound until their sample runs out, so a library with long
-  reverb-tail samples makes it obvious while a drier one hides it. Not yet
-  root-caused; if you hear it, `--limiter off` and a shorter-sampled soundfont
-  will tell you quickly whether you are looking at the same thing.
-- **No realtime playback.** Offline rendering to WAV only.
-- **No host integration.** There is no C ABI and no plugin build, so nothing
-  else can currently drive this as a backend.
-- **Pitch bend and channel volume/pan reach a voice up to 32 frames late**
-  (0.67 ms) when the controller lands on the note's own tick. Ordinary
-  controllers do not have this problem; these two were left on the older
-  timing deliberately, because the consequence is bounded and the fix changes
-  timing elsewhere.
-- **SFZ `lorand`/`hirand` are ignored, so random region selection does not
-  work.** *(Very likely fixed in the next release -- see below.)* A soundfont
-  that uses random slices to choose between alternative regions gets **all of
-  them at once** rather than one. Ten slices per velocity layer is a common
-  arrangement, and that is then ten times the intended voice count on every
-  note. Worse, when the alternatives differ only by a small sample offset --
-  the usual trick for keeping repeated notes from phase-locking -- summing them
-  comb-filters the tone rather than merely making it louder. Kestrel warns when
-  it sees these opcodes, so you will not hit this silently. Until it is fixed,
-  use a preset that does not use `lorand` (most packs ship one), or cap
-  `--layers`.
-- **SFZ support is otherwise partial.** The common opcodes work, including
-  `#include`, `#define`, velocity layers, `fil_veltrack`, `amp_veltrack`,
-  `key`, `loopstart`/`loopend`, `pitch_keytrack` and `off_by` where it names
-  its own group. Several of those arrived in 0.2.4 -- see the release notes below,
-  because two of them were loading libraries wrongly rather than merely
-  ignoring them. Per-voice LFOs (`amplfo_*`,
-  `fillfo_*`, `pitchlfo_*`) are recognised and reported, not applied -- though
-  note that an LFO with a rate and no `*_depth` opcode would do nothing anyway,
-  which is the common case in piano libraries.
+  Reported on a 44.7M-note file, from roughly two thirds of the way in. It
+  reproduces at every pool size and on one soundfont but not another; the
+  suspicion is note-offs arriving while the sustain pedal is down being deferred
+  and never released. Not root-caused. If you hear it, `--limiter off` and a
+  drier soundfont will tell you quickly whether it is the same thing.
+- **SFZ support is almost complete.** The common opcodes work, including
+  `#include`, `#define`, velocity layers, `lorand`/`hirand`, velocity
+  crossfade, `fil_veltrack`, `amp_veltrack`, `key`, `loopstart`/`loopend`,
+  `pitch_keytrack` and `off_by`. Per-voice LFOs (`amplfo_*`, `fillfo_*`,
+  `pitchlfo_*`) are recognised and reported, not applied -- note that an LFO
+  with a rate and no `*_depth` opcode would do nothing anyway, which is the
+  common case in piano libraries. `note_selfmask` and the per-stage envelope
+  velocity-tracking opcodes are also read and dropped. Kestrel warns about every
+  opcode it does not apply, so you will not hit this silently.
+- **The SF2 modulation LFO's filter destination** (`modLfoToFilterFc`) is not
+  implemented. Its pitch and volume destinations are.
 - **NaN checking is off in release builds** unless you pass `--nan-guard`.
-
-## What changed in 0.2.4
-
-**Renders are not bit-compatible with 0.2.3.** Admission picks different notes
-now, so every output differs. Two runs of the same file on the same build are
-still byte-identical -- that guarantee is unchanged and is checked on real
-material, not just synthetics.
-
-### Block-rate pumping in saturated sections is fixed
-
-Three defects in the admission key, described in full under *Admission* above.
-The short version: its amplitude field saturated and carried no information,
-its tiebreak resolved every tie toward later notes, and its top-ranked field
-was a fact about where in the block a note fell rather than about the note.
-Together they tilted the level inside every block.
-
-Over the worst six seconds of a saturated section, amplitude modulation at the
-block rate went from **26.31% to 1.23%** -- level with the 1.33% that
-`--admit even` reaches by not ranking at all, which is the floor. The
-within-block level profile went from 5.71 dB to 0.66 dB.
-
-Checked across six large files at stock defaults, from 45 million to 2.7
-billion notes. Worst case in that set is 0.73 dB peak-to-trough.
-
-### Seven SFZ loading defects
-
-Two of these were loading libraries **wrongly**, not merely ignoring an opcode:
-
-- A region's `key` lost to a group's `lokey`/`hikey`. Any library that sets a
-  key range on a `<group>` and then `#include`s a per-key region list written
-  as `key=N` -- a very common layout -- had **every region span the whole
-  keyboard**. Every note then played `--layers` worth of the wrong samples,
-  pitch-shifted. One affected library loaded with 7,052 of its 7,216 regions
-  spanning 0..127, and middle C played samples belonging to keys 22 to 29.
-- Multiple `<control> default_path` directives: the last one governed the whole
-  file rather than the regions following it, so a library split into sections
-  by sample folder loaded entirely from the last folder. Silently -- the wrong
-  file exists, so nothing warned.
-
-And five more: `<master>` accumulated into `<global>` instead of replacing it;
-`loopstart`/`loopend` were dropped; `amp_veltrack` was ignored, so velocity
-always scaled amplitude and a library that splits by velocity had it applied
-twice; `loop_start`/`loop_end`/`end` mixed source and pool frames when the pool
-was resampled; and `KNOWN_OPCODES` was wrong in both directions -- warning
-about `pitch_keytrack`, which is honoured, and silently accepting `off_by`,
-which was not read at all.
-
-`group` on its own no longer mutes. In SFZ `group` only labels and `off_by` is
-what mutes, so `group=1` with no `off_by` was cutting notes the library meant
-to keep.
-
-### A padded MIDI file no longer looks like a hang
-
-`MidiStream::open` treated anything with a readable 8-byte header as a chunk,
-so trailing zeros parsed as zero-length chunks and the walk stepped eight bytes
-at a time to the end of the file. On a 6 GB file with 1.4 GB of padding after
-its last track that is 172 million seek-and-read pairs -- minutes of no output,
-disk idle, one core busy. The walk now stops at the first unrecognised tag with
-no body and warns with the number of bytes it ignored.
-
-### `--block-csv`
-
-One row per block: voices alive at the admission decision, layers queued and
-admitted, voices stolen and dropped, output RMS and peak. This is the
-diagnostic for anything that moves at the block rate -- the audio is downstream
-of those numbers, and reading them settles in seconds what a render takes
-minutes to guess at.
-
-### Speed
-
-Unchanged. The winning prefix of each stratum was being sorted after being
-selected, which is 262k elements per block for nothing: `select_nth_unstable`
-is already deterministic, and deterministic order is all the mixdown needs.
-Removing it paid for the new ranking exactly. Matched three-run samples on a
-131 s render: 88.5 s before, 88.1 s after.
-
 
 ## Planned for the next release
 
-**`lorand`/`hirand` support** is the priority and is the next thing being
-worked on. It was the priority for 0.2.4 as well and did not make it -- the
-release went on block-rate pumping and SFZ loading instead, both of which
-turned out to be producing wrong output rather than merely missing a feature. It is one of the cheaper missing opcodes to add and it does not threaten
-the determinism guarantee: the roll becomes a hash of the note id, so it varies
-from note to note while two renders of the same file stay byte-identical.
+**A de-click fade at note boundaries** is the priority -- see *Known
+limitations*. It is measured and understood; what is left is calibrating the
+length and deciding whether it clamps the envelope or sits beside it.
 
-Nothing else is committed. Effects, a host C ABI and realtime playback remain
-out of scope for now.
+**SFZ per-voice LFOs** are the largest remaining gap in SFZ support. Effects, a
+host C ABI and realtime playback remain out of scope.
 
 ## License
 

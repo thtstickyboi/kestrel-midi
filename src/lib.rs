@@ -1,8 +1,4 @@
-//! GPU-accelerated SoundFont/SFZ synthesizer for black MIDI.
-//!
-//! The architecture in short: the host parses MIDI and resolves presets, the
-//! device renders voices and reduces them to a stereo block, and every GPU
-//! result is checked against the single-threaded CPU reference in `cpu`.
+//! GPU-accelerated SoundFont/SFZ synthesizer for black MIDI. \[1\]
 
 pub mod backend;
 pub mod bank;

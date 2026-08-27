@@ -1,6 +1,6 @@
 [package]
 name = "kestrel"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 rust-version = "1.80"
 authors = ["thtstickyboi"]
@@ -10,9 +10,10 @@ readme = "README.md"
 repository = "https://github.com/thtstickyboi/kestrel-midi"
 keywords = ["midi", "synthesizer", "soundfont", "gpu", "wgpu"]
 categories = ["multimedia::audio", "command-line-utilities", "rendering"]
-# Generated test material and the BASSMIDI SDK live in the working tree but are
-# not part of the crate.
-exclude = ["/tests/assets", "/out", "/bassmidi24"]
+# Generated test material lives in the working tree but is not part of the
+# crate. `/comments` is browsable in the repository and excluded from both the
+# packaged crate and the generated source archives; see `.gitattributes`.
+exclude = ["/out", "/comments"]
 
 [lib]
 name = "kestrel"

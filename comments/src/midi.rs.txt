@@ -1,0 +1,131 @@
+# Comments extracted from src/midi.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/midi.rs:1
+//! Streaming SMF parser and track merger.
+//!
+//! Nothing here ever holds a whole MIDI file in memory. Each track keeps a
+//! 256 KiB window over its own chunk, and a min-heap merges the per-track
+//! cursors into one tick-ordered stream. A 40 GB black MIDI costs the same
+//! resident memory as a 4 KB one.
+
+[2] src/midi.rs:24
+    /// Roland GS "USE FOR RHYTHM PART". `map` is 0 for a melodic part and 1 or
+    /// 2 for the two GS drum maps.
+    ///
+    /// This is the only thing a file can say that changes which bank a channel
+    /// resolves in, and there is no channel message that says it. A file that
+    /// moves its drums off channel 10 -- or adds a second drum part, which is
+    /// the common case -- is unrenderable without it.
+
+[3] src/midi.rs:32
+    /// GM System On, GM System Off or GS Reset. Puts every channel back to the
+    /// default part type: drums on channel 10, melodic everywhere else.
+
+[4] src/midi.rs:37
+    /// Anything the synth does not act on. Kept in the stream so callers can
+    /// count events without a second pass.
+
+[5] src/midi.rs:158
+        // Running status: a data byte where a status byte was expected reuses
+        // the previous channel status and is itself the first data byte.
+
+[6] src/midi.rs:173
+                // Meta and realtime clear running status per the spec; many
+                // writers disagree, so only clear on meta.
+
+[7] src/midi.rs:248
+                    // Almost every SysEx is ignored, but the GS part-mode
+                    // messages are not expressible as channel messages, so
+                    // skipping the lot loses them for good. Read the head into
+                    // a fixed buffer -- every message matched here is nine
+                    // bytes -- and skip the remainder.
+
+[8] src/midi.rs:267
+/// Recognise the SysEx messages that change how a channel resolves.
+///
+/// `p` starts after the `F0` and may be truncated; the trailing `F7` and the
+/// checksum are not needed by either matcher and are not checked. A malformed
+/// message that happens to match the address is indistinguishable from a real
+/// one, which is the same bet every other synth makes.
+
+[9] src/midi.rs:276
+        // 40 1n 15 is USE FOR RHYTHM PART. `n` is a *block* number and not a
+        // channel: block 0 is channel 10, blocks 1-9 are channels 1-9, and
+        // blocks A-F are channels 11-16. Getting that mapping backwards moves
+        // the drums one channel over, which is worse than ignoring it.
+
+[10] src/midi.rs:339
+        // Walk the chunk list. Only the 8-byte headers are read, so this is a
+        // handful of seeks even on a 40 GB file.
+
+[11] src/midi.rs:356
+                // An unrecognised tag with no body is not a chunk, and the
+                // walk must stop rather than step over it. Exporters pad the
+                // end of a file with zeros, and every 8 zero bytes then parse
+                // as one of these: one real 6.15 GB file carries 1.38 GB of
+                // padding after its last track, which is 172 million
+                // seek-and-read pairs at 8 bytes a step. It finishes
+                // eventually and it looks exactly like a hang -- one core
+                // busy, the disk idle, and nothing logged between the
+                // soundfont and the track count.
+
+[12] src/midi.rs:415
+    /// Next event in tick order, or None at the end of the file.
+    ///
+    /// Deliberately not an `Iterator`: the borrow of `self` that an iterator
+    /// would need conflicts with the per-track readers this pulls from.
+
+[13] src/midi.rs:433
+/// Converts ticks to absolute output frames, tracking tempo changes as they
+/// arrive in the merged stream.
+
+[14] src/midi.rs:488
+// ---------------------------------------------------------------------------
+// writer, for generating test material
+// ---------------------------------------------------------------------------
+
+[15] src/midi.rs:492
+/// Minimal SMF writer. Only used by tests and the `gen-test-midi` CLI command,
+/// but it lives here so the format constants stay in one file.
+
+[16] src/midi.rs:568
+    /// Trailing padding must not be walked eight bytes at a time.
+    ///
+    /// Exporters pad the end of a file with zeros, and every 8 zero bytes
+    /// parse as a chunk with an unrecognised tag and no body. One real 6.15 GB
+    /// file carries 1.38 GB of it after its last track: 172 million
+    /// seek-and-read pairs, several minutes of doing nothing, with no log line
+    /// between the soundfont and the track count to say so. It looked exactly
+    /// like a hang and was reported as one.
+    ///
+    /// The scale that makes it hurt cannot go in a test, so this checks the
+    /// behaviour instead: the padding is skipped, the tracks are all found,
+    /// and it happens promptly.
+
+[17] src/midi.rs:615
+    /// A file that moves its drums with SysEx must not be read as melodic.
+    ///
+    /// The GS block number is not the channel number, and the two agree
+    /// nowhere except by accident: block 0 is channel 10, blocks 1-9 are
+    /// channels 1-9, and blocks A-F are channels 11-16. Cross-checked against
+    /// BASSMIDI on 2026-08-26, which reports `MIDI_EVENT_DRUMS` of 1 on
+    /// channel 10 and 2 on channel 11 for a file whose SysEx writes block 0
+    /// with 01 and block A with 02.
+
+[18] src/midi.rs:650
+        // A GS message to some other address, a master volume, and a truncated
+        // header all have to fall through rather than be guessed at.
+
+[19] src/midi.rs:661
+    /// The head-and-skip read has to leave the cursor exactly at the end of the
+    /// SysEx, whether the message is shorter or longer than the buffer.
+
+[20] src/midi.rs:669
+        // Two SysEx messages either side of the 10-byte peek: a 5-byte GM
+        // System On, then a 40-byte bulk dump that is not recognised.

@@ -1,0 +1,226 @@
+# Comments extracted from src/sfz.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/sfz.rs:1
+//! SFZ loader.
+//!
+//! Covers the opcode subset a sampled-instrument library actually uses:
+//! region/group/global/control headers, key and velocity ranges, tuning,
+//! volume and pan, loop modes, the amplitude envelope, and the low-pass
+//! filter. Unknown opcodes are counted and reported once rather than
+//! silently ignored, so a library that leans on something unimplemented is
+//! visible instead of quietly wrong.
+//!
+//! Stereo sample files become two mono regions panned hard left and right,
+//! because the engine's voice is mono by construction.
+
+[2] src/sfz.rs:38
+    /// Collapse aliased opcodes to one canonical name, at the level that
+    /// wrote them and before any inheritance happens.
+    ///
+    /// `merged` is a flat map, so on its own it cannot tell a region's
+    /// `key=22` from a group's `lokey=0 hikey=127`: both survive the merge
+    /// and whichever the reader happens to consult last wins, whatever level
+    /// set it. One affected library writes exactly that pair -- velocity split
+    /// into 41
+    /// `<group>`s carrying `lokey=0 hikey=127`, each including the same
+    /// per-key region list written as `key=N` -- and every one of its regions
+    /// came out spanning the whole keyboard, so every note played sixteen
+    /// layers of the wrong sample. Collapsing here means the merge only ever
+    /// sees one name per property, and normal region-over-group precedence
+    /// applies.
+
+[3] src/sfz.rs:55
+                // An explicit sibling at this same level still wins, which is
+                // what `key=60 pitch_keycenter=62` is written to mean.
+
+[4] src/sfz.rs:122
+    /// `#define $NAME value`, longest name first.
+    ///
+    /// One table on the parser rather than one per file, because the scope of
+    /// a define crosses `#include` in both directions: a define before an
+    /// include is visible inside it, and a define made inside an included file
+    /// stays visible after it returns. That is what defines are *for* -- write
+    /// one keymap, include it once per layer with a different variable each
+    /// time -- so per-file scoping would break the common case.
+
+[5] src/sfz.rs:134
+    /// Record a define, or redefine one.
+    ///
+    /// Redefinition is allowed and takes effect from that point on, which is
+    /// how a library re-includes one keymap per velocity layer.
+
+[6] src/sfz.rs:143
+                // Longest first, so `$KEYS` is matched before `$KEY`. Naive
+                // left-to-right replacement of the shorter name would leave an
+                // `S` welded onto the substituted value.
+
+[7] src/sfz.rs:151
+    /// Textually replace every `$NAME` that has been defined by this point.
+    ///
+    /// An undefined `$NAME` is left in place rather than blanked, so it
+    /// survives into the resolved path and can be reported once at the end.
+    /// Blanking it would produce a path that merely does not exist, which is
+    /// the failure that was impossible to read in the first place.
+
+[8] src/sfz.rs:181
+    /// `default_path` is passed in rather than held on the parser because it
+    /// is positional: a file may carry several `<control>` sections and each
+    /// governs the regions that follow it, not the whole file.
+
+[9] src/sfz.rs:244
+            // Includes are substituted too: splitting a library by
+            // variable-named directory is common, and resolving the include
+            // first would defeat the whole mechanism.
+
+[10] src/sfz.rs:283
+                // A value runs to the next `opcode=` on the line, so file
+                // names with spaces survive.
+
+[11] src/sfz.rs:309
+/// Find where a value ends: just before the last whitespace-separated token
+/// that itself contains an `=`.
+
+[12] src/sfz.rs:357
+    // One walk in file order, carrying everything a region inherits.
+    // `default_path` is part of that: a library split into sections by sample
+    // folder writes a `<control>` before each, and folding them all up front
+    // made the last one govern every region in the file. That loads without
+    // complaining, because the wrong sample is still a sample that exists.
+
+[13] src/sfz.rs:471
+                // Hard pan the two halves of a stereo file, then let the
+                // region's own pan bias the pair.
+
+[14] src/sfz.rs:486
+            // A feature this build does not have. The render is wrong in a way
+            // that is already known and written down, so name the feature
+            // rather than listing its opcodes.
+
+[15] src/sfz.rs:490
+            // Unclassified: a typo in the file, or something nobody has looked
+            // at yet. This is the line worth reading.
+
+[16] src/sfz.rs:602
+        // `None` here means the wav carried no `smpl` chunk. The fallback
+        // spans the sample so an explicit `loop_mode=loop_continuous` still
+        // has somewhere to loop, but it is recorded as undeclared so the
+        // `loop_mode` default can tell the two apart.
+
+[17] src/sfz.rs:634
+/// Every opcode this loader reads. Anything outside it is dropped, and being
+/// dropped silently is how a soundfont ends up sounding wrong for a session:
+/// a widely used piano port carries `fil_veltrack=9600` against an 89 Hz
+/// cutoff, and without it every note plays under an 89 Hz lowpass. So the set
+/// is written down and what falls outside it is counted and reported.
+
+[18] src/sfz.rs:681
+/// Opcodes recognised as deliberately unimplemented, grouped by the feature
+/// they belong to so the log says *why* each one is being dropped.
+///
+/// The distinction matters when reading a load: a named group is a feature
+/// this build does not have, and the render is wrong in a way someone has
+/// already thought about. Anything that falls through to the bare opcode name
+/// is unclassified -- either a typo in the file or something nobody has looked
+/// at yet -- and that is the list worth reading.
+/// Marks an entry as a known-unimplemented *group* rather than an
+/// unclassified opcode, so the two can be reported in different words. Not a
+/// character an opcode name can contain.
+
+[19] src/sfz.rs:695
+    // Per-voice LFOs. Real per-voice DSP state and a shader change; see the
+    // 0.2.5 notes.
+
+[20] src/sfz.rs:698
+    // Effects. `CLAUDE.md` defers these until the throughput phases are done,
+    // so they are omitted on purpose rather than missed.
+
+[21] src/sfz.rs:701
+    // Per-stage envelope velocity tracking. Not implemented because the unit
+    // is genuinely ambiguous between generators -- seconds in SFZ v1's
+    // `ampeg_vel2*`, percent in what this library appears to mean -- and
+    // guessing wrong silently reshapes every envelope in the bank.
+
+[22] src/sfz.rs:719
+    // Voice-management semantics, not DSP. Needs the gate/ordinal path to
+    // grow a self-masking rule.
+
+[23] src/sfz.rs:722
+    // Crossfade curve selection. The ramps themselves are implemented; only
+    // the choice between the linear and equal-power pairings is not.
+
+[24] src/sfz.rs:755
+    // `key` is gone by now: `canonicalise` expanded it into the three
+    // opcodes below at the level that wrote it.
+
+[25] src/sfz.rs:795
+    // The default here follows the sample: a wav that declares a loop in its
+    // `smpl` chunk gets looped. That makes an unrecognised `loop_mode` value
+    // fail *towards looping*, which is why `off` mattered so much -- a region
+    // that said "do not loop" in a spelling this list did not have looped
+    // anyway, for the whole length of the note. `off` is not in the SFZ 1.0
+    // list but generators emit it constantly and every other player takes it.
+
+[26] src/sfz.rs:814
+        // Anything else is a value this build does not know. Falling through
+        // to the sample's own loop silently is what hid `off`; say so instead.
+
+[27] src/sfz.rs:822
+    // Velocity crossfade. Absent opcodes keep the wide-open defaults, so a
+    // region that sets only `xfout_*` still fades in from nothing.
+
+[28] src/sfz.rs:836
+    // A backwards pair would make the ramp run the wrong way and, worse, is
+    // indistinguishable from a deliberate hard switch once clamped. Report it.
+
+[29] src/sfz.rs:849
+    // `lorand`/`hirand` carve [0, 1) into slices; a note-on draws once and
+    // keeps the regions whose slice contains the draw. Out-of-order or
+    // out-of-range values are clamped rather than rejected: a slice that
+    // cannot match would silently remove a sample from the library, which is
+    // exactly the class of failure this loader is trying to stop having.
+
+[30] src/sfz.rs:865
+        // Widened back to "always matches", not narrowed to "never matches".
+        // An empty slice removes a sample from the library for the whole
+        // render and nothing downstream would report it.
+
+[31] src/sfz.rs:875
+    // These four opcodes are absolute positions in source frames, but the
+    // `Region` stores offsets from the sample's own points, and `build_voice`
+    // scales those offsets by the resample ratio before applying them. So the
+    // subtraction has to happen in source frames too: the sample's points are
+    // already at pool rate, and mixing the two put an overridden loop up to a
+    // resample ratio's worth of frames off its mark.
+
+[32] src/sfz.rs:918
+    // Only lowpasses are implemented. Applying a lowpass where the file asked
+    // for a highpass would be worse than applying nothing, so anything else
+    // switches the filter off for the region rather than being approximated.
+
+[33] src/sfz.rs:927
+    // In SFZ `group` only labels; `off_by` is what mutes. The two together,
+    // naming the same number, are the self-exclusive case that
+    // `exclusive_class` already implements. `group` on its own used to switch
+    // exclusion on by itself, which mutes notes the library meant to keep.
+
+[34] src/sfz.rs:936
+        // Muting a *different* group is a thing this engine cannot express,
+        // so it is reported rather than approximated by self-exclusion.
+
+[35] src/sfz.rs:1003
+    /// `$KEY` and `$KEYS` can both be defined. Replacing the shorter one first
+    /// welds its leftover characters onto the substituted value.
+
+[36] src/sfz.rs:1011
+    /// Redefinition takes effect from that point on, which is how a library
+    /// re-includes one keymap per velocity layer.
+
+[37] src/sfz.rs:1031
+    /// Left in place rather than blanked, so it survives into the resolved
+    /// path and the loader can say which variable was never defined.

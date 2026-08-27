@@ -1,0 +1,34 @@
+# Comments extracted from src/resample.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/resample.rs:1
+//! Load-time sample-rate conversion for the sample pool.
+//!
+//! Only ever runs on the host, once, while building the pool. Uses a
+//! polyphase windowed-sinc bank so a multi-gigabyte soundfont converts in
+//! seconds rather than in the hours a naive per-output-sample sinc would take.
+
+[2] src/resample.rs:16
+    /// `ratio` is output rate over input rate. Below 1.0 the cutoff moves down
+    /// with the ratio so downsampling does not alias.
+
+[3] src/resample.rs:97
+/// Convenience wrapper that builds a bank and converts one sample.
+///
+/// Callers converting many samples at the same ratio should build the
+/// `SincBank` once; `Bank` loading does this per sample because soundfonts
+/// mix rates, and the table build is a few microseconds.
+
+[4] src/resample.rs:150
+        // A loud but band-limited signal must survive 2x upsampling without
+        // hitting the rails. A full-scale alternating signal at Nyquist would
+        // legitimately overshoot, so it is not the case being tested here.
+
+[5] src/resample.rs:167
+        // The clamp must hold: the accumulator saturates rather than wrapping,
+        // which would show up as a full-scale sign flip.

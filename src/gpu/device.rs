@@ -14,11 +14,7 @@ fn parse_backends(name: &str) -> Option<wgpu::Backends> {
     }
 }
 
-/// Pick an adapter and open a device.
-///
-/// Never silently falls back to a software adapter: if the only thing wgpu can
-/// find is a CPU device, that is an error, because a render that quietly takes
-/// a thousand times longer is worse than one that stops.
+/// Pick an adapter and open a device. \[1\]
 pub fn create(
     cfg: &Config,
 ) -> Result<(wgpu::Device, wgpu::Queue, String, wgpu::Limits, bool)> {
@@ -47,8 +43,7 @@ pub fn create(
         }
     }
 
-    // Discrete first, then integrated. Within a tier, prefer Vulkan over DX12
-    // over GL: the compute paths are better tested there.
+    // [2]
     let rank = |a: &wgpu::Adapter| -> (u8, u8) {
         let i = a.get_info();
         let t = match i.device_type {
@@ -95,8 +90,7 @@ pub fn create(
         experimental_features: wgpu::ExperimentalFeatures::disabled(),
     }))?;
 
-    // A device error that arrives asynchronously would otherwise show up as
-    // silently wrong audio.
+    // [3]
     device.on_uncaptured_error(std::sync::Arc::new(|e| {
         log::error!("wgpu device error: {e}");
         panic!("wgpu device error: {e}");
@@ -105,8 +99,7 @@ pub fn create(
     Ok((device, queue, name, adapter_limits, has_timestamps))
 }
 
-/// Compute-only bind group layout. `read_only[i]` says whether binding i is a
-/// read-only storage buffer; binding 0 is always the uniform block.
+/// Compute-only bind group layout. `read_only[i]` says whether binding i is a \[4\]
 pub fn bind_layout(
     device: &wgpu::Device,
     label: &str,
@@ -161,8 +154,7 @@ pub fn bind(
     })
 }
 
-/// List every adapter wgpu can reach, for working out which device a render
-/// will land on.
+/// List every adapter wgpu can reach, for working out which device a render \[5\]
 pub fn print_adapters() -> Result<()> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
     for a in instance.enumerate_adapters(wgpu::Backends::all()) {
@@ -180,8 +172,7 @@ pub fn print_adapters() -> Result<()> {
             l.max_compute_invocations_per_workgroup,
             l.max_compute_workgroups_per_dimension
         );
-        // The number people actually want off this listing. `gpu-info` used to
-        // print the binding size and leave the division to the reader.
+        // [6]
         let steal = Config::default().max_steal_percent;
         let binding = (l.max_storage_buffer_binding_size as u64).min(l.max_buffer_size);
         println!(

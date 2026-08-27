@@ -1,0 +1,30 @@
+# Comments extracted from shaders/spawn.wgsl
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] shaders/spawn.wgsl:1
+// Pass 1 of 4: spawn.
+//
+// Appends this block's note-ons to the end of the voice pool. The destination
+// slot is `spawn_base + i` where i is the command's index in the host's event
+// order, so allocation never depends on which invocation runs first. No
+// atomics, and the pool contents are a pure function of the MIDI file.
+
+[2] shaders/spawn.wgsl:72
+            // Plus one, so that zero can mean "not born in this block" once
+            // the render pass clears it. The row bias rides in the high half
+            // rather than in a field of its own: it is one bit, it is only
+            // meaningful for the block the voice is born in, and this word is
+            // already cleared at the end of that block.
+
+[3] shaders/spawn.wgsl:79
+            // A new voice has no age, so its LFOs and its modulation envelope
+            // both start at zero.
+
+[4] shaders/spawn.wgsl:88
+// Advance the live count once the appends are done. One invocation, so there
+// is nothing to race.

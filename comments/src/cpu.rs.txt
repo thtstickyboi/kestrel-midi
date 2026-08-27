@@ -1,0 +1,272 @@
+# Comments extracted from src/cpu.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/cpu.rs:1
+//! CPU reference synthesizer.
+//!
+//! Single-threaded, scalar, no clever tricks. This is the ground truth every
+//! GPU phase is measured against, so it is written to be obviously correct
+//! rather than fast. The arithmetic is deliberately f32 in exactly the places
+//! the shader uses f32, and the order of operations matches
+//! `shaders/render.wgsl` statement for statement.
+//!
+//! The one deliberate difference: the mixdown accumulates in f64 here. That
+//! makes the reference more accurate than the device, so a null test measures
+//! the device's error rather than the sum of both.
+
+[2] src/cpu.rs:25
+/// Structure of arrays, one Vec per field. `phase` and `step` are kept as u64
+/// here rather than split into hi/lo lanes; that split only exists on the
+/// device because WGSL has no portable u64.
+
+[3] src/cpu.rs:48
+    /// Variant the voice was born under, plus one, or zero once it has
+    /// outlived the block it was born in. Mirrors `F_BORN_VARIANT` on the
+    /// device; see `SpawnCmd::variant`.
+
+[4] src/cpu.rs:52
+    /// Frame in this block at which a stolen voice starts fading, plus one.
+    /// Zero when the voice is not being stolen. Mirrors `F_STOP_REL`.
+
+[5] src/cpu.rs:55
+    /// Frames alive. Read by the LFOs and by the modulation envelope. Mirrors
+    /// `F_AGE`.
+
+[6] src/cpu.rs:58
+    /// Age at which this voice entered release, or `NO_RELEASE_AGE` while it
+    /// has not. Only the modulation envelope reads it, and it is the one piece
+    /// of state that envelope needs: everything else about it is a function of
+    /// the age. Mirrors `F_REL_AGE`.
+
+[7] src/cpu.rs:90
+        // Packed exactly as `spawn.wgsl` packs it: variant plus one in the low
+        // half so zero can mean "not born in this block", the row bias in the
+        // high half.
+
+[8] src/cpu.rs:102
+        // Stable compaction: order is preserved so behaviour does not depend
+        // on which voices happened to die.
+
+[9] src/cpu.rs:174
+    /// Copies of the params table beyond the bank's own. Index 0 is the
+    /// bank's, so it is never stored here; entry `i` holds variant `i + 1`.
+
+[10] src/cpu.rs:216
+    /// Read one pool sample, normalised the same way `unpack2x16snorm` does on
+    /// the device: divide by 32767 and clamp, not divide by 32768.
+
+[11] src/cpu.rs:225
+    /// Which queued spawn the `i`-th accepted one is. The driver has already
+    /// sorted the block by `admit_key` under `AdmitRule::Loudest`, so a prefix
+    /// is exactly the highest-ranked `take`; under `Even` the old positional
+    /// thinning still applies.
+
+[12] src/cpu.rs:237
+    /// The 64-bit key voice stealing selects the k smallest of. Mirrors
+    /// `steal_key` in `shaders/common.wgsl` bit for bit; the two backends
+    /// choosing different victims would not show up as an error, only as two
+    /// renders that quietly disagree.
+
+[13] src/cpu.rs:252
+    /// One region's DSP constants out of one copy of the params table.
+    /// Variant zero is the bank's own. The fallback is for a variant that was
+    /// never uploaded, which the driver does not produce -- it builds every
+    /// variant it hands out before the spawn that references it.
+
+[14] src/cpu.rs:269
+    /// The modulation-envelope entry beside `params_of`'s, from the same
+    /// variant and the same index.
+
+[15] src/cpu.rs:291
+    /// Index of the sample `off` frames after `idx`, honouring the loop.
+    /// Mirrors `neighbour_index` in `shaders/common.wgsl` exactly.
+
+[16] src/cpu.rs:409
+                    // Pick the voices with the smallest steal key, which is the
+                    // note id by age or the envelope level with the id beneath
+                    // it by level. Either way a total order with no ties, so the
+                    // victim set is a pure function of the input and never of
+                    // scheduling.
+
+[17] src/cpu.rs:415
+                    // Bounded so a block cannot replace the whole pool. See
+                    // `Config::max_steal_percent`.
+
+[18] src/cpu.rs:423
+                        // Scheduled, not removed: each victim goes on sounding
+                        // until its own stop frame and fades out there, so the
+                        // steal is spread across the block instead of landing
+                        // on the boundary. The low word of the note id spreads
+                        // them, victims being a contiguous range of ids.
+
+[19] src/cpu.rs:435
+                    // Room is what will be free once the victims have gone,
+                    // not what is free now; the pool runs over `max_voices`
+                    // until the end-of-block compaction, exactly as the device
+                    // pool does inside its headroom.
+
+[20] src/cpu.rs:472
+            // Non-zero only for a voice born in this block, and then it is the
+            // variant current at its own note-on plus one.
+
+[21] src/cpu.rs:476
+            // Which row this voice takes its opening bend and gain from; see
+            // `SpawnCmd::row_bias`.
+
+[22] src/cpu.rs:482
+            // Live biquad coefficients and their per-frame ramp increments.
+            // Mirrors `render.wgsl`.
+
+[23] src/cpu.rs:486
+            // Crossfade between bypassed and filtered while `use_filter`
+            // toggles. Mirrors `render.wgsl`.
+
+[24] src/cpu.rs:500
+            // The pool holds the note's own gains and its unbent step. The
+            // effective ones fold in the channel's volume, pan and bend, all
+            // refreshed once per gate tile.
+
+[25] src/cpu.rs:507
+            // Per-frame ramp increments. Mirrors `render.wgsl` exactly,
+            // including the reciprocal multiply -- a divide here and a
+            // multiply there would disagree in the last bit and the null test
+            // is what would find out.
+
+[26] src/cpu.rs:530
+            // The gate tile this voice starts in. Only meaningful while
+            // `born_variant` says the voice was born in this block; after that
+            // `start_rel` has been cleared and every tile is one it was alive
+            // for.
+
+[27] src/cpu.rs:535
+            // Frame this voice's note-off lands on. Resolved once for the
+            // whole block rather than re-checked every gate tile, and it is
+            // the exact frame the host recorded. Mirrors `render.wgsl`.
+
+[28] src/cpu.rs:554
+            // Modulation envelope. Set up once for the whole block, exactly as
+            // in `render.wgsl`: the age at which the release lands is known as
+            // soon as the note-off frame is, so it can be resolved here rather
+            // than at the transition, and the level is then a pure function of
+            // the age at every tile.
+
+[29] src/cpu.rs:577
+                    // See `render.wgsl`: bend and gain come from the row the
+                    // driver named, on the tile the voice is born in.
+
+[30] src/cpu.rs:581
+                    // CC120: fade from the cut frame over the steal window,
+                    // for the voices that were sounding when it arrived. Which
+                    // ones those are is decided by note id and not by frame;
+                    // see `render.wgsl` and `voice::CHAN_CUT_ID_LO`.
+
+[31] src/cpu.rs:604
+                        // See `render.wgsl`: tile 0 of a block and a voice's
+                        // own birth tile are both set directly, and
+                        // `born_tile` is 0 for a voice not born in this block
+                        // so one test covers both.
+
+[32] src/cpu.rs:618
+                    // Only on a change: re-reading a voice's DSP constants
+                    // every gate tile would be a load per voice per tile, and
+                    // CC71-CC75 move a few hundred times in a whole file.
+                    // A coefficient ramp lasts exactly one gate tile; see
+                    // `render.wgsl`. The gain ramp self-terminates because it
+                    // is recomputed every tile, these are not.
+
+[33] src/cpu.rs:631
+                        // A row holds the state at the start of its tile,
+                        // which is older than a voice born inside that tile:
+                        // the voice already carries the variant that was
+                        // current at its own frame. So rows govern it only
+                        // from the tile after the one it was born in.
+
+[34] src/cpu.rs:641
+                            // CC74 can move a cutoff past the point where the
+                            // filter is worth running, so this is part of the
+                            // reload rather than fixed at spawn.
+
+[35] src/cpu.rs:645
+                            // CC71 and CC74 also move the cutoff and resonance
+                            // the modulation envelope is modulating *around*,
+                            // so its entry comes from the new variant too.
+
+[36] src/cpu.rs:653
+                            // See `render.wgsl`: ramp only while the filter is
+                            // engaged on both sides of the switch.
+
+[37] src/cpu.rs:662
+                                // See `render.wgsl`: there is no coefficient
+                                // path between engaged and bypassed, so the two
+                                // outputs are crossfaded instead.
+
+[38] src/cpu.rs:701
+                    // The per-voice modulators, at every reduce-tile boundary.
+                    // The shader evaluates these outside its frame loop, so
+                    // they run **ahead of the two guards below**: a frame this
+                    // loop skips must not skip them as well.
+                    //
+                    // That ordering never mattered for the LFOs -- both start
+                    // at phase zero, so an evaluation missed at the top of a
+                    // voice's first tile contributed nothing anyway -- and it
+                    // matters absolutely for the modulation envelope, whose
+                    // attack is instant by default and so is at full scale on
+                    // the voice's first frame. A missed evaluation there is not
+                    // a transient: the step is wrong for the rest of the tile,
+                    // and the phase error that leaves is permanent. Getting
+                    // this order wrong cost 60 dB on the null test; the
+                    // development notes have it.
+
+[39] src/cpu.rs:747
+                            // Not summed into `cents`: that path ends in an
+                            // `exp2` the two backends do not compute alike, and
+                            // this modulator is the one whose offset persists
+                            // long enough for the difference to integrate into
+                            // the phase. It takes its factor out of a shared
+                            // table instead, and is applied as a second exact
+                            // scaling below. See `MOD_ENV_CENTS_STEPS`.
+
+[40] src/cpu.rs:763
+                                // Rebuilt rather than ramped: the envelope moves
+                                // the cutoff every tile, so there is nothing to
+                                // ramp towards. The ramp increments are cleared
+                                // for the same reason -- left running they would
+                                // fight the rebuild and walk the coefficients
+                                // out of the stability region.
+
+[41] src/cpu.rs:799
+                    // Ahead of `looping`, as in the shader: a `loop_sustain`
+                    // region stops looping the moment it enters release.
+
+[42] src/cpu.rs:816
+                    // The envelope advances before the sample is scaled, not
+                    // after. With an instant attack that puts the voice at
+                    // full level on its very first frame, so a note with no
+                    // envelope renders as exactly the sample.
+
+[43] src/cpu.rs:874
+                        // Mid-toggle. Separate from the steady-state arm on
+                        // purpose: `x + (fy - x) * 1.0` is not bitwise `fy`, so
+                        // folding them would move every filtered sample in
+                        // every render. See `render.wgsl`.
+
+[44] src/cpu.rs:894
+                    // A stolen voice fades to silence over `steal_fade_frames`
+                    // from its own stop frame. After the filter, so the biquad
+                    // keeps seeing the untapered signal.
+
+[45] src/cpu.rs:912
+                    // After the mix, matching the shader. Frames skipped by
+                    // the `f < start_rel` guard above are always in the
+                    // voice's birth tile, where the increments are zero, so
+                    // skipping them cannot make the two backends disagree.
+
+[46] src/cpu.rs:944
+            // Advanced by the whole block, not by the frames this loop
+            // actually rendered: the shader does the same, and a voice that
+            // broke out early must not have its LFOs fall behind.

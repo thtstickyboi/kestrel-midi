@@ -1,0 +1,410 @@
+# Comments extracted from src/voice.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/voice.rs:1
+//! Voice pool layout, spawn commands, and the note-off gate table.
+//!
+//! Every field here has a counterpart in `shaders/common.wgsl`. The comment
+//! block at the top of that file lists the binding order; if you add a field,
+//! change both.
+
+[2] src/voice.rs:20
+/// Everything needed to start one voice, in the exact order the spawn shader
+/// reads it. `#[repr(C)]` plus Pod means this uploads as a straight memcpy.
+
+[3] src/voice.rs:35
+    /// The params variant the channel was on at this voice's own note-on.
+    ///
+    /// Voices otherwise take their variant from the per-tile channel row, and
+    /// that row carries the state at the *start* of the tile, so a controller
+    /// arriving on the note's own tick would not reach it for a whole gate
+    /// tile. This carries it across that gap: the voice is born on the right
+    /// copy of the table, and the rows govern it from the next tile on, which
+    /// leaves bend and channel gain timing alone.
+
+[4] src/voice.rs:47
+    /// Which note-on of that slot this voice belongs to, counting from 1.
+    /// The voice releases once the slot's off count reaches this.
+
+[5] src/voice.rs:50
+    /// Frames into the block before the voice starts. Gives sample-accurate
+    /// note-on without shrinking the block.
+
+[6] src/voice.rs:57
+    /// Which channel row this voice takes its **opening** bend and gain from,
+    /// as an offset from the row of the tile it is born in: 0 for this tile's,
+    /// 1 for the next.
+    ///
+    /// A controller only reaches the row of the tile *after* the one it arrives
+    /// in, because a row carries the state at the start of its tile. That is
+    /// right for a voice already sounding and wrong for one struck later in
+    /// the same tile -- and a bend or an expression change on a note's own tick
+    /// is ordinary practice, not an edge case. The params variant already had
+    /// its own answer to this (`variant`, below); this is the same answer for
+    /// the two controls that live in the row rather than in the table.
+
+[7] src/voice.rs:71
+/// Which of `want` queued spawns the `i`-th accepted one should be, when only
+/// `take` of them fit in the pool.
+///
+/// Taking the first `take` in event order is the obvious thing and it is
+/// wrong. A saturated block's note-ons span the whole block, so a prefix keeps
+/// everything from the opening of the block and drops everything after it --
+/// the block is heard at its start and silent at its end, which is a rhythmic
+/// artifact at exactly the block rate, built in by construction. Spreading the
+/// choice evenly keeps the block's timing intact and merely thins it.
+///
+/// Both backends call this. Two backends thinning a block differently would
+/// not show up as an error, only as two renders that quietly disagree.
+
+[8] src/voice.rs:89
+/// The 64-bit key admission ranks queued spawns by, highest kept first.
+///
+/// `spawn_pick` thins a saturated block evenly, which fixes the rhythmic
+/// artifact a prefix causes but is blind to what it is dropping: a fortissimo
+/// whole note and a 10 ms grace note have identical odds. On a file that
+/// oversubscribes the pool fifteen to one that is most of what you hear.
+///
+/// The key is two fields, most significant first:
+///
+/// * **loudness** -- `gain_l + gain_r` quantised to 15 bits. These gains
+///   already carry the velocity, the region's own attenuation and its pan, so
+///   this is the voice's actual opening amplitude rather than a raw velocity
+///   byte.
+/// * **position** -- the candidate's index in the block, scrambled, as a
+///   tiebreak that carries no information about when the note arrived.
+///
+/// The scrambled position makes it a total order with no ties, so the admitted
+/// set is a pure function of the input and never of scheduling order. Both
+/// backends call this. Two backends admitting different notes would not show
+/// up as an error, only as two renders that quietly disagree.
+///
+/// **No term in this key may be a function of position in the block.** The key
+/// is applied inside time strata whose entire purpose is to keep rank and time
+/// independent, so a term correlated with block position defeats the strata
+/// and comes out as level movement at the block rate. A third field once sat
+/// above loudness and did exactly that; removing it was most of the 0.2.4
+/// pumping fix. The development notes have the account and the numbers, and
+/// their open question about moving admission to gate-tile granularity is a
+/// live reason somebody will come back to this key.
+///
+/// A duration term is wanted and is missing -- see the development notes. It has to be
+/// expressed without reference to the block: `gain * release` is known per
+/// region and mentions no boundary.
+///
+/// Reordering the queue is safe because a voice's position in time is carried
+/// by `start_rel`, not by its index: thinning by rank still leaves every
+/// admitted note sounding at exactly the frame it should.
+
+[9] src/voice.rs:131
+/// The tiebreak field of the ranking keys: a scrambled function of a
+/// candidate's position in the block.
+///
+/// **Any tiebreak built from the candidate index must destroy its low bits,
+/// not promote them.** A stereo library loads as two hard-panned mono regions,
+/// so every note queues two adjacent candidates -- left at an even index,
+/// right at an odd one. A tiebreak that lets bit 0 rise in significance ranks
+/// one whole channel above the other, and under saturation admission throws
+/// that channel away. Two tiebreaks were tried before this one and both were
+/// defects, the second for exactly this reason; the development notes have both.
+///
+/// An avalanche mix satisfies it: consecutive indices scatter, so channel
+/// parity carries no rank. It is a bijection on 48 bits -- xor-shift-right and
+/// odd multiplies, both invertible mod 2^48 -- so distinct candidates still
+/// get distinct keys and the order stays total with no ties, which is what
+/// makes the admitted set a pure function of the input rather than of
+/// scheduling.
+
+[10] src/voice.rs:160
+/// Quantise a voice's opening gain to the 15 bits `admit_key` has for it.
+///
+/// **This may not be a linear window onto the gain.** It was
+/// `(gain_l + gain_r).clamp(0.0, 1.0) * 32767`, and the clamp saturated
+/// against any loud soundfont at unity volume, while a small `--volume`
+/// collapsed every voice onto one or two steps at the other end. Either way
+/// the field carries no information and the key falls through to its tiebreak
+/// -- and it looks ranked while doing it, which is why it hid for so long.
+/// the development notes have the measurements.
+///
+/// Taking the bits costs one shift and has no window at all. An IEEE-754 bit
+/// pattern of a positive float is monotonically increasing in the value, and
+/// its exponent field is literally log2, so the top 15 bits below the sign are
+/// already a logarithmic quantisation covering the entire positive range.
+/// Nothing to saturate, nothing to fall outside, and no transcendental in a
+/// path that runs about five billion times on a large file.
+///
+/// Monotonic and exact, so it is a pure function of the gain and both
+/// backends and both runs agree.
+
+[11] src/voice.rs:189
+/// Per-block note-off state, sampled once per reduce tile.
+///
+/// A voice cannot be found by searching the pool without either a sort or an
+/// index that survives compaction, so the lookup is inverted: the host
+/// publishes a small table of "how many note-offs has this key seen", and each
+/// voice compares its own ordinal against it. The table is 8 KiB per tile, so
+/// it stays in L1 and costs one cached read per voice per tile.
+
+[12] src/voice.rs:197
+    /// Note-off count per slot at the *start* of this block, and the offset of
+    /// the slot's first note-off in `off_frames`. Interleaved as
+    /// `[base, index]` per slot with one trailing pair, so a voice's two reads
+    /// land on one cache line and the slot's count is
+    /// `meta[(s+1)*2+1] - meta[s*2+1]`.
+    ///
+    /// `(GATE_SLOTS + 1) * 2` entries.
+
+[13] src/voice.rs:205
+    /// The exact frame of every note-off published in this block, grouped by
+    /// slot and in ordinal order within a slot.
+    ///
+    /// This is the whole point of the design. The table this replaced carried
+    /// note-off *counts* sampled once per gate tile, which said how many
+    /// note-offs fell in a tile but never when, so a release could only ever
+    /// land on a tile boundary. That quantised every note-off to
+    /// `gate_frames` and turned a note stream faster than the tile rate into a
+    /// tone at `sample_rate / gate_frames` -- 1500 Hz at the defaults, loud
+    /// enough to bury the music. Interpolating within the tile removes that
+    /// tone but cannot recover the real one: the counts do not carry the
+    /// phase, and on a stream whose period does not divide the tile the phase
+    /// drifts without bound.
+
+[14] src/voice.rs:223
+    /// Note-offs that arrived while the channel's sustain pedal was down and
+    /// so have not been published yet. See `set_sustain`.
+
+[15] src/voice.rs:230
+    /// How many notes at each slot the sostenuto pedal caught. Sostenuto only
+    /// holds what was already sounding when it went down, which is the whole
+    /// difference between it and the sustain pedal.
+
+[16] src/voice.rs:234
+    /// Note-offs published so far this block, as parallel (slot, frame) lists
+    /// in arrival order. `end_block` counting-sorts them into `off_frames`;
+    /// arrival order is already ordinal order within a slot, and a counting
+    /// sort is stable, so the grouping preserves it.
+
+[17] src/voice.rs:268
+    /// Start a new block. The per-slot base is the count as it stands now,
+    /// which is what a voice compares its ordinal against.
+
+[18] src/voice.rs:278
+    /// Record one published note-off at its exact frame.
+    ///
+    /// Every path that moves `off_count` goes through here, so nothing can
+    /// increment the count without also saying when it happened -- which was
+    /// the failure mode of the table this replaced.
+
+[19] src/voice.rs:303
+    /// Register a note-off. A note-off with nothing sounding is ignored, which
+    /// is what makes "release the oldest un-released note" fall out for free.
+
+[20] src/voice.rs:308
+            // Caught by the sostenuto pedal when it went down, so this off is
+            // held even if the sustain pedal is up.
+
+[21] src/voice.rs:317
+            // Held, not released. Counting it here rather than in `off_count`
+            // is the whole of the sustain pedal: the device only ever sees
+            // published note-offs, so a deferred one simply has not happened
+            // yet as far as any voice is concerned.
+
+[22] src/voice.rs:334
+    /// CC64. Pressing holds every later note-off on the channel; releasing
+    /// publishes all of them at this frame, which is what makes a pedalled
+    /// chord ring on and then damp together.
+
+[23] src/voice.rs:354
+    /// CC66. Holds only the notes already sounding when it goes down; notes
+    /// struck afterwards damp normally, which is the whole point of it.
+
+[24] src/voice.rs:383
+    /// Publish everything the pedal was holding, all at `frame`. That frame is
+    /// the pedal lift, not when each note-off arrived, which is exactly what a
+    /// pedalled chord damping together means.
+
+[25] src/voice.rs:398
+    /// CC123. Releases what is sounding, but a held pedal still holds: the
+    /// notes damp when the pedal comes up, not here.
+
+[26] src/voice.rs:416
+    /// CC120. Stops everything on the channel now, pedal or not, and drops
+    /// what the pedal was holding.
+
+[27] src/voice.rs:429
+    /// CC121. Lifting the pedal is part of resetting a channel's controllers,
+    /// so anything it was holding damps here.
+
+[28] src/voice.rs:436
+    /// Group this block's note-offs by slot, in ordinal order.
+    ///
+    /// A counting sort: one pass to count per slot, a prefix sum into the
+    /// meta table, and one pass to scatter. Linear in the number of note-offs,
+    /// which matters because a dense block can hold millions of them.
+
+[29] src/voice.rs:470
+    /// The exact frames of the note-offs published for `slot` in this block,
+    /// in ordinal order. Valid only after `end_block`.
+
+[30] src/voice.rs:479
+    /// Number of notes started but not yet released, across all slots. Notes
+    /// the pedal is holding count as sounding, because they are.
+
+[31] src/voice.rs:491
+/// Words per channel in a `ChannelTable` row: bend factor, left gain, right
+/// gain, the params variant, the all-sound-off cut, and spares to keep the
+/// stride a power of two so a channel's whole entry stays on one cache line.
+
+[32] src/voice.rs:500
+/// Frame within the block at which CC120 silenced this channel, plus one.
+/// Zero for the overwhelming majority of tiles, which is every tile in a file
+/// that never sends it.
+
+[33] src/voice.rs:504
+/// The note id that cut applies *below*, low and high words.
+///
+/// Which voices a CC120 silences is decided by **event order**, not by frame,
+/// and the two are not the same thing. A file that uses CC120 as a choke --
+/// send the cut, then immediately restrike -- puts both on the same tick and
+/// therefore on the same frame, and a frame comparison cannot tell the voice
+/// that should die from the one that should not. Note ids are handed out in
+/// event order and never reused, so the id current when the cut arrived splits
+/// them exactly.
+///
+/// These use two of the spare words the stride already carries, so the channel
+/// table does not grow.
+
+[34] src/voice.rs:519
+/// Per-channel controller state, published the same way the note-off gate is:
+/// one row per gate tile, which a voice reads for its own channel.
+///
+/// Neither of these can be resolved on the host the way sustain can. Sustain
+/// only changes *when* a note-off is published, and note-offs are already a
+/// host table. Bend changes the step of every voice already in the pool, and
+/// channel volume changes the gain of every voice already in the pool, and
+/// there may be fourteen million of them. So this is the part of the
+/// controller set that costs device work.
+///
+/// It is arranged to cost as little as possible. The two are tracked
+/// separately -- a file that bends but never touches volume pays only for the
+/// bend -- and if a control sat at unity for the whole block, the render pass
+/// is told and skips that work entirely. Both live in one table so that a
+/// channel's bend and gains are adjacent rather than in two rows a kilobyte
+/// apart.
+
+[35] src/voice.rs:536
+    /// `tiles * BEND_CHANNELS * CHAN_FIELDS` entries, tile-major. Gains are
+    /// f32 bit patterns; the bend factor is 8.24 fixed point.
+
+[36] src/voice.rs:560
+        // One row past the last tile, holding the state the block ends on. A
+        // voice born after a controller in the final tile reads it, and it is
+        // the same value the next block's row zero will carry.
+
+[37] src/voice.rs:602
+        // Freeze every tile up to this frame on the old value first, or the
+        // change reaches voices from the start of the block instead of here.
+
+[38] src/voice.rs:608
+    /// CC120, All Sound Off: silence this channel *now*, ignoring release.
+    ///
+    /// Distinct from CC123, All Notes Off, which releases normally and is what
+    /// this used to do for both. BASSMIDI is fully silent within about 5 ms of
+    /// a CC120 where Kestrel was still at -50 dB after 40; on a file that sends
+    /// it seven times a second that is a different arrangement, not a detail.
+    ///
+    /// Written straight into the row for the tile containing `frame` rather
+    /// than into `now`, because a cut is an event and not a state: the tiles
+    /// after it must not inherit it.
+    ///
+    /// `note_id` is the id the next voice will be given, so every voice already
+    /// queued or sounding has a lower one. See `CHAN_CUT_ID_LO` for why the
+    /// frame alone is not enough to say which those are.
+
+[39] src/voice.rs:634
+    /// Set a channel's output gains from this frame on. These multiply the
+    /// per-voice gains, which carry the region's own pan and the velocity.
+
+[40] src/voice.rs:642
+        // Freeze every tile up to this frame on the old value first, or the
+        // change reaches voices from the start of the block instead of here.
+
+[41] src/voice.rs:655
+        // Freeze every tile up to this frame on the old value first, or the
+        // change reaches voices from the start of the block instead of here.
+
+[42] src/voice.rs:661
+    /// Fill any tiles no event reached. Call before `modulate` and
+    /// `refresh_active`.
+
+[43] src/voice.rs:665
+        // `<=` rather than `<`: the row past the last tile is filled too. See
+        // `SpawnCmd::row_bias`.
+
+[44] src/voice.rs:674
+    /// Which row a note struck at `frame` should take its opening bend and gain
+    /// from, as an offset from its own tile's. See `SpawnCmd::row_bias`.
+    ///
+    /// Zero unless a bend or a gain change has already landed in this tile, in
+    /// which case this tile's row was frozen on the value *before* it and the
+    /// current one is in the next row. `cursor > tile` is exactly the test for
+    /// "something has already been published in this tile": `advance_to` only
+    /// pushes the cursor past a tile when an event inside it forced the freeze.
+
+[45] src/voice.rs:697
+    /// Multiply a tile's already-published bend factor, for an LFO the host
+    /// evaluates per tile rather than per event. Kept separate from `set_bend`
+    /// because modulation is a continuous curve laid over whatever the wheel
+    /// and the bend lever last asked for, not a replacement for it.
+
+[46] src/voice.rs:738
+    /// False when every channel read the untouched params table, which lets
+    /// both backends skip re-reading a voice's DSP constants entirely.
+
+[47] src/voice.rs:757
+    /// False when nothing in this block is bent, which lets both backends skip
+    /// the per-voice step scale.
+
+[48] src/voice.rs:764
+    /// False when every channel sat at unity gain, which lets both backends
+    /// use the voice's own gains untouched.
+
+[49] src/voice.rs:777
+    /// The channel a voice belongs to, recovered from its gate slot. Voices
+    /// already carry the slot for the note-off gate, so neither control needs
+    /// an extra per-voice field.
+
+[50] src/voice.rs:799
+    /// A note-off is published at the frame it happened on, not at the start
+    /// of the gate tile containing it.
+    ///
+    /// The table this replaced could only say which tile an off fell in, which
+    /// quantised every release to `gate_frames` and made a note stream faster
+    /// than the tile rate come out as a tone at `sample_rate / gate_frames`.
+
+[51] src/voice.rs:819
+    /// Several note-offs in one gate tile stay distinct, which is the case the
+    /// count-per-tile table could not represent at all.
+
+[52] src/voice.rs:856
+        // The off publishes at the pedal lift, which is what makes a pedalled
+        // chord damp together.
+
+[53] src/voice.rs:862
+    /// Restriking a key while the pedal is down leaves two notes sounding and
+    /// one deferred note-off. Lifting must release exactly the first: the
+    /// deferral is a count, not a flag, and it has to stay clamped to what is
+    /// actually sounding or the second note is released by the first's off.
+
+[54] src/voice.rs:877
+        // A third has nothing behind it and must be dropped, exactly as an
+        // unmatched note-off is when there is no pedal.
+
+[55] src/voice.rs:919
+        // Only the first note is released: one published off, so ordinal 1
+        // resolves to a frame and ordinal 2 does not.

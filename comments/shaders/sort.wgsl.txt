@@ -1,0 +1,50 @@
+# Comments extracted from shaders/sort.wgsl
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] shaders/sort.wgsl:1
+// Voice pool sort, run as part of compaction.
+//
+// Why this exists, measured rather than assumed. With a million voices on an
+// RTX 5060 the render pass spends 86 ms of its 147 ms inside the two sample
+// fetches, and the size of the sample pool barely moves that number: a 4 MiB
+// pool costs 145 ms and a 512 MiB pool 147 ms. So the cost is not DRAM
+// bandwidth, it is the rate at which the L1 can serve distinct 32-byte
+// sectors. Thirty-two lanes of a warp reading thirty-two unrelated samples
+// need thirty-two sectors; thirty-two lanes reading neighbouring positions in
+// the same sample need two or three.
+//
+// So the key is (region, envelope stage, phase bucket): region first so a warp
+// shares a sample, stage next to cut branch divergence, and a coarsened phase
+// last so the lanes that share a sample also share cache lines.
+//
+// Least-significant-bit-first, one bit per pass, each pass a stable binary
+// split built on the same prefix sum the compaction uses. One bit at a time is
+// more passes than a byte at a time would be, but each pass only moves an
+// 8-byte (key, index) pair, and the whole sort costs a couple of milliseconds
+// against a render pass measured in hundreds.
+//
+// Determinism: a binary split is stable by construction and uses no atomics,
+// so the permutation is a pure function of the pool contents.
+
+[2] shaders/sort.wgsl:59
+        // Dead voices get a region one past the last real one, so they sort
+        // to the end and the gather simply stops before reaching them.
+
+[3] shaders/sort.wgsl:82
+    // Same grid-stride over blocks as `compact.wgsl::scan_local`, and for the
+    // same reason: the pool may hold more WG-sized blocks than one dispatch
+    // dimension can address.
+
+[4] shaders/sort.wgsl:182
+/// Move the surviving voices into their sorted slots. One copy of the pool per
+/// block: this does the compaction and the reordering together, because the
+/// permutation already has the dead voices pushed past `S_LIVE_NEW`.
+
+[5] shaders/sort.wgsl:202
+            // Start offsets and the born-under variant only apply to the
+            // block a voice was born in.

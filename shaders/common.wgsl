@@ -1,16 +1,6 @@
-// Shared declarations, prepended to every pass.
-//
-// WGSL has no include mechanism, so `gpu::shader_source` concatenates this file
-// with each pass and substitutes the {{...}} placeholders from the Config.
-// Keep the field offsets below in step with `src/voice.rs`.
+// [1]
 
-// ---------------------------------------------------------------------------
-// voice pool layout
-// ---------------------------------------------------------------------------
-// One flat u32 buffer holding structure of arrays: field f of voice i lives at
-// `f * capacity + i`. Every field's stride stays 1 across neighbouring
-// invocations, which is what makes the region sort worth doing, and it costs
-// one binding instead of twenty-two.
+// [2]
 
 const F_PHASE_LO: u32   = 0u;
 const F_PHASE_HI: u32   = 1u;
@@ -34,14 +24,15 @@ const F_ORDINAL: u32    = 18u;
 const F_START_REL: u32  = 19u;
 const F_NOTE_LO: u32    = 20u;
 const F_NOTE_HI: u32    = 21u;
-// The params variant this voice was born under, plus one, or zero once it has
-// outlived the block it was born in. See `SpawnCmd::variant` in src/voice.rs.
-// Like F_START_REL it is cleared at the end of every block.
+// [3]
 const F_BORN_VARIANT: u32 = 22u;
-// Frame within this block at which a stolen voice starts fading, plus one.
-// Zero means the voice is not being stolen, so a zeroed slot is inert.
+// [4]
 const F_STOP_REL: u32 = 23u;
-const VOICE_FIELDS: u32 = 24u;
+// [5]
+const F_AGE: u32 = 24u;
+// [6]
+const F_REL_AGE: u32 = 25u;
+const VOICE_FIELDS: u32 = {{VOICE_FIELDS}}u;
 
 const ENV_ATTACK: u32  = 0u;
 const ENV_DECAY: u32   = 1u;
@@ -53,6 +44,7 @@ const VF_LOOP: u32 = 1u;
 const VF_LOOP_UNTIL_RELEASE: u32 = 2u;
 
 const RP_FILTER: u32 = 1u;
+const RP_MOD_ENV: u32 = 2u;
 
 const GATE_SLOTS: u32 = 2048u;
 
@@ -60,12 +52,7 @@ const INTERP_NEAREST: u32 = 0u;
 const INTERP_LINEAR: u32 = 1u;
 const INTERP_CUBIC: u32 = 2u;
 
-// ---------------------------------------------------------------------------
-// device-side state
-// ---------------------------------------------------------------------------
-// The live voice count lives on the device, not in the uniform block, so a
-// whole block of passes can be recorded into one command buffer without the
-// host having to rewrite a uniform between dispatches.
+// [7]
 
 const S_LIVE: u32       = 0u;
 const S_LIVE_NEW: u32   = 1u;
@@ -90,6 +77,23 @@ const TILE: u32 = {{TILE}}u;
 // Frames between note-off gate checks. A multiple of TILE.
 const GATE_TILE: u32 = {{GATE_TILE}}u;
 const TILES_PER_GATE: u32 = GATE_TILE / TILE;
+// [8]
+const GAIN_RAMP: bool = {{GAIN_RAMP}};
+const INV_GATE_TILE: f32 = 1.0 / f32(GATE_TILE);
+// Ramp biquad coefficients across a gate tile. See `Config::filter_ramp`.
+const FILTER_RAMP: bool = {{FILTER_RAMP}};
+// A release frame no voice can reach, meaning "nothing due".
+const NO_RELEASE: u32 = 0xFFFFFFFFu;
+// Whether this build evaluates SF2 LFOs at all. See `Config::lfo_enabled`.
+const USE_LFO: bool = {{USE_LFO}};
+// [9]
+const USE_MOD_ENV: bool = {{USE_MOD_ENV}};
+// [10]
+const SAMPLE_RATE_F: f32 = {{SAMPLE_RATE}}.0;
+// [11]
+const MOD_ENV_ATTACK_SCALE: f32 = 0.12542917;
+// Words of `[base, index]` meta before the note-off frames in `gates`.
+const OFF_META_WORDS: u32 = (GATE_SLOTS + 1u) * 2u;
 
 struct RegionParams {
     attack_rate: f32,
@@ -102,9 +106,56 @@ struct RegionParams {
     b1: f32,
     a1: f32,
     a2: f32,
+    // [12]
     flags: u32,
-    pad: u32,
+    mod_lfo_inc: u32,
+    vib_lfo_inc: u32,
+    /// Start delays in frames: mod low half, vib high half.
+    lfo_delays: u32,
+    /// Peak pitch deviation in cents as two i16: mod low, vib high.
+    lfo_pitch: u32,
 };
+
+// [13]
+struct ModEnvParams {
+    delay_frames: u32,
+    attack_frames: u32,
+    hold_frames: u32,
+    decay_rate: f32,
+    sustain: f32,
+    release_rate: f32,
+    to_pitch: f32,
+    to_filter: f32,
+    fc_cents: f32,
+    q_gain: f32,
+    q_inv_2q: f32,
+    pad0: f32,
+    pad1: f32,
+    pad2: f32,
+    pad3: f32,
+    pad4: f32,
+};
+
+// Unpackers, mirroring the accessors on `bank::RegionParams`.
+fn rp_mod_delay(p: RegionParams) -> u32 { return p.lfo_delays & 0xFFFFu; }
+fn rp_vib_delay(p: RegionParams) -> u32 { return p.lfo_delays >> 16u; }
+fn rp_mod_pitch(p: RegionParams) -> f32 {
+    return f32(bitcast<i32>(p.lfo_pitch << 16u) >> 16u);
+}
+fn rp_vib_pitch(p: RegionParams) -> f32 {
+    return f32(bitcast<i32>(p.lfo_pitch) >> 16u);
+}
+fn rp_mod_volume(p: RegionParams) -> f32 {
+    return f32(bitcast<i32>(p.flags) >> 16u);
+}
+
+/// SF2's LFO waveform: a triangle starting at zero, in [-1, 1]. \[14\]
+fn lfo_tri(phase: u32) -> f32 {
+    let t = f32(phase) * (1.0 / 4294967296.0);
+    if (t < 0.25) { return 4.0 * t; }
+    if (t < 0.75) { return 2.0 - 4.0 * t; }
+    return 4.0 * t - 4.0;
+}
 
 struct Uniforms {
     block_frames: u32,
@@ -132,41 +183,39 @@ struct Uniforms {
     params_per_variant: u32,
     /// Non-zero to steal by envelope level rather than by age.
     steal_by_level: u32,
+
+    /// Half-width of the modulation envelope's pitch-factor table, in \[15\]
+    menv_factor_half: u32,
+    /// Where the shared `log2` mantissa table starts in `menv_factors`.
+    menv_log2_base: u32,
+    pad0: u32,
+    pad1: u32,
 };
 
 // Bits of Uniforms::chan_active.
 const CHAN_ACTIVE_BEND: u32 = 1u;
 const CHAN_ACTIVE_GAIN: u32 = 2u;
 const CHAN_ACTIVE_VARIANT: u32 = 4u;
+const CHAN_ACTIVE_CUT: u32 = 8u;
 
-// ---------------------------------------------------------------------------
-// helpers
-// ---------------------------------------------------------------------------
+// [16]
 
-// 32.32 fixed point, held as two u32 lanes because WGSL has no portable u64.
 // Channels in a controller row. Sixteen, like the MIDI spec.
 const BEND_CHANNELS: u32 = 16u;
-// Words per channel: bend factor, left gain, right gain, one spare.
-const CHAN_FIELDS: u32 = 4u;
+// [17]
+const CHAN_FIELDS: u32 = 8u;
 const CHAN_BEND: u32 = 0u;
 const CHAN_GAIN_L: u32 = 1u;
 const CHAN_GAIN_R: u32 = 2u;
 const CHAN_VARIANT: u32 = 3u;
+const CHAN_CUT: u32 = 4u;
+// [18]
+const CHAN_CUT_ID_LO: u32 = 5u;
+const CHAN_CUT_ID_HI: u32 = 6u;
 // Fractional bits in a bend factor. Matches BEND_FRAC_BITS on the host.
 const BEND_SHIFT: u32 = 24u;
 
-// The 64-bit key voice stealing selects the k smallest of, as (hi, lo). The
-// caller loads the words; this only decides how they are combined, so that the
-// selection and the marking cannot disagree about the ordering.
-//
-// By age the key is simply the note id, unique and handed out in event order.
-// By level it is the envelope level in the top 16 bits and the note id in the
-// low 48, so quiet voices sort first and the id breaks ties. The radix select
-// needs a total order with no ties or "the k smallest" is not a well-defined
-// set, which is why the id is carried rather than the level being used alone:
-// levels collide constantly, with a million voices sitting at exactly 1.0 or
-// exactly 0.0. A note id needs 48 bits to stay unique for any file this will
-// see -- 2.8e14 against the 5.5e9 of the largest known.
+// [19]
 fn steal_key(hi: u32, lo: u32, level_bits: u32) -> vec2<u32> {
     if (u.steal_by_level == 0u) {
         return vec2<u32>(hi, lo);
@@ -176,9 +225,7 @@ fn steal_key(hi: u32, lo: u32, level_bits: u32) -> vec2<u32> {
     return vec2<u32>((q << 16u) | (hi & 0xFFFFu), lo);
 }
 
-// 32x32 -> 64 unsigned multiply, returned as (lo, hi). WGSL has no portable
-// 64-bit integer, so this is the schoolbook version in 16-bit limbs, with the
-// middle carry handled explicitly because `p01 + p10` overflows 32 bits.
+// [20]
 fn mul32(a: u32, b: u32) -> vec2<u32> {
     let a0 = a & 0xFFFFu;
     let a1 = a >> 16u;
@@ -195,12 +242,7 @@ fn mul32(a: u32, b: u32) -> vec2<u32> {
     return vec2<u32>(lo, hi);
 }
 
-// Scale a 32.32 value by an 8.24 fixed-point factor, truncating, saturating
-// rather than wrapping. Returns (hi, lo) like `add64`.
-//
-// This has to agree bit for bit with `Fixed::scale` on the host: it is how a
-// bent voice gets its step, and a step that differs in its low bits does not
-// null as an error, it nulls as two renders drifting apart over a block.
+// [21]
 fn scale64(hi: u32, lo: u32, factor: u32) -> vec2<u32> {
     let pl = mul32(lo, factor);   // product bits 0..63
     let ph = mul32(hi, factor);   // product bits 32..95
@@ -232,8 +274,7 @@ fn frac_of(lo: u32) -> f32 {
     return f32(lo) * (1.0 / 4294967296.0);
 }
 
-// The index `off` frames away from `idx`, honouring the loop. Mirrors
-// `CpuSynth::advance_index` statement for statement.
+// [22]
 fn neighbour_index(idx: u32, off: i32, looping: bool, ls: u32, le: u32, len: u32) -> u32 {
     let raw = i32(idx) + off;
     if (looping) {
@@ -245,4 +286,47 @@ fn neighbour_index(idx: u32, off: i32, looping: bool, ls: u32, le: u32, len: u32
         return u32(raw);
     }
     return u32(clamp(raw, 0, i32(len) - 1));
+}
+
+// [23]
+
+// [24]
+const MOD_ENV_LOG2_BITS: u32 = 10u;
+const MOD_ENV_LOG2_FRAC_BITS: u32 = 8u;
+
+// [25]
+fn biquad_lowpass_pre(fc: f32, q_gain: f32, inv_2q: f32, sr: f32) -> vec4<f32> {
+    let w0 = 6.2831855 * clamp(fc / sr, 1.0e-5, 0.49);
+    let sin_w0 = sin(w0);
+    let cos_w0 = cos(w0);
+    let alpha = sin_w0 * inv_2q;
+
+    let a0 = 1.0 + alpha;
+    let b0 = q_gain * (1.0 - cos_w0) * 0.5 / a0;
+    let b1 = q_gain * (1.0 - cos_w0) / a0;
+    let a1 = -2.0 * cos_w0 / a0;
+    let a2 = (1.0 - alpha) / a0;
+    return vec4<f32>(b0, b1, a1, a2);
+}
+
+// [26]
+const MOD_ENV_CENTS_STEPS: f32 = 64.0;
+
+// [27]
+fn mod_env_pitch_index(cents: f32, half: u32) -> u32 {
+    // [28]
+    let q = round(cents * MOD_ENV_CENTS_STEPS);
+    let i = q + f32(half);
+    return u32(clamp(i, 0.0, f32(half * 2u)));
+}
+
+// [29]
+fn quantise_level(x: f32) -> f32 {
+    let t = i32(clamp(x, -2.0, 2.0) * 4194304.0);
+    return f32(t) * (1.0 / 4194304.0);
+}
+
+// Absolute cents to hertz. Mirrors `bank::cents_to_hz`.
+fn cents_to_hz(cents: f32) -> f32 {
+    return 8.176 * exp2(cents / 1200.0);
 }
