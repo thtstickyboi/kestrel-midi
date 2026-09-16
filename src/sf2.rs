@@ -1,3 +1,7 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 //! SoundFont 2 loader. \[1\]
 
 use crate::bank::*;
@@ -496,6 +500,8 @@ pub fn load(path: impl AsRef<Path>, cfg: &Config) -> Result<Bank> {
     let mut bank = Bank {
         uses_rand: false,
         uses_lfo: false,
+        uses_lfo_volume: false,
+        uses_lfo_pitch: false,
         uses_mod_env: false,
         pool,
         pool_rate,
@@ -713,7 +719,7 @@ fn build_pool(
 
         let start = pool.len() as u32;
         pool.extend_from_slice(&data);
-        pool.extend(std::iter::repeat(0i16).take(POOL_GUARD as usize));
+        pool.extend(std::iter::repeat_n(0i16, POOL_GUARD as usize));
 
         remap[sid as usize] = samples.len() as u32;
         samples.push(SampleInfo {

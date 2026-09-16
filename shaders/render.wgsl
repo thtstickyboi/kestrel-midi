@@ -1,3 +1,7 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 // [1]
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -36,6 +40,30 @@ fn mod_env_attack_level(x: f32) -> f32 {
     return clamp(1.0 + quantise_level(log2_exact(x) * MOD_ENV_ATTACK_SCALE), 0.0, 1.0);
 }
 
+// [8]
+fn note_age(raw: u32) -> u32 {
+    return select(raw, 0u, raw >= 0x80000000u);
+}
+
+// [9]
+fn at_least(a: u32, b: u32) -> u32 {
+    return 1u - ((a - b) >> 31u);
+}
+
+// 1 for a non-zero depth, else 0, the same way.
+fn nonzero(v: i32) -> u32 {
+    return (bitcast<u32>(v) | bitcast<u32>(-v)) >> 31u;
+}
+
+// [10]
+fn lfo_tremolo(p: RegionParams, age: u32) -> f32 {
+    let d = rp_mod_delay(p);
+    let on = f32(at_least(age, d) * nonzero(bitcast<i32>(p.flags) >> 16u));
+    let m = lfo_tri((age - d) * p.mod_lfo_inc) * on;
+    let x = -(m * rp_mod_volume(p)) * (1.0 / 60.205999);
+    return 1.0 + (exp2(x) - 1.0) * on;
+}
+
 fn mod_env_pre_release(p: ModEnvParams, age: u32) -> f32 {
     if (age < p.delay_frames) { return 0.0; }
     var a = age - p.delay_frames;
@@ -49,16 +77,16 @@ fn mod_env_pre_release(p: ModEnvParams, age: u32) -> f32 {
 }
 
 fn mod_env_level(p: ModEnvParams, age: u32, release_age: u32) -> f32 {
-    // [8]
+    // [11]
     let pre = mod_env_pre_release(p, min(age, release_age));
     if (age <= release_age) { return pre; }
     return max(pre - quantise_level(f32(age - release_age) * p.release_rate), 0.0);
 }
 
-// [9]
+// [12]
 const CHAN_ENABLED: bool = {{CHAN}};
 
-// [10]
+// [13]
 const M: u32 = TILE * 2u;
 // Threads cooperating on one lane during the first reduction level.
 const PER_LANE: u32 = WG / M;
@@ -79,7 +107,7 @@ fn fetch(base: u32, idx: u32) -> f32 {
     return p.x;
 }
 
-// [11]
+// [14]
 fn next_index(idx: u32, looping: bool, ls: u32, le: u32, len: u32) -> u32 {
     let n = idx + 1u;
     if (looping) {
@@ -98,7 +126,7 @@ fn interpolate(
         return fetch(base, idx);
     }
     if (u.interp == INTERP_LINEAR) {
-        // [12]
+        // [15]
         let i = base + idx;
         let w = i >> 1u;
         let p0 = word_pair(w);
@@ -106,7 +134,7 @@ fn interpolate(
         let odd = (i & 1u) == 1u;
         let s0 = select(p0.x, p0.y, odd);
         var s1 = select(p0.y, p1.x, odd);
-        // [13]
+        // [16]
         let n = next_index(idx, looping, ls, le, len);
         if (n != idx + 1u) { s1 = fetch(base, n); }
         return s0 + (s1 - s0) * frac;
@@ -124,7 +152,7 @@ fn interpolate(
     return ((a * frac + b) * frac + c) * frac + s0;
 }
 
-// [14]
+// [17]
 fn reduce_into_partials(tid: u32, wg: u32, nwg: u32, first_sample: u32) {
     let lane = tid / PER_LANE;
     let chunk = tid % PER_LANE;
@@ -156,7 +184,7 @@ fn main(
     let live = state[S_LIVE];
     let samples = u.block_frames * 2u;
 
-    // [15]
+    // [18]
     for (var j = tid; j < samples; j = j + WG) {
         partials[j * nwg + wg] = 0.0;
     }
@@ -182,7 +210,7 @@ fn main(
         var level = 0.0;
         var gain_l = 0.0;
         var gain_r = 0.0;
-        // [16]
+        // [19]
         var d_gain_l = 0.0;
         var d_gain_r = 0.0;
         var z1 = 0.0;
@@ -192,11 +220,11 @@ fn main(
         var start_rel = 0u;
         // Frame this voice was stolen at, plus one; zero if it was not.
         var stop_rel = 0u;
-        // [17]
+        // [20]
         var release_frame = NO_RELEASE;
         var p: RegionParams;
         var use_filter = false;
-        // [18]
+        // [21]
         var cb0 = 1.0;
         var cb1 = 0.0;
         var ca1 = 0.0;
@@ -205,29 +233,29 @@ fn main(
         var db1 = 0.0;
         var da1 = 0.0;
         var da2 = 0.0;
-        // [19]
+        // [22]
         var filter_mix = 0.0;
         var d_filter_mix = 0.0;
         var params_base = 0u;
         var variant = 0u;
-        // [20]
+        // [23]
         var born_variant = 0u;
-        // [21]
+        // [24]
         var born_bias = 0u;
 
         var base_step_hi = 0u;
         var base_step_lo = 0u;
-        // [22]
+        // [25]
         var bent_hi = 0u;
         var bent_lo = 0u;
         var age0 = 0u;
-        // [23]
+        // [26]
         var mp: ModEnvParams;
         var use_menv = false;
         var menv_filter = false;
         var rel_age = NO_RELEASE;
-        // Tremolo, as a linear gain. One for a voice with no volume LFO.
-        var lfo_gain = 1.0;
+        // [27]
+        var lfo_factor = 1u << BEND_SHIFT;
         var base_gain_l = 0.0;
         var base_gain_r = 0.0;
 
@@ -235,7 +263,7 @@ fn main(
             let c = u.capacity;
             phase_lo = voices[F_PHASE_LO * c + v];
             phase_hi = voices[F_PHASE_HI * c + v];
-            // [24]
+            // [28]
             base_step_lo = voices[F_STEP_LO * c + v];
             base_step_hi = voices[F_STEP_HI * c + v];
             step_lo = base_step_lo;
@@ -264,18 +292,28 @@ fn main(
             born_variant = voices[F_BORN_VARIANT * c + v];
             born_bias = born_variant >> 16u;
             born_variant = born_variant & 0xFFFFu;
-            // [25]
+            // [29]
             if (stage < ENV_RELEASE) {
                 let obase = gates[gate_slot * 2u];
                 if (ordinal <= obase) {
                     // Released before this block began.
                     release_frame = 0u;
                 } else {
-                    let olo = gates[gate_slot * 2u + 1u];
-                    let ohi = gates[(gate_slot + 1u) * 2u + 1u];
+                    let first_run = gates[gate_slot * 2u + 1u];
+                    let end_run = gates[(gate_slot + 1u) * 2u + 1u];
                     let j = ordinal - obase;
-                    if (j <= ohi - olo) {
-                        release_frame = gates[OFF_META_WORDS + olo + j - 1u];
+                    if (end_run > first_run && j <= gates[OFF_META_WORDS + (end_run - 1u) * 2u]) {
+                        var lo_run = first_run;
+                        var hi_run = end_run - 1u;
+                        while (lo_run < hi_run) {
+                            let mid_run = lo_run + (hi_run - lo_run) / 2u;
+                            if (gates[OFF_META_WORDS + mid_run * 2u] >= j) {
+                                hi_run = mid_run;
+                            } else {
+                                lo_run = mid_run + 1u;
+                            }
+                        }
+                        release_frame = gates[OFF_META_WORDS + lo_run * 2u + 1u];
                     }
                 }
             }
@@ -293,9 +331,9 @@ fn main(
                 if (use_menv) {
                     mp = menv[params_base + variant * u.params_per_variant];
                     menv_filter = mp.to_filter != 0.0;
-                    // [26]
+                    // [30]
                     if (release_frame != NO_RELEASE) {
-                        rel_age = age0 + release_frame;
+                        rel_age = note_age(age0 + release_frame);
                     }
                 }
             }
@@ -303,19 +341,23 @@ fn main(
 
         let loop_enabled = (vflags & VF_LOOP) != 0u;
         let loop_until_release = (vflags & VF_LOOP_UNTIL_RELEASE) != 0u;
-        // [27]
+        // [31]
         let channel = gate_slot >> 7u;
-        // [28]
+        // [32]
         let born_gate = start_rel / GATE_TILE;
 
         for (var tile = 0u; tile < u.tiles; tile = tile + 1u) {
-            // [29]
+            // [33]
             if (is_live && (tile % TILES_PER_GATE) == 0u) {
                 let gt = tile / TILES_PER_GATE;
-                // [30]
+                // [34]
+                var tgt_l = base_gain_l;
+                var tgt_r = base_gain_r;
+                var snap = gt == 0u;
+                // [35]
                 if (CHAN_ENABLED && u.chan_active != 0u) {
                     let ci = (gt * BEND_CHANNELS + channel) * CHAN_FIELDS;
-                    // [31]
+                    // [36]
                     let bias = select(
                         0u, born_bias, born_variant != 0u && gt <= born_gate
                     );
@@ -330,11 +372,11 @@ fn main(
                         step_lo = st.y;
                     }
                     if ((u.chan_active & CHAN_ACTIVE_GAIN) != 0u) {
-                        let tgt_l = base_gain_l * bitcast<f32>(chan[gi + CHAN_GAIN_L]);
-                        let tgt_r = base_gain_r * bitcast<f32>(chan[gi + CHAN_GAIN_R]);
-                        // [32]
+                        tgt_l = base_gain_l * bitcast<f32>(chan[gi + CHAN_GAIN_L]);
+                        tgt_r = base_gain_r * bitcast<f32>(chan[gi + CHAN_GAIN_R]);
+                        // [37]
                         if (GAIN_RAMP && gt > born_gate) {
-                            // [33]
+                            // [38]
                             d_gain_l = (tgt_l - gain_l) * INV_GATE_TILE;
                             d_gain_r = (tgt_r - gain_r) * INV_GATE_TILE;
                         } else {
@@ -342,13 +384,14 @@ fn main(
                             gain_r = tgt_r;
                             d_gain_l = 0.0;
                             d_gain_r = 0.0;
+                            snap = true;
                         }
                     }
-                    // [34]
+                    // [39]
                     if ((u.chan_active & CHAN_ACTIVE_CUT) != 0u) {
                         let cut = chan[ci + CHAN_CUT];
                         if (cut != 0u && stop_rel == 0u) {
-                            // [35]
+                            // [40]
                             let cap = u.capacity;
                             let id_lo = voices[F_NOTE_LO * cap + v];
                             let id_hi = voices[F_NOTE_HI * cap + v];
@@ -359,7 +402,7 @@ fn main(
                             }
                         }
                     }
-                    // [36]
+                    // [41]
                     db0 = 0.0;
                     db1 = 0.0;
                     da1 = 0.0;
@@ -367,14 +410,14 @@ fn main(
                     d_filter_mix = 0.0;
                     let want = select(0u, chan[ci + CHAN_VARIANT],
                                       (u.chan_active & CHAN_ACTIVE_VARIANT) != 0u);
-                    // [37]
+                    // [42]
                     let born_here = born_variant != 0u && gt <= born_gate;
                     if (want != variant && !born_here) {
                         variant = want;
                         let was_filtering = use_filter;
                         p = params[params_base + variant * u.params_per_variant];
                         use_filter = (p.flags & RP_FILTER) != 0u;
-                        // [38]
+                        // [43]
                         if (USE_MOD_ENV) {
                             use_menv = (p.flags & RP_MOD_ENV) != 0u;
                             if (use_menv) {
@@ -383,7 +426,7 @@ fn main(
                             }
                             menv_filter = use_menv && mp.to_filter != 0.0;
                         }
-                        // [39]
+                        // [44]
                         if (FILTER_RAMP && gt > born_gate
                             && use_filter && was_filtering) {
                             db0 = (p.b0 - cb0) * INV_GATE_TILE;
@@ -393,7 +436,7 @@ fn main(
                         } else if (FILTER_RAMP && gt > born_gate
                                    && use_filter != was_filtering) {
                             if (use_filter) {
-                                // [40]
+                                // [45]
                                 z1 = 0.0;
                                 z2 = 0.0;
                                 cb0 = p.b0;
@@ -403,7 +446,7 @@ fn main(
                                 filter_mix = 0.0;
                                 d_filter_mix = INV_GATE_TILE;
                             } else {
-                                // [41]
+                                // [46]
                                 filter_mix = 1.0;
                                 d_filter_mix = -INV_GATE_TILE;
                             }
@@ -424,43 +467,52 @@ fn main(
                         }
                     }
                 }
+                // [47]
+                if (USE_LFO_VOLUME) {
+                    // [48]
+                    let lp = params[params_base + variant * u.params_per_variant];
+                    let now = lfo_tremolo(lp, note_age(age0 + tile * TILE));
+                    let trem = lfo_tremolo(lp, note_age(age0 + (tile + TILES_PER_GATE) * TILE));
+                    // [49]
+                    gain_l = select(gain_l, tgt_l * now, snap);
+                    gain_r = select(gain_r, tgt_r * now, snap);
+                    d_gain_l = (tgt_l * trem - gain_l) * INV_GATE_TILE;
+                    d_gain_r = (tgt_r * trem - gain_r) * INV_GATE_TILE;
+                }
+                if (USE_LFO_PITCH) {
+                    let lp = params[params_base + variant * u.params_per_variant];
+                    let age = note_age(age0 + tile * TILE);
+                    let vp = bitcast<i32>(lp.lfo_pitch) >> 16u;
+                    let mlp = bitcast<i32>(lp.lfo_pitch << 16u) >> 16u;
+                    let on_vib = at_least(age, rp_vib_delay(lp)) * nonzero(vp);
+                    let on_mod = at_least(age, rp_mod_delay(lp)) * nonzero(mlp);
+                    let vib = lfo_tri((age - rp_vib_delay(lp)) * lp.vib_lfo_inc) * f32(on_vib);
+                    let modl = lfo_tri((age - rp_mod_delay(lp)) * lp.mod_lfo_inc) * f32(on_mod);
+                    let cents = f32(vp) * vib + f32(mlp) * modl;
+                    // [50]
+                    let one = 1u << BEND_SHIFT;
+                    let fx = u32(exp2(cents * (1.0 / 1200.0)) * 16777216.0);
+                    lfo_factor = one + (fx - one) * (on_vib | on_mod);
+                    let st = scale64(bent_hi, bent_lo, lfo_factor);
+                    step_hi = st.x;
+                    step_lo = st.y;
+                }
             }
 
-            // [42]
-            if ((USE_LFO || USE_MOD_ENV) && is_live) {
-                // [43]
-                let age = age0 + tile * TILE;
-                var cents = 0.0;
-                if (USE_LFO) {
-                    let vp = rp_vib_pitch(p);
-                    let mlp = rp_mod_pitch(p);
-                    let mv = rp_mod_volume(p);
-                    if (vp != 0.0 && age >= rp_vib_delay(p)) {
-                        cents = cents + vp
-                            * lfo_tri((age - rp_vib_delay(p)) * p.vib_lfo_inc);
-                    }
-                    var mod_lfo = 0.0;
-                    if ((mlp != 0.0 || mv != 0.0) && age >= rp_mod_delay(p)) {
-                        mod_lfo = lfo_tri((age - rp_mod_delay(p)) * p.mod_lfo_inc);
-                        cents = cents + mlp * mod_lfo;
-                    }
-                    // [44]
-                    if (mv != 0.0) {
-                        lfo_gain = exp2(-(mod_lfo * mv) * (1.0 / 60.205999));
-                    } else {
-                        lfo_gain = 1.0;
-                    }
-                }
+            // [51]
+            if (USE_MOD_ENV && is_live) {
+                // [52]
+                let age = note_age(age0 + tile * TILE);
                 var menv_factor = 0u;
                 if (USE_MOD_ENV && use_menv) {
                     let l = mod_env_level(mp, age, rel_age);
-                    // [45]
+                    // [53]
                     if (mp.to_pitch != 0.0) {
                         let i = mod_env_pitch_index(mp.to_pitch * l, u.menv_factor_half);
                         menv_factor = menv_factors[i];
                     }
                     if (menv_filter) {
-                        // [46]
+                        // [54]
                         let fc = cents_to_hz(mp.fc_cents + mp.to_filter * l);
                         let co = biquad_lowpass_pre(fc, mp.q_gain, mp.q_inv_2q, SAMPLE_RATE_F);
                         cb0 = co.x;
@@ -473,10 +525,9 @@ fn main(
                         da2 = 0.0;
                     }
                 }
-                if (cents != 0.0) {
-                    // 8.24, the same fixed-point factor bend uses.
-                    let factor = u32(exp2(cents * (1.0 / 1200.0)) * 16777216.0);
-                    let st = scale64(bent_hi, bent_lo, factor);
+                // [55]
+                if (USE_LFO_PITCH) {
+                    let st = scale64(bent_hi, bent_lo, lfo_factor);
                     step_hi = st.x;
                     step_lo = st.y;
                 } else {
@@ -496,7 +547,7 @@ fn main(
                 let f = f0 + i;
 
                 if (is_live && stage != ENV_DEAD && f >= start_rel) {
-                    // [47]
+                    // [56]
                     if (stage < ENV_RELEASE && f >= release_frame) {
                         stage = ENV_RELEASE;
                         level = min(level, 1.0);
@@ -509,7 +560,7 @@ fn main(
                     if (!looping && phase_hi >= smp_len) {
                         stage = ENV_DEAD;
                     } else {
-                        // [48]
+                        // [57]
                         if (stage == ENV_ATTACK) {
                             level = level + p.attack_rate;
                             if (level >= p.attack_end) {
@@ -552,14 +603,14 @@ fn main(
 
                         // Transposed direct form II. b2 == b0.
                         y = x;
-                        // [49]
+                        // [58]
                         if (FILTER_RAMP && d_filter_mix != 0.0) {
-                            // [50]
+                            // [59]
                             let fy = cb0 * x + z1;
                             z1 = cb1 * x - ca1 * fy + z2;
                             z2 = cb0 * x - ca2 * fy;
                             y = x + (fy - x) * filter_mix;
-                            // [51]
+                            // [60]
                             filter_mix = filter_mix + d_filter_mix;
                         } else if (use_filter) {
                             y = cb0 * x + z1;
@@ -567,7 +618,7 @@ fn main(
                             z2 = cb0 * x - ca2 * y;
                         }
 
-                        // [52]
+                        // [61]
                         if (stop_rel != 0u && f + 1u >= stop_rel) {
                             let d = f + 1u - stop_rel;
                             if (d >= STEAL_FADE) {
@@ -582,7 +633,7 @@ fn main(
                         phase_hi = np.x;
                         phase_lo = np.y;
                         if (looping && phase_hi >= loop_end) {
-                            // [53]
+                            // [62]
                             let span = max(loop_end - loop_start, 1u);
                             phase_hi = phase_hi - span;
                             if (phase_hi >= loop_end) {
@@ -591,11 +642,9 @@ fn main(
                         }
                     }
                 }
-
-                if (USE_LFO) { y = y * lfo_gain; }
                 sh[(i * 2u) * WG + tid] = y * gain_l;
                 sh[(i * 2u + 1u) * WG + tid] = y * gain_r;
-                // [54]
+                // [63]
                 gain_l = gain_l + d_gain_l;
                 gain_r = gain_r + d_gain_r;
                 cb0 = cb0 + db0;
@@ -604,7 +653,7 @@ fn main(
                 ca2 = ca2 + da2;
             }
 
-            // [55]
+            // [64]
             workgroupBarrier();
             reduce_into_partials(tid, wg, nwg, f0 * 2u);
         }

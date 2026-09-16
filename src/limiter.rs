@@ -1,3 +1,21 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+//
+// NOT ENTIRELY KESTREL'S TO LICENSE. The `Limiter` type below -- the
+// `--limiter omni` path -- is a port of
+// `OmniConverter/Extensions/Audio/Limiter.cs`, itself from Kiva by Arduano:
+//
+//     Copyright (C) 2020 Arduano
+//     DON'T BE A DICK PUBLIC LICENSE, Version 1.1
+//     https://github.com/arduano/Kiva
+//
+// DBAD is permissive and not copyleft, so it neither extends to the rest of
+// this file nor conflicts with the MPL; what it asks for is credit, which this
+// notice and `THIRD-PARTY.md` are. `Brickwall`, the default and the only
+// limiter recommended for rendering, is original work and shares no code with
+// it. If `omni` is ever removed, this notice goes with it.
+
 //! Soft limiter, ported from the one OmniConverter already ships. \[1\]
 
 #[derive(Debug, Clone)]
@@ -123,7 +141,7 @@ pub fn clamp_block(buf: &mut [f32]) -> u64 {
 pub enum LimiterMode {
     /// No limiting. `clamp_block` still runs, so loud material hard-clips.
     Off,
-    /// The port of the realtime limiter OmniConverter ships, above. \[4\]
+    /// The port of the realtime limiter OmniConverter ships, above, with \[4\]
     Omni,
     /// Lookahead true-peak brickwall. Guarantees the output never exceeds the \[5\]
     Brickwall,
@@ -549,7 +567,8 @@ mod tests {
         // [28]
         assert!(
             staged < single * 0.85,
-            "the sustained stage did not steady the gain: it wobbles by              {staged:.4} with the stage and {single:.4} without"
+            "the sustained stage did not steady the gain: it wobbles by \
+             {staged:.4} with the stage and {single:.4} without"
         );
     }
 
@@ -573,5 +592,43 @@ mod tests {
              stage on: {}",
             level(0.35)
         );
+    }
+
+    /// `--limiter omni` runs the brickwall behind the follower as a safety \[30\]
+    #[test]
+    fn omni_with_the_safety_stage_never_exceeds_the_ceiling() {
+        // [31]
+        let src: Vec<f32> = (0..48000 * 2 * 2)
+            .map(|i| {
+                let t = i / 2;
+                let x = ((t as f64) * 0.03).sin();
+                (if t < 48000 { x * 0.3 } else { x * 12.0 }) as f32
+            })
+            .collect();
+        let peak = |b: &[f32]| b.iter().fold(0.0f32, |a, v| a.max(v.abs()));
+        let mut alone = src.clone();
+        Limiter::new(48000).process(&mut alone);
+        assert!(
+            peak(&alone) > 1.5,
+            "the follower caught the burst by itself ({}), so this proves nothing",
+            peak(&alone)
+        );
+
+        for ceiling in [1.0f64, 10f64.powf(-1.0 / 20.0)] {
+            let mut both = src.clone();
+            let mut bw = Brickwall::new(48000, ceiling, 2.0, 60.0, 0.0, true);
+            let d = bw.latency() * 2;
+            Limiter::new(48000).process(&mut both);
+            bw.process(&mut both);
+            assert!(
+                peak(&both) as f64 <= ceiling + 1e-4,
+                "omni with the safety stage let {} through at ceiling {ceiling}",
+                peak(&both)
+            );
+            assert!(
+                both[d..96000] == alone[..96000 - d],
+                "the safety stage changed material under the ceiling at {ceiling}"
+            );
+        }
     }
 }

@@ -1,3 +1,7 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 //! SFZ loader. \[1\]
 
 use crate::bank::*;
@@ -454,6 +458,8 @@ pub fn load(path: impl AsRef<Path>, cfg: &Config) -> Result<Bank> {
     let mut bank = Bank {
         uses_rand: false,
         uses_lfo: false,
+        uses_lfo_volume: false,
+        uses_lfo_pitch: false,
         uses_mod_env: false,
         pool,
         pool_rate,
@@ -503,7 +509,8 @@ fn report_sample_errors(errors: HashMap<String, u32>, unresolved_defines: u32) {
     }
     if unresolved_defines > 0 {
         log::warn!(
-            "sfz: {unresolved_defines} of those paths still contain `$`, so a              `#define` was used before it was written or its name is misspelt"
+            "sfz: {unresolved_defines} of those paths still contain `$`, so a \
+             `#define` was used before it was written or its name is misspelt"
         );
     }
 }
@@ -552,7 +559,7 @@ fn load_sample_channels(
 
         let start = pool.len() as u32;
         pool.extend_from_slice(&data);
-        pool.extend(std::iter::repeat(0i16).take(POOL_GUARD));
+        pool.extend(std::iter::repeat_n(0i16, POOL_GUARD));
 
         let idx = samples.len() as u32;
         samples.push(SampleInfo {
@@ -614,17 +621,33 @@ const KNOWN_OPCODES: &[&str] = &[
     "xfin_hivel",
     "xfout_lovel",
     "xfout_hivel",
+    "amplfo_freq",
+    "amplfo_depth",
+    "amplfo_delay",
+    "amplfo_fade",
+    "pitchlfo_freq",
+    "pitchlfo_depth",
+    "pitchlfo_delay",
+    "pitchlfo_fade",
+    // [18]
+    "fillfo_freq",
+    "fillfo_delay",
+    "fillfo_depth",
+    "fillfo_fade",
 ];
 
-/// Opcodes recognised as deliberately unimplemented, grouped by the feature \[18\]
+/// Opcodes recognised as deliberately unimplemented, grouped by the feature \[19\]
 const UNIMPL_TAG: char = '';
 
 const UNIMPLEMENTED_GROUPS: &[(&str, &[&str])] = &[
-    // [19]
-    ("LFO", &["amplfo_", "fillfo_", "pitchlfo_", "pitchlfo", "amplfo", "fillfo"]),
     // [20]
-    ("effects", &["reverb_", "chorus_", "delay_", "send_effect", "send", "effect"]),
+    (
+        "LFO controller modulation",
+        &["amplfo_", "fillfo_", "pitchlfo_", "pitchlfo", "amplfo", "fillfo", "lfo"],
+    ),
     // [21]
+    ("effects", &["reverb_", "chorus_", "delay_", "send_effect", "send", "effect"]),
+    // [22]
     (
         "envelope veltrack",
         &[
@@ -639,9 +662,9 @@ const UNIMPLEMENTED_GROUPS: &[(&str, &[&str])] = &[
             "gain_veltrack",
         ],
     ),
-    // [22]
-    ("voice masking", &["note_selfmask", "note_polyphony", "polyphony"]),
     // [23]
+    ("voice masking", &["note_selfmask", "note_polyphony", "polyphony"]),
+    // [24]
     ("crossfade curve", &["xf_velcurve", "xf_keycurve", "xf_cccurve"]),
     ("CC labelling", &["set_cc", "label_cc", "label_key"]),
 ];
@@ -673,7 +696,7 @@ fn region_from_opcodes(
         ..Default::default()
     };
 
-    // [24]
+    // [25]
     if let Some(k) = ops.key("lokey") {
         r.key_lo = k.clamp(0, 127) as u8;
     }
@@ -712,7 +735,7 @@ fn region_from_opcodes(
         r.amp_veltrack = v.clamp(-100.0, 100.0);
     }
 
-    // [25]
+    // [26]
     r.loop_mode = match ops.get("loop_mode").unwrap_or("") {
         "loop_continuous" => LoopMode::Continuous,
         "loop_sustain" => LoopMode::UntilRelease,
@@ -726,14 +749,14 @@ fn region_from_opcodes(
                 LoopMode::NoLoop
             }
         }
-        // [26]
+        // [27]
         other => {
             unhandled.push(format!("loop_mode={other} (unknown, treated as no_loop)"));
             LoopMode::NoLoop
         }
     };
 
-    // [27]
+    // [28]
     if let Some(v) = ops.i32("xfin_lovel") {
         r.xfin_lo = v.clamp(0, 127) as u8;
     }
@@ -746,7 +769,7 @@ fn region_from_opcodes(
     if let Some(v) = ops.i32("xfout_hivel") {
         r.xfout_hi = v.clamp(0, 127) as u8;
     }
-    // [28]
+    // [29]
     if r.xfin_hi < r.xfin_lo {
         unhandled.push("xfin_hivel < xfin_lovel (ignored)".to_string());
         r.xfin_lo = 0;
@@ -758,7 +781,7 @@ fn region_from_opcodes(
         r.xfout_hi = 127;
     }
 
-    // [29]
+    // [30]
     if let Some(v) = ops.f32("lorand") {
         r.rand_lo = v.clamp(0.0, 1.0);
     }
@@ -770,7 +793,7 @@ fn region_from_opcodes(
             "lorand={} > hirand={} (empty range, ignored)",
             r.rand_lo, r.rand_hi
         ));
-        // [30]
+        // [31]
         r.rand_lo = 0.0;
         r.rand_hi = 1.0;
     }
@@ -778,7 +801,7 @@ fn region_from_opcodes(
     if let Some(o) = ops.i32("offset") {
         r.addr_start = o.max(0);
     }
-    // [31]
+    // [32]
     let to_source = |resampled: u32| {
         if info.resample_ratio > 0.0 {
             (resampled as f32 / info.resample_ratio).round() as i32
@@ -796,6 +819,27 @@ fn region_from_opcodes(
     }
     if let Some(le) = ops.i32("loop_end") {
         r.addr_loop_end = le - to_source(info.loop_end);
+    }
+
+    // [33]
+    if let Some(d) = ops.f32("amplfo_depth") {
+        r.mod_lfo_to_volume = -10.0 * d;
+        r.mod_lfo_hz = ops.f32("amplfo_freq").unwrap_or(0.0).max(0.0);
+        r.mod_lfo_delay = ops.f32("amplfo_delay").unwrap_or(0.0).max(0.0);
+    }
+    if let Some(d) = ops.f32("pitchlfo_depth") {
+        r.vib_lfo_to_pitch = d;
+        r.vib_lfo_hz = ops.f32("pitchlfo_freq").unwrap_or(0.0).max(0.0);
+        r.vib_lfo_delay = ops.f32("pitchlfo_delay").unwrap_or(0.0).max(0.0);
+    }
+    // [34]
+    if ops.f32("fillfo_depth").is_some_and(|d| d != 0.0) {
+        unhandled.push("fillfo_depth (the filter LFO is not implemented)".to_string());
+    }
+    for fade in ["amplfo_fade", "pitchlfo_fade", "fillfo_fade"] {
+        if ops.f32(fade).is_some_and(|f| f > 0.0) {
+            unhandled.push(format!("{fade} (LFO fade-in is not implemented)"));
+        }
     }
 
     r.delay = ops.f32("ampeg_delay").unwrap_or(0.0).max(0.0);
@@ -816,20 +860,20 @@ fn region_from_opcodes(
     if let Some(vt) = ops.f32("fil_veltrack") {
         r.filter_veltrack_cents = vt.clamp(-9600.0, 9600.0);
     }
-    // [32]
+    // [35]
     if let Some(kind) = ops.get("fil_type") {
         if !kind.starts_with("lpf") {
             r.filter_fc_cents = 13500.0;
             r.filter_veltrack_cents = 0.0;
         }
     }
-    // [33]
+    // [36]
     let group_id = ops.i32("group").unwrap_or(0).clamp(0, 255);
     match ops.i32("off_by") {
         Some(off) if off.clamp(0, 255) == group_id && group_id > 0 => {
             r.exclusive_class = group_id as u8;
         }
-        // [34]
+        // [37]
         Some(_) => unhandled.push("off_by (cross-group, not implemented)".to_string()),
         None => {}
     }
@@ -895,14 +939,14 @@ mod tests {
         assert_eq!(out, ["sample=WYV-64-64.wav"]);
     }
 
-    /// `$KEY` and `$KEYS` can both be defined. Replacing the shorter one first \[35\]
+    /// `$KEY` and `$KEYS` can both be defined. Replacing the shorter one first \[38\]
     #[test]
     fn longest_name_wins() {
         let out = expand(&["#define $KEY a", "#define $KEYS b", "sample=$KEYS/$KEY.wav"]);
         assert_eq!(out, ["sample=b/a.wav"]);
     }
 
-    /// Redefinition takes effect from that point on, which is how a library \[36\]
+    /// Redefinition takes effect from that point on, which is how a library \[39\]
     #[test]
     fn redefinition_applies_from_that_point() {
         let out = expand(&["#define $L 1", "a=$L", "#define $L 2", "b=$L"]);
@@ -921,7 +965,7 @@ mod tests {
         assert_eq!(out, ["sample=root/v1/s.wav"]);
     }
 
-    /// Left in place rather than blanked, so it survives into the resolved \[37\]
+    /// Left in place rather than blanked, so it survives into the resolved \[40\]
     #[test]
     fn an_undefined_name_survives_for_the_report() {
         let out = expand(&["#define $A a", "sample=$A-$NOPE.wav"]);

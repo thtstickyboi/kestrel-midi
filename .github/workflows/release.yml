@@ -1,0 +1,163 @@
+# Builds the downloads when a version tag is pushed, and attaches them to a
+# *draft* GitHub release. Nothing is public until someone opens the draft,
+# checks it, and presses Publish.
+#
+# To re-run for a tag that already exists: Actions -> Release -> Run workflow.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build, for example v1.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  # The profile keeps line tables for local profiling. A download has no use
+  # for them, and on Linux and macOS they are embedded in the executable.
+  CARGO_PROFILE_RELEASE_DEBUG: "0"
+  CARGO_PROFILE_RELEASE_STRIP: "symbols"
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+          # Both architectures, joined into one universal executable.
+          - name: macos-universal
+            os: macos-latest
+          # The oldest supported runner, so the binary asks for the oldest
+          # glibc: 2.35.
+          - name: linux-x64
+            os: ubuntu-22.04
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Tag matches Cargo.toml
+        shell: bash
+        run: |
+          VERSION="${TAG#v}"
+          grep -q "^version = \"$VERSION\"$" Cargo.toml || {
+            echo "::error::Cargo.toml's version is not $VERSION"; exit 1; }
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.name == 'macos-universal' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Build
+        shell: bash
+        run: |
+          if [ "${{ matrix.name }}" = macos-universal ]; then
+            cargo build --release --locked --target aarch64-apple-darwin
+            cargo build --release --locked --target x86_64-apple-darwin
+            mkdir -p target/release
+            lipo -create -output target/release/kestrel \
+              target/aarch64-apple-darwin/release/kestrel \
+              target/x86_64-apple-darwin/release/kestrel
+            lipo -info target/release/kestrel
+          else
+            cargo build --release --locked
+          fi
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          exe=target/release/kestrel
+          [ -f "$exe.exe" ] && exe="$exe.exe"
+          "$exe" --version
+          "$exe" --force-cli render --help > /dev/null
+
+      - name: Package
+        shell: bash
+        run: |
+          VERSION="${TAG#v}"
+          STAGE="kestrel-$VERSION"
+          mkdir "$STAGE"
+          cp README.md API.md LICENSE THIRD-PARTY.md "$STAGE/"
+          case "${{ matrix.name }}" in
+            windows-x64)
+              cp target/release/kestrel.exe "$STAGE/"
+              7z a "kestrel-$VERSION-windows-x64.zip" "$STAGE" ;;
+            linux-x64)
+              cp target/release/kestrel "$STAGE/"
+              tar czf "kestrel-$VERSION-linux-x64.tar.gz" "$STAGE" ;;
+            macos-universal)
+              cp target/release/kestrel "$STAGE/"
+              # hdiutil fails intermittently on hosted runners with
+              # "Resource busy"; a retry is the usual answer.
+              for i in 1 2 3 4 5; do
+                hdiutil create -volname "Kestrel $VERSION" -srcfolder "$STAGE" \
+                  -ov -format UDZO "kestrel-$VERSION-macos-universal.dmg" && break
+                sleep 5
+              done
+              [ -f "kestrel-$VERSION-macos-universal.dmg" ] ;;
+          esac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          if-no-files-found: error
+          path: |
+            kestrel-*.zip
+            kestrel-*.tar.gz
+            kestrel-*.dmg
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - name: Release notes
+        run: |
+          f=".github/release-notes/$TAG.md"
+          if [ -f "$f" ]; then cp "$f" notes.md; else echo "Kestrel $TAG" > notes.md; fi
+
+      # A draft for this tag already there -- the tag was pushed again, or the
+      # workflow re-run -- is updated in place: its text and every file are
+      # replaced. A published release is never touched. GitHub's lookup by tag
+      # does not return drafts, which is why this is `gh` and not an action
+      # that looks the release up that way and would make a second draft.
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          state=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null || true)
+          case "$state" in
+            true)
+              gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title "Kestrel $TAG" --notes-file notes.md
+              gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber dist/* ;;
+            false)
+              echo "::error::$TAG is already published; this workflow only writes drafts"
+              exit 1 ;;
+            *)
+              gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+                --title "Kestrel $TAG" --notes-file notes.md dist/* ;;
+          esac

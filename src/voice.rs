@@ -1,3 +1,7 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 //! Voice pool layout, spawn commands, and the note-off gate table. \[1\]
 
 use crate::config::Config;
@@ -86,7 +90,7 @@ pub struct GateTable {
     /// Note-off count per slot at the *start* of this block, and the offset of \[12\]
     pub off_meta: Vec<u32>,
     /// The exact frame of every note-off published in this block, grouped by \[13\]
-    pub off_frames: Vec<u32>,
+    pub off_runs: Vec<u32>,
     pub tiles: usize,
     /// Live counters, carried across blocks.
     on_count: Vec<u32>,
@@ -99,9 +103,12 @@ pub struct GateTable {
     sostenuto: u16,
     /// How many notes at each slot the sostenuto pedal caught. Sostenuto only \[15\]
     sost_held: Vec<u32>,
-    /// Note-offs published so far this block, as parallel (slot, frame) lists \[16\]
+    /// Runs published so far this block, as parallel (slot, frame, count) \[16\]
     ev_slot: Vec<u32>,
     ev_frame: Vec<u32>,
+    ev_count: Vec<u32>,
+    /// Each slot's latest run in those lists this block, or `NO_RUN`. A \[17\]
+    last_run: Vec<u32>,
     /// Scatter cursors for that sort, kept to avoid a per-block allocation.
     scatter: Vec<u32>,
 }
@@ -111,7 +118,7 @@ impl GateTable {
         let tiles = (cfg.block_frames / cfg.gate_frames) as usize;
         GateTable {
             off_meta: vec![0; (GATE_SLOTS + 1) * 2],
-            off_frames: Vec::new(),
+            off_runs: Vec::new(),
             tiles,
             on_count: vec![0; GATE_SLOTS],
             off_count: vec![0; GATE_SLOTS],
@@ -121,6 +128,8 @@ impl GateTable {
             sost_held: vec![0; GATE_SLOTS],
             ev_slot: Vec::new(),
             ev_frame: Vec::new(),
+            ev_count: Vec::new(),
+            last_run: vec![NO_RUN; GATE_SLOTS],
             scatter: vec![0; GATE_SLOTS],
         }
     }
@@ -130,26 +139,33 @@ impl GateTable {
         (ch as usize & 15) * 128 + (key as usize & 127)
     }
 
-    /// Start a new block. The per-slot base is the count as it stands now, \[17\]
+    /// Start a new block. The per-slot base is the count as it stands now, \[18\]
     pub fn begin_block(&mut self) {
         for s in 0..GATE_SLOTS {
             self.off_meta[s * 2] = self.off_count[s];
         }
+        self.last_run.fill(NO_RUN);
         self.ev_slot.clear();
         self.ev_frame.clear();
+        self.ev_count.clear();
     }
 
-    /// Record one published note-off at its exact frame. \[18\]
+    /// Record `n` published note-offs at one exact frame. \[19\]
     #[inline]
     fn publish_off(&mut self, s: usize, frame: u32, n: u32) {
         if n == 0 {
             return;
         }
         self.off_count[s] = self.off_count[s].wrapping_add(n);
-        for _ in 0..n {
-            self.ev_slot.push(s as u32);
-            self.ev_frame.push(frame);
+        let last = self.last_run[s] as usize;
+        if last < self.ev_frame.len() && self.ev_frame[last] == frame {
+            self.ev_count[last] = self.ev_count[last].wrapping_add(n);
+            return;
         }
+        self.last_run[s] = self.ev_slot.len() as u32;
+        self.ev_slot.push(s as u32);
+        self.ev_frame.push(frame);
+        self.ev_count.push(n);
     }
 
     /// Register a note-on. Returns the ordinal the voice should carry.
@@ -160,11 +176,11 @@ impl GateTable {
         self.on_count[s]
     }
 
-    /// Register a note-off. A note-off with nothing sounding is ignored, which \[19\]
+    /// Register a note-off. A note-off with nothing sounding is ignored, which \[20\]
     pub fn note_off(&mut self, ch: u8, key: u8, frame: u32) {
         let s = Self::slot(ch, key);
         if self.sostenuto & (1u16 << (ch & 15)) != 0 && self.sost_held[s] > 0 {
-            // [20]
+            // [21]
             if self.off_count[s].wrapping_add(self.pending_off[s]) != self.on_count[s] {
                 self.pending_off[s] += 1;
                 self.sost_held[s] -= 1;
@@ -172,7 +188,7 @@ impl GateTable {
             return;
         }
         if self.sustained(ch) {
-            // [21]
+            // [22]
             if self.off_count[s].wrapping_add(self.pending_off[s]) != self.on_count[s] {
                 self.pending_off[s] += 1;
             }
@@ -186,7 +202,7 @@ impl GateTable {
         self.sustain & (1u16 << (ch & 15)) != 0
     }
 
-    /// CC64. Pressing holds every later note-off on the channel; releasing \[22\]
+    /// CC64. Pressing holds every later note-off on the channel; releasing \[23\]
     pub fn set_sustain(&mut self, ch: u8, down: bool, frame: u32) {
         if down == self.sustained(ch) {
             return;
@@ -204,7 +220,7 @@ impl GateTable {
         self.flush_pending(ch, frame);
     }
 
-    /// CC66. Holds only the notes already sounding when it goes down; notes \[23\]
+    /// CC66. Holds only the notes already sounding when it goes down; notes \[24\]
     pub fn set_sostenuto(&mut self, ch: u8, down: bool, frame: u32) {
         let bit = 1u16 << (ch & 15);
         if down == (self.sostenuto & bit != 0) {
@@ -232,7 +248,7 @@ impl GateTable {
         self.flush_pending(ch, frame);
     }
 
-    /// Publish everything the pedal was holding, all at `frame`. That frame is \[24\]
+    /// Publish everything the pedal was holding, all at `frame`. That frame is \[25\]
     fn flush_pending(&mut self, ch: u8, frame: u32) {
         let base = (ch as usize & 15) * 128;
         for k in 0..128 {
@@ -245,7 +261,7 @@ impl GateTable {
         }
     }
 
-    /// CC123. Releases what is sounding, but a held pedal still holds: the \[25\]
+    /// CC123. Releases what is sounding, but a held pedal still holds: the \[26\]
     pub fn all_notes_off(&mut self, ch: u8, frame: u32) {
         let base = (ch as usize & 15) * 128;
         if self.sustained(ch) {
@@ -262,7 +278,7 @@ impl GateTable {
         }
     }
 
-    /// CC120. Stops everything on the channel now, pedal or not, and drops \[26\]
+    /// CC120. Stops everything on the channel now, pedal or not, and drops \[27\]
     pub fn all_sound_off(&mut self, ch: u8, frame: u32) {
         let base = (ch as usize & 15) * 128;
         for k in 0..128 {
@@ -274,13 +290,13 @@ impl GateTable {
         }
     }
 
-    /// CC121. Lifting the pedal is part of resetting a channel's controllers, \[27\]
+    /// CC121. Lifting the pedal is part of resetting a channel's controllers, \[28\]
     pub fn reset_controllers(&mut self, ch: u8, frame: u32) {
         self.set_sostenuto(ch, false, frame);
         self.set_sustain(ch, false, frame);
     }
 
-    /// Group this block's note-offs by slot, in ordinal order. \[28\]
+    /// Group this block's runs by slot, in ordinal order, and make each run's \[29\]
     pub fn end_block(&mut self) {
         let n = self.ev_slot.len();
         for s in 0..=GATE_SLOTS {
@@ -292,14 +308,21 @@ impl GateTable {
         for s in 0..GATE_SLOTS {
             self.off_meta[(s + 1) * 2 + 1] += self.off_meta[s * 2 + 1];
         }
-        self.off_frames.clear();
-        self.off_frames.resize(n, 0);
+        self.off_runs.clear();
+        self.off_runs.resize(n * 2, 0);
         for s in 0..GATE_SLOTS {
             self.scatter[s] = self.off_meta[s * 2 + 1];
         }
         for i in 0..n {
             let s = self.ev_slot[i] as usize;
-            self.off_frames[self.scatter[s] as usize] = self.ev_frame[i];
+            let r = self.scatter[s] as usize;
+            let before = if r > self.off_meta[s * 2 + 1] as usize {
+                self.off_runs[(r - 1) * 2]
+            } else {
+                0
+            };
+            self.off_runs[r * 2] = before.wrapping_add(self.ev_count[i]);
+            self.off_runs[r * 2 + 1] = self.ev_frame[i];
             self.scatter[s] += 1;
         }
     }
@@ -310,15 +333,15 @@ impl GateTable {
         self.off_meta[slot * 2]
     }
 
-    /// The exact frames of the note-offs published for `slot` in this block, \[29\]
+    /// The runs published for `slot` in this block, as interleaved \[30\]
     #[inline]
-    pub fn off_frames_for(&self, slot: usize) -> &[u32] {
+    pub fn off_runs_for(&self, slot: usize) -> &[u32] {
         let lo = self.off_meta[slot * 2 + 1] as usize;
         let hi = self.off_meta[(slot + 1) * 2 + 1] as usize;
-        &self.off_frames[lo..hi]
+        &self.off_runs[lo * 2..hi * 2]
     }
 
-    /// Number of notes started but not yet released, across all slots. Notes \[30\]
+    /// Number of notes started but not yet released, across all slots. Notes \[31\]
     pub fn sounding(&self) -> u64 {
         self.on_count
             .iter()
@@ -328,23 +351,50 @@ impl GateTable {
     }
 }
 
+/// `GateTable::last_run` for a slot with no run yet this block.
+const NO_RUN: u32 = u32::MAX;
+
+/// The frame on which the voice holding `ordinal` at `slot` is released, read \[32\]
+pub fn off_frame(meta: &[u32], runs: &[u32], slot: usize, ordinal: u32) -> Option<u32> {
+    let base = meta[slot * 2];
+    if ordinal <= base {
+        return Some(0);
+    }
+    let first = meta[slot * 2 + 1];
+    let end = meta[(slot + 1) * 2 + 1];
+    let j = ordinal - base;
+    if end <= first || j > runs[(end as usize - 1) * 2] {
+        return None;
+    }
+    let (mut lo, mut hi) = (first, end - 1);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if runs[mid as usize * 2] >= j {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    Some(runs[lo as usize * 2 + 1])
+}
+
 pub const BEND_CHANNELS: usize = 16;
-/// Words per channel in a `ChannelTable` row: bend factor, left gain, right \[31\]
+/// Words per channel in a `ChannelTable` row: bend factor, left gain, right \[33\]
 pub const CHAN_FIELDS: usize = 8;
 pub const CHAN_BEND: usize = 0;
 pub const CHAN_GAIN_L: usize = 1;
 pub const CHAN_GAIN_R: usize = 2;
 /// Which copy of the params table this channel's voices read, see `ParamMod`.
 pub const CHAN_VARIANT: usize = 3;
-/// Frame within the block at which CC120 silenced this channel, plus one. \[32\]
+/// Frame within the block at which CC120 silenced this channel, plus one. \[34\]
 pub const CHAN_CUT: usize = 4;
-/// The note id that cut applies *below*, low and high words. \[33\]
+/// The note id that cut applies *below*, low and high words. \[35\]
 pub const CHAN_CUT_ID_LO: usize = 5;
 pub const CHAN_CUT_ID_HI: usize = 6;
 
-/// Per-channel controller state, published the same way the note-off gate is: \[34\]
+/// Per-channel controller state, published the same way the note-off gate is: \[36\]
 pub struct ChannelTable {
-    /// `tiles * BEND_CHANNELS * CHAN_FIELDS` entries, tile-major. Gains are \[35\]
+    /// `tiles * BEND_CHANNELS * CHAN_FIELDS` entries, tile-major. Gains are \[37\]
     pub rows: Vec<u32>,
     pub tiles: usize,
     /// Current state per channel, carried across blocks.
@@ -367,7 +417,7 @@ impl ChannelTable {
             now[c * CHAN_FIELDS + CHAN_GAIN_R] = 1.0f32.to_bits();
             now[c * CHAN_FIELDS + CHAN_VARIANT] = 0;
         }
-        // [36]
+        // [38]
         let mut rows = vec![0u32; (tiles + 1) * BEND_CHANNELS * CHAN_FIELDS];
         for t in 0..tiles {
             let base = t * BEND_CHANNELS * CHAN_FIELDS;
@@ -407,12 +457,12 @@ impl ChannelTable {
         if self.now[i] == factor {
             return;
         }
-        // [37]
+        // [39]
         self.advance_to(frame);
         self.now[i] = factor;
     }
 
-    /// CC120, All Sound Off: silence this channel *now*, ignoring release. \[38\]
+    /// CC120, All Sound Off: silence this channel *now*, ignoring release. \[40\]
     pub fn set_sound_off(&mut self, ch: u8, frame: u32, note_id: u64) {
         self.advance_to(frame);
         let tile = (frame / self.tile_frames) as usize;
@@ -425,14 +475,14 @@ impl ChannelTable {
         self.cut_active = true;
     }
 
-    /// Set a channel's output gains from this frame on. These multiply the \[39\]
+    /// Set a channel's output gains from this frame on. These multiply the \[41\]
     pub fn set_gain(&mut self, ch: u8, l: f32, r: f32, frame: u32) {
         let base = (ch as usize & 15) * CHAN_FIELDS;
         let (lb, rb) = (l.to_bits(), r.to_bits());
         if self.now[base + CHAN_GAIN_L] == lb && self.now[base + CHAN_GAIN_R] == rb {
             return;
         }
-        // [40]
+        // [42]
         self.advance_to(frame);
         self.now[base + CHAN_GAIN_L] = lb;
         self.now[base + CHAN_GAIN_R] = rb;
@@ -444,15 +494,15 @@ impl ChannelTable {
         if self.now[i] == variant {
             return;
         }
-        // [41]
+        // [43]
         self.advance_to(frame);
         self.now[i] = variant;
     }
 
-    /// Fill any tiles no event reached. Call before `modulate` and \[42\]
+    /// Fill any tiles no event reached. Call before `modulate` and \[44\]
     pub fn end_block(&mut self) {
         let w = BEND_CHANNELS * CHAN_FIELDS;
-        // [43]
+        // [45]
         while self.cursor <= self.tiles {
             let base = self.cursor * w;
             self.rows[base..base + w].copy_from_slice(&self.now);
@@ -460,7 +510,7 @@ impl ChannelTable {
         }
     }
 
-    /// Which row a note struck at `frame` should take its opening bend and gain \[44\]
+    /// Which row a note struck at `frame` should take its opening bend and gain \[46\]
     pub fn row_bias(&self, ch: u8, frame: u32) -> u32 {
         let tile = (frame / self.tile_frames) as usize;
         if tile >= self.tiles || self.cursor <= tile {
@@ -476,7 +526,7 @@ impl ChannelTable {
         0
     }
 
-    /// Multiply a tile's already-published bend factor, for an LFO the host \[45\]
+    /// Multiply a tile's already-published bend factor, for an LFO the host \[47\]
     pub fn modulate_bend(&mut self, ch: u8, tile: usize, factor: u32) {
         let i = (tile * BEND_CHANNELS + (ch as usize & 15)) * CHAN_FIELDS + CHAN_BEND;
         let scaled = ((self.rows[i] as u64 * factor as u64) >> 24) as u32;
@@ -514,7 +564,7 @@ impl ChannelTable {
         }
     }
 
-    /// False when every channel read the untouched params table, which lets \[46\]
+    /// False when every channel read the untouched params table, which lets \[48\]
     #[inline]
     pub fn variant_active(&self) -> bool {
         self.variant_active
@@ -532,13 +582,13 @@ impl ChannelTable {
         self.cut_active
     }
 
-    /// False when nothing in this block is bent, which lets both backends skip \[47\]
+    /// False when nothing in this block is bent, which lets both backends skip \[49\]
     #[inline]
     pub fn bend_active(&self) -> bool {
         self.bend_active
     }
 
-    /// False when every channel sat at unity gain, which lets both backends \[48\]
+    /// False when every channel sat at unity gain, which lets both backends \[50\]
     #[inline]
     pub fn gain_active(&self) -> bool {
         self.gain_active
@@ -550,7 +600,7 @@ impl ChannelTable {
         &self.rows[tile * w..tile * w + w]
     }
 
-    /// The channel a voice belongs to, recovered from its gate slot. Voices \[49\]
+    /// The channel a voice belongs to, recovered from its gate slot. Voices \[51\]
     #[inline]
     pub fn channel_of(gate_slot: u32) -> usize {
         (gate_slot >> 7) as usize & 15
@@ -570,7 +620,97 @@ mod tests {
         }
     }
 
-    /// A note-off is published at the frame it happened on, not at the start \[50\]
+    impl GateTable {
+        /// One frame per note-off, the layout the runs replaced, so these \[52\]
+        fn off_frames_for(&self, slot: usize) -> Vec<u32> {
+            let mut out = Vec::new();
+            let mut done = 0u32;
+            for run in self.off_runs_for(slot).chunks_exact(2) {
+                out.resize(out.len() + (run[0] - done) as usize, run[1]);
+                done = run[0];
+            }
+            out
+        }
+    }
+
+    /// A pedal lift or an all-notes-off publishes any number of note-offs on \[53\]
+    #[test]
+    fn a_flood_of_note_offs_on_one_frame_is_one_run() {
+        let mut g = GateTable::new(&cfg());
+        let s = GateTable::slot(3, 40);
+        g.begin_block();
+        for _ in 0..100_000 {
+            g.note_on(3, 40, 0);
+        }
+        for _ in 0..1000 {
+            g.note_off(3, 40, 9);
+        }
+        g.all_notes_off(3, 9);
+        g.end_block();
+
+        assert_eq!(g.off_runs_for(s), &[100_000, 9]);
+        assert_eq!(off_frame(&g.off_meta, &g.off_runs, s, 1), Some(9));
+        assert_eq!(off_frame(&g.off_meta, &g.off_runs, s, 100_000), Some(9));
+        assert_eq!(off_frame(&g.off_meta, &g.off_runs, s, 100_001), None);
+    }
+
+    /// The binary search reads exactly the frame an index into one entry per \[54\]
+    #[test]
+    fn the_run_search_reads_what_one_entry_per_note_off_would() {
+        let mut g = GateTable::new(&Config {
+            block_frames: 4096,
+            reduce_tile: 16,
+            gate_frames: 32,
+            ..Default::default()
+        });
+        let mut seed = 0x2545_F491u32;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        for block in 0..4 {
+            g.begin_block();
+            let mut frame = 0u32;
+            for _ in 0..20_000 {
+                let key = (next() % 3) as u8;
+                match next() % 6 {
+                    0 | 1 => {
+                        g.note_on(0, key, frame);
+                    }
+                    2 | 3 => g.note_off(0, key, frame),
+                    4 => g.set_sustain(0, next() % 3 == 0, frame),
+                    _ => frame = (frame + next() % 2).min(4095),
+                }
+            }
+            if block == 3 {
+                g.all_sound_off(0, 0);
+            }
+            g.end_block();
+
+            for key in 0..3u8 {
+                let s = GateTable::slot(0, key);
+                let base = g.off_base(s);
+                let frames = g.off_frames_for(s);
+                assert!(g.off_runs_for(s).len() / 2 <= 4096 + 1);
+                for ordinal in 1..=base + frames.len() as u32 + 2 {
+                    let want = if ordinal <= base {
+                        Some(0)
+                    } else {
+                        frames.get((ordinal - base - 1) as usize).copied()
+                    };
+                    assert_eq!(
+                        off_frame(&g.off_meta, &g.off_runs, s, ordinal),
+                        want,
+                        "block {block} key {key} ordinal {ordinal}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A note-off is published at the frame it happened on, not at the start \[55\]
     #[test]
     fn a_note_off_carries_its_exact_frame() {
         let mut g = GateTable::new(&cfg());
@@ -585,7 +725,7 @@ mod tests {
         assert_eq!(g.off_frames_for(s), &[40], "frame 40, not tile 2's start");
     }
 
-    /// Several note-offs in one gate tile stay distinct, which is the case the \[51\]
+    /// Several note-offs in one gate tile stay distinct, which is the case the \[56\]
     #[test]
     fn note_offs_inside_one_tile_keep_their_own_frames() {
         let mut g = GateTable::new(&cfg());
@@ -621,12 +761,12 @@ mod tests {
         g.begin_block();
         g.set_sustain(0, false, 16);
         g.end_block();
-        // [52]
+        // [57]
         assert_eq!(g.off_frames_for(s), &[16]);
         assert_eq!(g.sounding(), 0);
     }
 
-    /// Restriking a key while the pedal is down leaves two notes sounding and \[53\]
+    /// Restriking a key while the pedal is down leaves two notes sounding and \[58\]
     #[test]
     fn a_restrike_under_the_pedal_releases_only_what_was_lifted() {
         let mut g = GateTable::new(&cfg());
@@ -638,7 +778,7 @@ mod tests {
         g.note_on(0, 60, 16);
         // A second off with only one note left un-lifted is still legal.
         g.note_off(0, 60, 16);
-        // [54]
+        // [59]
         g.note_off(0, 60, 16);
         g.end_block();
         assert_eq!(g.sounding(), 2, "both strikes are held by the pedal");
@@ -679,7 +819,7 @@ mod tests {
         g.end_block();
         assert_eq!((a, b), (1, 2));
         let s = GateTable::slot(0, 60);
-        // [55]
+        // [60]
         assert_eq!(g.off_base(s), 0);
         assert_eq!(g.off_frames_for(s), &[16]);
     }

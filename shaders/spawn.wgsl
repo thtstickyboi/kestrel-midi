@@ -1,3 +1,7 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 // [1]
 
 struct SpawnCmd {
@@ -68,7 +72,7 @@ fn main(
             voices[F_BORN_VARIANT * c + dst] = (s.variant + 1u) | (s.row_bias << 16u);
             voices[F_STOP_REL * c + dst] = 0u;
             // [3]
-            voices[F_AGE * c + dst] = 0u;
+            voices[F_AGE * c + dst] = 0u - s.start_rel;
             if (USE_MOD_ENV) { voices[F_REL_AGE * c + dst] = NO_RELEASE; }
         }
         i = i + stride;

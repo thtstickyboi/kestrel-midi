@@ -1,0 +1,31 @@
+# Comments extracted from src/bin/kestrel/tui/capture.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/bin/kestrel/tui/capture.rs:5
+//! A logger that holds records for the screen instead of writing them.
+//!
+//! The loaders and the render pipeline report through `log`, which on the
+//! command line goes straight to stderr. Here it would tear through the
+//! progress screen, so records are held and the screen decides what to show:
+//! warnings and errors inline and after a render, info lines not at all,
+//! because the screen already carries the same facts in its own layout.
+
+[2] src/bin/kestrel/tui/capture.rs:26
+        // Kestrel's own info is kept so a failure report can include it; a
+        // dependency is only interesting when something is actually wrong,
+        // and wgpu's warnings about absent Vulkan extensions are not that.
+
+[3] src/bin/kestrel/tui/capture.rs:53
+/// The last panic and where it was raised, held for the same reason the
+/// records are: the default printer writes into whatever the screen is
+/// drawing. On 2026-09-13 the progress screen redrew over the start of one
+/// and a prompt landed on its end, so the error could not be read.
+
+[4] src/bin/kestrel/tui/capture.rs:59
+/// Hold panics here instead of printing them. Whatever catches one shows the
+/// message where it can be read; see [`panic_message`].

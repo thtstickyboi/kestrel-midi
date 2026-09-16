@@ -6,29 +6,48 @@
 # they always match it. The development tree keeps every comment
 # inline; its history is the place to compare versions.
 
-[1] src/gpu/device.rs:17
+[1] src/gpu/device.rs:21
+/// Discrete first, then integrated. Within a tier, prefer Vulkan over DX12
+/// over GL: the compute paths are better tested there.
+///
+/// Shared by `create` and `survey`, so the adapter a listing marks as the
+/// default is the one a render actually opens.
+
+[2] src/gpu/device.rs:42
 /// Pick an adapter and open a device.
 ///
 /// Never silently falls back to a software adapter: if the only thing wgpu can
 /// find is a CPU device, that is an error, because a render that quietly takes
 /// a thousand times longer is worse than one that stops.
 
-[2] src/gpu/device.rs:50
-    // Discrete first, then integrated. Within a tier, prefer Vulkan over DX12
-    // over GL: the compute paths are better tested there.
-
-[3] src/gpu/device.rs:98
+[3] src/gpu/device.rs:104
     // A device error that arrives asynchronously would otherwise show up as
     // silently wrong audio.
 
-[4] src/gpu/device.rs:108
+[4] src/gpu/device.rs:114
 /// Compute-only bind group layout. `read_only[i]` says whether binding i is a
 /// read-only storage buffer; binding 0 is always the uniform block.
 
-[5] src/gpu/device.rs:164
+[5] src/gpu/device.rs:170
 /// List every adapter wgpu can reach, for working out which device a render
 /// will land on.
 
-[6] src/gpu/device.rs:183
+[6] src/gpu/device.rs:189
         // The number people actually want off this listing. `gpu-info` used to
         // print the binding size and leave the division to the reader.
+
+[7] src/gpu/device.rs:215
+    /// The most of one buffer the adapter will bind to a shader, which is
+    /// what caps the voice pool.
+
+[8] src/gpu/device.rs:218
+    /// The largest `--max-voices` that binding takes at the configured
+    /// `--steal-percent`: the same figure `gpu-info` prints.
+
+[9] src/gpu/device.rs:230
+/// Every adapter wgpu can reach, best first, and the index of the one
+/// `create` would open for `cfg` -- `None` when nothing is eligible.
+///
+/// Uses `create`'s ranking and filters, so the adapter a listing marks as the
+/// default is the adapter a render lands on. An unknown `--gpu-backend` is an
+/// error here as it is there.

@@ -1,0 +1,25 @@
+# Comments extracted from src/bin/kestrel/render.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/bin/kestrel/render.rs:5
+//! `kestrel --force-cli render`: the arguments turned into a `session::Job`,
+//! and the lines the command line has always printed while one renders. The
+//! pipeline itself is `kestrel::session`.
+
+[2] src/bin/kestrel/render.rs:14
+/// The target the progress lines are logged under, the same one
+/// `kestrel::session` uses, so the whole render reads `[INFO  kestrel]`.
+
+[3] src/bin/kestrel/render.rs:19
+    /// The render these arguments describe, with everything clap cannot check
+    /// -- the named enums, `Config::validate` -- already checked.
+
+[4] src/bin/kestrel/render.rs:40
+/// The command line's observer: a progress line a second, and the per-pass
+/// timings under `--profile`, exactly as the loop printed them before it was
+/// shared.

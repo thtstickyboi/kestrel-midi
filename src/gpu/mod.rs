@@ -1,8 +1,13 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 //! wgpu compute backend. \[1\]
 
 mod device;
+pub mod vram;
 
-pub use device::print_adapters;
+pub use device::{print_adapters, survey, AdapterSummary};
 
 use crate::backend::{Backend, BlockStats};
 use crate::bank::{Bank, ModEnvParams, RegionParams};
@@ -120,7 +125,7 @@ pub fn max_voices_for_binding(binding_bytes: u64, steal_percent: u32) -> u32 {
     v.min(u32::MAX as u64) as u32
 }
 
-fn substitute(src: &str, cfg: &Config) -> String {
+fn substitute(src: &str, cfg: &Config, bank: &Bank) -> String {
     src.replace("{{WG}}", &cfg.workgroup_size.to_string())
         .replace("{{TILE}}", &cfg.reduce_tile.to_string())
         .replace("{{GATE_TILE}}", &cfg.gate_frames.to_string())
@@ -129,6 +134,15 @@ fn substitute(src: &str, cfg: &Config) -> String {
         .replace("{{GAIN_RAMP}}", if cfg.gain_ramp { "true" } else { "false" })
         .replace("{{FILTER_RAMP}}", if cfg.filter_ramp { "true" } else { "false" })
         .replace("{{USE_LFO}}", if cfg.lfo_enabled { "true" } else { "false" })
+        // [11]
+        .replace(
+            "{{USE_LFO_VOLUME}}",
+            if cfg.lfo_enabled && bank.uses_lfo_volume { "true" } else { "false" },
+        )
+        .replace(
+            "{{USE_LFO_PITCH}}",
+            if cfg.lfo_enabled && bank.uses_lfo_pitch { "true" } else { "false" },
+        )
         .replace(
             "{{USE_MOD_ENV}}",
             if cfg.mod_env_enabled { "true" } else { "false" },
@@ -137,10 +151,30 @@ fn substitute(src: &str, cfg: &Config) -> String {
         .replace("{{VOICE_FIELDS}}", &voice_fields(cfg).to_string())
 }
 
-fn shader_source(body: &str, cfg: &Config) -> String {
-    let mut s = substitute(include_str!("../../shaders/common.wgsl"), cfg);
+/// Write `bytes` into `buf` from `offset`, 64 MiB at a time, letting the device \[12\]
+fn upload_in_pieces(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    buf: &wgpu::Buffer,
+    offset: u64,
+    bytes: &[u8],
+) -> Result<()> {
+    // A multiple of wgpu's 4-byte copy alignment, so every piece is one.
+    const PIECE: usize = 64 << 20;
+    for (i, piece) in bytes.chunks(PIECE).enumerate() {
+        queue.write_buffer(buf, offset + (i * PIECE) as u64, piece);
+        queue.submit(std::iter::empty());
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| anyhow::anyhow!("device poll failed: {e:?}"))?;
+    }
+    Ok(())
+}
+
+fn shader_source(body: &str, cfg: &Config, bank: &Bank) -> String {
+    let mut s = substitute(include_str!("../../shaders/common.wgsl"), cfg, bank);
     s.push('\n');
-    s.push_str(&substitute(body, cfg));
+    s.push_str(&substitute(body, cfg, bank));
     s
 }
 
@@ -148,7 +182,7 @@ struct Pipelines {
     spawn: wgpu::ComputePipeline,
     spawn_commit: wgpu::ComputePipeline,
     render: wgpu::ComputePipeline,
-    /// The same pass compiled with the channel controller path in it. Selected \[11\]
+    /// The same pass compiled with the channel controller path in it. Selected \[13\]
     render_chan: wgpu::ComputePipeline,
     reduce: wgpu::ComputePipeline,
     scan_local: wgpu::ComputePipeline,
@@ -185,7 +219,7 @@ struct Groups {
     render: wgpu::BindGroup,
     compact: wgpu::BindGroup,
     select: wgpu::BindGroup,
-    /// Indexed by which of the two (key, index) buffers currently holds the \[12\]
+    /// Indexed by which of the two (key, index) buffers currently holds the \[14\]
     sort: [wgpu::BindGroup; 2],
 }
 
@@ -220,13 +254,15 @@ pub struct GpuSynth {
     sort_key: SortKeyLayout,
     cmds_buf: wgpu::Buffer,
     cmds_capacity: u32,
-    /// Note-off frames the gates buffer can hold behind its meta header.
-    off_frames_capacity: u32,
+    /// Note-off runs the gates buffer can hold behind its meta header, two \[15\]
+    off_runs_capacity: u64,
+    /// The most of one buffer the adapter binds to a shader, which is as far \[16\]
+    binding_cap: u64,
     pool_buf: wgpu::Buffer,
     params_buf: wgpu::Buffer,
     params_per_variant: u32,
     menv_buf: wgpu::Buffer,
-    // [13]
+    // [17]
     menv_factor_buf: wgpu::Buffer,
     menv_per_variant: u32,
     menv_factor_half: u32,
@@ -237,12 +273,12 @@ pub struct GpuSynth {
 
     /// Which of `voices` currently holds the live pool.
     parity: usize,
-    /// Host mirror of the device live count, exact because every change to it \[14\]
+    /// Host mirror of the device live count, exact because every change to it \[18\]
     live: u32,
     /// Allocated voice slots, `Config::pool_slots()`. The SoA stride.
     slots: u32,
     pending_spawns: Vec<SpawnCmd>,
-    /// Reused buffer for the thinned spawn list, so a saturated block does not \[15\]
+    /// Reused buffer for the thinned spawn list, so a saturated block does not \[19\]
     spawn_scratch: Vec<SpawnCmd>,
     stolen: u64,
     dropped: u64,
@@ -251,6 +287,8 @@ pub struct GpuSynth {
     timing: Option<Timing>,
     last_timings: Vec<(&'static str, f64)>,
     vram_bytes: u64,
+    /// PCI vendor and device id of the adapter, which is how `vram` finds it.
+    adapter_ids: (u32, u32),
 }
 
 struct Timing {
@@ -268,9 +306,10 @@ const TIMESTAMP_COUNT: u32 = PASS_NAMES.len() as u32 * 2;
 impl GpuSynth {
     pub fn new(cfg: &Config, bank: Arc<Bank>) -> Result<Self> {
         cfg.validate()?;
-        let (device, queue, adapter_name, limits, has_timestamps) = device::create(cfg)?;
+        let (device, queue, adapter_info, limits, has_timestamps) = device::create(cfg)?;
+        let adapter_name = format!("{} ({:?})", adapter_info.name, adapter_info.backend);
 
-        // [16]
+        // [20]
         let need_shared = cfg.workgroup_size * (cfg.reduce_tile * 2 + 1) * 4;
         if need_shared > limits.max_compute_workgroup_storage_size {
             bail!(
@@ -281,10 +320,10 @@ impl GpuSynth {
                 limits.max_compute_workgroup_storage_size
             );
         }
-        // [17]
+        // [21]
         let scan_workgroups = cfg.pool_slots().div_ceil(cfg.workgroup_size);
 
-        // [18]
+        // [22]
         let voice_pool_bytes = cfg.pool_slots() as u64 * voice_fields(cfg) * 4;
         let binding_cap =
             (limits.max_storage_buffer_binding_size as u64).min(limits.max_buffer_size);
@@ -314,27 +353,30 @@ impl GpuSynth {
             );
         }
 
-        // [19]
+        // [23]
         let capacity = cfg.pool_slots();
         let tiles = cfg.block_frames / cfg.gate_frames;
         let nwg = cfg.max_render_workgroups.clamp(1, MAX_WORKGROUPS_PER_DIM);
 
-        // ---- static data ----
-        let mut pool = bank.pool.clone();
-        if pool.len() % 2 == 1 {
-            pool.push(0);
-        }
-        if pool.is_empty() {
-            pool.extend_from_slice(&[0, 0]);
-        }
-        let pool_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        // [24]
+        let pool = &bank.pool;
+        let even = pool.len() / 2 * 2;
+        let pool_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("sample pool"),
-            contents: bytemuck::cast_slice(&pool),
-            usage: wgpu::BufferUsages::STORAGE,
+            size: (pool.len().div_ceil(2).max(1) * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
+        upload_in_pieces(&device, &queue, &pool_buf, 0, bytemuck::cast_slice(&pool[..even]))?;
+        if even < pool.len() {
+            // An odd last sample, padded out to a whole word.
+            queue.write_buffer(&pool_buf, even as u64 * 2, bytemuck::cast_slice(&[pool[even], 0]));
+        }
 
-        let params: Vec<RegionParams> = if bank.params.is_empty() {
-            vec![RegionParams {
+        // [25]
+        let fallback;
+        let params: &[RegionParams] = if bank.params.is_empty() {
+            fallback = [RegionParams {
                 mod_lfo_inc: 0,
                 vib_lfo_inc: 0,
                 lfo_delays: 0,
@@ -350,11 +392,12 @@ impl GpuSynth {
                 a1: 0.0,
                 a2: 0.0,
                 flags: 0,
-            }]
+            }];
+            &fallback
         } else {
-            bank.params.clone()
+            &bank.params
         };
-        // [20]
+        // [26]
         let params_per_variant = params.len() as u32;
         let variants = cfg.max_param_variants.max(1);
         let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -363,9 +406,9 @@ impl GpuSynth {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        queue.write_buffer(&params_buf, 0, bytemuck::cast_slice(&params));
+        upload_in_pieces(&device, &queue, &params_buf, 0, bytemuck::cast_slice(params))?;
 
-        // [21]
+        // [27]
         let menv: Vec<ModEnvParams> = if bank.menv.is_empty() {
             vec![ModEnvParams::default()]
         } else {
@@ -380,7 +423,7 @@ impl GpuSynth {
         });
         queue.write_buffer(&menv_buf, 0, bytemuck::cast_slice(&menv));
 
-        // [22]
+        // [28]
         let mut menv_tables: Vec<u32> = if bank.menv_factors.is_empty() {
             vec![1 << 24]
         } else {
@@ -412,10 +455,10 @@ impl GpuSynth {
         let voice_bytes = capacity as u64 * voice_fields(cfg) * 4;
         let partial_bytes = cfg.block_frames as u64 * 2 * nwg as u64 * 4;
         let out_bytes = cfg.block_frames as u64 * 2 * 4;
-        // [23]
+        // [29]
         let off_meta_words = (GATE_SLOTS as u64 + 1) * 2;
-        let off_frames_capacity = 65536u32;
-        let gates_bytes = (off_meta_words + off_frames_capacity as u64) * 4;
+        let off_runs_capacity = 32768u64;
+        let gates_bytes = (off_meta_words + off_runs_capacity * 2) * 4;
 
         let uniform_buf = mk(
             "uniforms",
@@ -512,7 +555,7 @@ impl GpuSynth {
             sort: device::bind_layout(&device, "sort", &[false; 8]),
         };
 
-        let pipelines = Self::build_pipelines(&device, cfg, &layouts)?;
+        let pipelines = Self::build_pipelines(&device, cfg, &bank, &layouts)?;
 
         let groups = [
             Groups {
@@ -722,7 +765,8 @@ impl GpuSynth {
             sort_key,
             cmds_buf,
             cmds_capacity,
-            off_frames_capacity,
+            off_runs_capacity,
+            binding_cap,
             slots: capacity,
             pool_buf,
             params_buf,
@@ -744,6 +788,7 @@ impl GpuSynth {
             timing,
             last_timings: Vec::new(),
             vram_bytes,
+            adapter_ids: (adapter_info.vendor, adapter_info.device),
         };
         s.write_uniforms(0, 0, s.render_workgroups(0));
         Ok(s)
@@ -752,15 +797,16 @@ impl GpuSynth {
     fn build_pipelines(
         device: &wgpu::Device,
         cfg: &Config,
+        bank: &Bank,
         layouts: &Layouts,
     ) -> Result<Pipelines> {
         let make = |name: &str, src: &str, layout: &wgpu::BindGroupLayout, entries: &[&str]| {
             let desc = wgpu::ShaderModuleDescriptor {
                 label: Some(name),
-                source: wgpu::ShaderSource::Wgsl(shader_source(src, cfg).into()),
+                source: wgpu::ShaderSource::Wgsl(shader_source(src, cfg, bank).into()),
             };
             let module = if cfg.unchecked_shaders {
-                // [24]
+                // [30]
                 unsafe {
                     device.create_shader_module_trusted(
                         desc,
@@ -875,7 +921,7 @@ impl GpuSynth {
         })
     }
 
-    /// Workgroups the render pass will be dispatched with this block, given \[25\]
+    /// Workgroups the render pass will be dispatched with this block, given \[31\]
     fn render_workgroups(&self, voices: u32) -> u32 {
         let cap = self
             .cfg
@@ -888,7 +934,7 @@ impl GpuSynth {
         let u = Uniforms {
             block_frames: self.cfg.block_frames,
             tiles: self.cfg.block_frames / self.cfg.reduce_tile,
-            // [26]
+            // [32]
             capacity: self.slots,
             spawn_count,
             render_workgroups: nwg,
@@ -950,20 +996,21 @@ impl GpuSynth {
         log::debug!("grew the spawn command buffer to {new_cap} entries");
     }
 
-    /// Grow the gates buffer so it can carry `needed` note-off frames. \[27\]
-    fn grow_gates(&mut self, needed: u32) {
-        if needed <= self.off_frames_capacity {
-            return;
-        }
-        let new_cap = needed.next_power_of_two();
+    /// Grow the gates buffer so it can carry `runs` note-off runs. \[33\]
+    fn grow_gates(&mut self, runs: usize) -> Result<()> {
+        let Some(new_cap) =
+            gates_capacity(runs as u64, self.off_runs_capacity, self.binding_cap)?
+        else {
+            return Ok(());
+        };
         let meta_words = (GATE_SLOTS as u64 + 1) * 2;
         self.gates_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("gates"),
-            size: (meta_words + new_cap as u64) * 4,
+            size: (meta_words + new_cap * 2) * 4,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        self.off_frames_capacity = new_cap;
+        self.off_runs_capacity = new_cap;
         // The render bind groups reference the old buffer, so rebuild them.
         for p in 0..2 {
             self.groups[p].render = device::bind(
@@ -983,31 +1030,63 @@ impl GpuSynth {
                 ],
             );
         }
-        log::debug!("grew the gates buffer to {new_cap} note-off frames");
+        log::debug!("grew the gates buffer to {new_cap} note-off runs");
+        Ok(())
     }
 
-    /// Workgroups to dispatch for `items` voices. Every entry point this feeds \[28\]
+    /// Workgroups to dispatch for `items` voices. Every entry point this feeds \[34\]
     fn dispatch_count(&self, items: u32) -> u32 {
         let ceiling = self.cfg.max_pool_workgroups.clamp(1, MAX_WORKGROUPS_PER_DIM);
         items.div_ceil(self.cfg.workgroup_size).clamp(1, ceiling)
     }
 
-    fn map_read(&self, buf: &wgpu::Buffer) -> Result<Vec<u8>> {
-        let slice = buf.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
+    /// Read several readback buffers back with **one** device wait. \[35\]
+    fn map_read_many(&self, bufs: &[&wgpu::Buffer]) -> Result<Vec<Vec<u8>>> {
+        let mut rxs = Vec::with_capacity(bufs.len());
+        for buf in bufs {
+            let (tx, rx) = std::sync::mpsc::channel();
+            buf.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx.send(r);
+            });
+            rxs.push(rx);
+        }
         self.device
             .poll(wgpu::PollType::wait_indefinitely())
             .map_err(|e| anyhow::anyhow!("device poll failed: {e:?}"))?;
-        rx.recv()
-            .context("readback channel closed")?
-            .map_err(|e| anyhow::anyhow!("buffer map failed: {e:?}"))?;
-        let data = slice.get_mapped_range().to_vec();
-        buf.unmap();
-        Ok(data)
+        let mut out = Vec::with_capacity(bufs.len());
+        for (buf, rx) in bufs.iter().zip(rxs) {
+            rx.recv()
+                .context("readback channel closed")?
+                .map_err(|e| anyhow::anyhow!("buffer map failed: {e:?}"))?;
+            // The view borrows the buffer, so it has to be gone before unmap.
+            out.push(buf.slice(..).get_mapped_range().to_vec());
+            buf.unmap();
+        }
+        Ok(out)
     }
+}
+
+/// How many note-off runs the gates buffer should hold to carry `runs`, or \[36\]
+fn gates_capacity(runs: u64, current: u64, binding_cap: u64) -> Result<Option<u64>> {
+    if runs <= current {
+        return Ok(None);
+    }
+    let meta_words = (GATE_SLOTS as u64 + 1) * 2;
+    let bytes = |cap: u64| (meta_words + cap * 2) * 4;
+    if bytes(runs) > binding_cap {
+        bail!(
+            "one block publishes {runs} note-off runs, a {:.2} GiB gate table, and the \
+             adapter binds at most {:.2} GiB of one buffer to a shader; lower --block",
+            bytes(runs) as f64 / (1u64 << 30) as f64,
+            binding_cap as f64 / (1u64 << 30) as f64
+        );
+    }
+    let doubled = runs.next_power_of_two();
+    Ok(Some(if bytes(doubled) > binding_cap {
+        (binding_cap / 4 - meta_words) / 2
+    } else {
+        doubled
+    }))
 }
 
 impl Backend for GpuSynth {
@@ -1031,7 +1110,7 @@ impl Backend for GpuSynth {
         self.queue
             .write_buffer(&self.params_buf, off, bytemuck::cast_slice(data));
 
-        // [29]
+        // [37]
         let mper = self.menv_per_variant as usize;
         if menv.len() != mper {
             bail!(
@@ -1046,7 +1125,7 @@ impl Backend for GpuSynth {
     }
 
     fn set_channels(&mut self, rows: &[u32], bend: bool, gain: bool, variant: bool, cut: bool) -> Result<()> {
-        // [30]
+        // [38]
         self.queue
             .write_buffer(&self.chan_buf, 0, bytemuck::cast_slice(rows));
         self.bend_active = bend;
@@ -1056,14 +1135,14 @@ impl Backend for GpuSynth {
         Ok(())
     }
 
-    fn set_gates(&mut self, meta: &[u32], frames: &[u32]) -> Result<()> {
-        self.grow_gates(frames.len() as u32);
+    fn set_gates(&mut self, meta: &[u32], runs: &[u32]) -> Result<()> {
+        self.grow_gates(runs.len() / 2)?;
         self.queue
             .write_buffer(&self.gates_buf, 0, bytemuck::cast_slice(meta));
-        if !frames.is_empty() {
+        if !runs.is_empty() {
             let off = meta.len() as u64 * 4;
             self.queue
-                .write_buffer(&self.gates_buf, off, bytemuck::cast_slice(frames));
+                .write_buffer(&self.gates_buf, off, bytemuck::cast_slice(runs));
         }
         Ok(())
     }
@@ -1077,10 +1156,11 @@ impl Backend for GpuSynth {
         Ok(())
     }
 
-    fn render(&mut self, out: &mut [f32]) -> Result<()> {
+    /// Queue the whole block: spawn, render, reduce, compact, and the copies \[39\]
+    fn submit(&mut self) -> Result<()> {
         let cap = self.cfg.max_voices;
 
-        // [31]
+        // [40]
         let want = self.pending_spawns.len() as u32;
         let want = want.min(cap);
         if want < self.pending_spawns.len() as u32 {
@@ -1090,7 +1170,7 @@ impl Backend for GpuSynth {
         let mut steal_k = 0u32;
         if self.live + want > cap {
             match self.cfg.steal_rule {
-                // [32]
+                // [41]
                 StealRule::Oldest | StealRule::Quietest => {
                     steal_k = (self.live + want - cap)
                         .min(self.live)
@@ -1110,7 +1190,7 @@ impl Backend for GpuSynth {
                 self.queue
                     .write_buffer(&self.cmds_buf, 0, bytemuck::cast_slice(&self.pending_spawns));
             } else {
-                // [33]
+                // [42]
                 self.spawn_scratch.clear();
                 self.spawn_scratch.reserve(take);
                 match self.cfg.admit_rule {
@@ -1128,7 +1208,7 @@ impl Backend for GpuSynth {
                     .write_buffer(&self.cmds_buf, 0, bytemuck::cast_slice(&self.spawn_scratch));
             }
         }
-        // [34]
+        // [43]
         let nwg = self.render_workgroups(self.live + spawn_count);
         self.write_uniforms(spawn_count, steal_k, nwg);
 
@@ -1155,7 +1235,7 @@ impl Backend for GpuSynth {
             }};
         }
 
-        // [35]
+        // [44]
         {
             let live_wgs = self.dispatch_count(self.live);
             let mut p = begin!(enc, "steal");
@@ -1178,7 +1258,7 @@ impl Backend for GpuSynth {
                 p.dispatch_workgroups(1, 1, 1);
             }
         }
-        // [36]
+        // [45]
 
         // ---- 2. spawn ----
         {
@@ -1197,13 +1277,13 @@ impl Backend for GpuSynth {
         {
             let mut p = begin!(enc, "render");
             p.set_bind_group(0, &self.groups[self.parity].render, &[]);
-            // [37]
+            // [46]
             p.set_pipeline(if self.bend_active || self.gain_active || self.variant_active {
                 &self.pipelines.render_chan
             } else {
                 &self.pipelines.render
             });
-            // [38]
+            // [47]
             p.dispatch_workgroups(nwg, 1, 1);
         }
 
@@ -1217,11 +1297,11 @@ impl Backend for GpuSynth {
 
         // ---- 5. compact, and re-sort in the same pass ----
         {
-            // [39]
+            // [48]
             let live_wgs = self.dispatch_count(self.live);
             let mut p = begin!(enc, "compact");
 
-            // [40]
+            // [49]
             p.set_bind_group(0, &self.groups[self.parity].compact, &[]);
             p.set_pipeline(&self.pipelines.scan_local);
             p.dispatch_workgroups(live_wgs, 1, 1);
@@ -1229,7 +1309,7 @@ impl Backend for GpuSynth {
             p.dispatch_workgroups(1, 1, 1);
 
             if self.cfg.sort_voices {
-                // [41]
+                // [50]
                 let mut pair_parity = 0usize;
                 p.set_bind_group(0, &self.groups[self.parity].sort[pair_parity], &[]);
                 p.set_pipeline(&self.pipelines.sort_init);
@@ -1278,16 +1358,26 @@ impl Backend for GpuSynth {
         }
 
         self.queue.submit(Some(enc.finish()));
+        Ok(())
+    }
 
-        let out_bytes = self.map_read(&self.readback_out)?;
-        let samples: &[f32] = bytemuck::cast_slice(&out_bytes);
+    /// Wait for the queued block and take its audio and counters back. \[51\]
+    fn finish(&mut self, out: &mut [f32]) -> Result<()> {
+        // [52]
+        let mut bufs: Vec<&wgpu::Buffer> = vec![&self.readback_out, &self.readback_state];
+        let period_ns = self.timing.as_ref().map(|t| {
+            bufs.push(&t.readback);
+            t.period_ns
+        });
+        let reads = self.map_read_many(&bufs)?;
+
+        let samples: &[f32] = bytemuck::cast_slice(&reads[0]);
         out.copy_from_slice(&samples[..out.len()]);
 
-        let state_bytes = self.map_read(&self.readback_state)?;
-        let state: &[u32] = bytemuck::cast_slice(&state_bytes);
+        let state: &[u32] = bytemuck::cast_slice(&reads[1]);
         self.live = state[S_LIVE].min(self.cfg.max_voices);
         self.stolen = state[S_STOLEN] as u64;
-        // [42]
+        // [53]
         if state[S_DROPPED] != 0 {
             log::error!(
                 "the spawn pass dropped {} voices it should never have been handed",
@@ -1298,15 +1388,14 @@ impl Backend for GpuSynth {
                 .write_buffer(&self.state_buf, S_DROPPED as u64 * 4, &0u32.to_le_bytes());
         }
 
-        if let Some(t) = &self.timing {
-            let raw = self.map_read(&t.readback)?;
-            let ticks: &[u64] = bytemuck::cast_slice(&raw);
+        if let Some(period_ns) = period_ns {
+            let ticks: &[u64] = bytemuck::cast_slice(&reads[2]);
             let mut v = Vec::new();
             for (i, name) in PASS_NAMES.iter().enumerate() {
                 let a = ticks[i * 2];
                 let b = ticks[i * 2 + 1];
                 let ms = if b > a {
-                    (b - a) as f64 * t.period_ns as f64 / 1.0e6
+                    (b - a) as f64 * period_ns as f64 / 1.0e6
                 } else {
                     0.0
                 };
@@ -1344,5 +1433,33 @@ impl GpuSynth {
     }
     pub fn vram_bytes(&self) -> u64 {
         self.vram_bytes
+    }
+    /// PCI vendor and device id of the adapter this renders on.
+    pub fn adapter_ids(&self) -> (u32, u32) {
+        self.adapter_ids
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gates_capacity;
+
+    const GIB: u64 = 1 << 30;
+
+    #[test]
+    fn the_gates_buffer_grows_by_doubling_and_never_past_one_binding() {
+        assert_eq!(gates_capacity(10, 32768, 2 * GIB).unwrap(), None);
+        assert_eq!(gates_capacity(40_000, 32768, 2 * GIB).unwrap(), Some(65536));
+        // Doubling 10M runs would need 128 MiB and a bit; clamp to the binding.
+        let clamped = gates_capacity(10_000_000, 32768, 128 << 20).unwrap().unwrap();
+        assert!((10_000_000..16_777_216).contains(&clamped), "{clamped}");
+    }
+
+    /// The count from the crash on 2026-09-13, as entries. It used to wrap the \[54\]
+    #[test]
+    fn too_many_runs_for_one_binding_is_an_error_that_names_the_sizes() {
+        let e = gates_capacity(2_452_415_145, 32768, 2 * GIB).unwrap_err().to_string();
+        assert!(e.contains("2452415145 note-off runs"), "{e}");
+        assert!(e.contains("lower --block"), "{e}");
     }
 }

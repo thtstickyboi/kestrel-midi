@@ -1,0 +1,98 @@
+# Comments extracted from src/bin/kestrel/feed.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/bin/kestrel/feed.rs:5
+//! `--progress json`: a render's live state as JSON lines on stdout, at a rate
+//! the reading program sets, with control messages taken from stdin.
+//!
+//! The protocol is specified in `METRICS.md`. Everything sent comes from a
+//! `session::Monitor`, the same one the guided renderer's progress screen
+//! reads, and nothing here runs on the render thread: the emitter and the
+//! control reader are threads of their own, so a program that reads slowly,
+//! or stops reading, never slows the render.
+
+[2] src/bin/kestrel/feed.rs:24
+/// The wire format's version, sent in every `hello`. Adding a field leaves it
+/// alone; renaming or removing one, or changing a meaning, bumps it.
+
+[3] src/bin/kestrel/feed.rs:29
+/// How often the emitter looks for new events whatever the interval is, so a
+/// long interval never holds back a phase change or the end of the render.
+
+[4] src/bin/kestrel/feed.rs:32
+/// How long the end of a render waits for a reader that has stopped reading
+/// before exiting without it.
+
+[5] src/bin/kestrel/feed.rs:36
+/// A requested interval as it will be applied: 0 turns periodic progress off,
+/// and anything else is held to 10 ms..=60 s.
+
+[6] src/bin/kestrel/feed.rs:54
+/// Read one control line. A line with any key this does not know, or a value
+/// of the wrong kind, is refused whole rather than half applied, so a typo in
+/// a UI shows up the first time it is sent.
+
+[7] src/bin/kestrel/feed.rs:79
+/// What the control reader hands the emitter. `api` sends the same commands,
+/// from its own requests, to the emitter of a render it runs.
+
+[8] src/bin/kestrel/feed.rs:89
+/// A `progress` line: the snapshot, and the figures derived from it, so a
+/// reader in any language gets them without redoing the arithmetic.
+
+[9] src/bin/kestrel/feed.rs:131
+/// Read control lines until input ends, applying `cancel` straight to the
+/// monitor -- it is the one control that should not wait for the emitter --
+/// and passing everything on for the emitter to acknowledge.
+
+[10] src/bin/kestrel/feed.rs:195
+/// Write the monitor's events as they happen and its snapshot at the reading
+/// program's interval, until the render's last event is out. Returns early
+/// only if the reading program has gone and writes fail.
+///
+/// Lines leave through `send`, one JSON object each, so `api` can mark every
+/// line with the request it belongs to and share stdout with its responses.
+
+[11] src/bin/kestrel/feed.rs:245
+        // One last snapshot before the end, always, so a reading program's
+        // final counters match the summary instead of trailing it.
+
+[12] src/bin/kestrel/feed.rs:269
+        // Waiting on the channel rather than sleeping means a control message
+        // is answered at once, not at the next wake.
+
+[13] src/bin/kestrel/feed.rs:280
+            // The reading program closed stdin. That is allowed, and changes
+            // nothing but how this thread waits.
+
+[14] src/bin/kestrel/feed.rs:287
+/// `kestrel --force-cli render ... --progress json`.
+///
+/// `hello` is written before anything can fail, and every failure after it
+/// becomes a `failed` line, so a reading program only ever waits for one of
+/// two terminal types.
+
+[15] src/bin/kestrel/feed.rs:321
+        // Detached on purpose: it blocks on stdin, which may never close, and
+        // must not keep the process alive once the render is done.
+
+[16] src/bin/kestrel/feed.rs:337
+    // The last line is the summary or the error. Give a reader that has
+    // stopped reading a moment to take it, then exit regardless.
+
+[17] src/bin/kestrel/feed.rs:423
+    /// With periodic progress off, a reader gets the events in order, one
+    /// final snapshot, and the summary last, with nothing after it.
+
+[18] src/bin/kestrel/feed.rs:443
+    /// A control message is answered before the progress it changes, and a
+    /// refused one is reported rather than ignored.
+
+[19] src/bin/kestrel/feed.rs:462
+    /// The control reader stops at the end of its input and applies cancel
+    /// itself, without waiting for the emitter.

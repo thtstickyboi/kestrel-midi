@@ -6,9 +6,12 @@
 # they always match it. The development tree keeps every comment
 # inline; its history is the place to compare versions.
 
-[1] src/lib.rs:1
+[1] src/lib.rs:5
 //! GPU-accelerated SoundFont/SFZ synthesizer for black MIDI.
 //!
 //! The architecture in short: the host parses MIDI and resolves presets, the
 //! device renders voices and reduces them to a stereo block, and every GPU
 //! result is checked against the single-threaded CPU reference in `cpu`.
+//!
+//! `session` is a whole render -- soundfont, MIDI, device, block loop, output
+//! file -- and the live view of it that front ends read.

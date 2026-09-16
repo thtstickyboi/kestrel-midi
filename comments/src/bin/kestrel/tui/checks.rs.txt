@@ -1,0 +1,89 @@
+# Comments extracted from src/bin/kestrel/tui/checks.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/bin/kestrel/tui/checks.rs:5
+//! The judgements the guided renderer makes about what it is handed: whether
+//! a MIDI will open, what a soundfont is, what a typed voice count means,
+//! which typed flags it can pass through, and what to call the output.
+//!
+//! Kept free of terminal I/O so every one of them is a plain function a test
+//! can call.
+
+[2] src/bin/kestrel/tui/checks.rs:44
+/// What a file that is not a MIDI most likely is, from its first bytes. Black
+/// MIDI is passed around compressed, and "not a MIDI file" is a poor answer to
+/// a `.mid.xz` somebody forgot to extract.
+
+[3] src/bin/kestrel/tui/checks.rs:75
+/// The quick check: the header and the chunk list, never an event.
+///
+/// Cheap enough to run on thousands of files, and it catches what actually
+/// turns up -- a file that is not a MIDI, an archive, an empty or headerless
+/// file, a zero timing division. A file cut short still renders what is there,
+/// so it passes with a note rather than failing.
+
+[4] src/bin/kestrel/tui/checks.rs:243
+    /// A General MIDI bank, as opposed to an instrument.
+    ///
+    /// GM defines 128 melodic programs and a drum kit. A set covering most of
+    /// the programs is one; so is one covering half of them with a kit, which
+    /// is what the smaller GS/GM ROM dumps look like. A piano library defines
+    /// one program, or a handful for its variants, and no kit.
+
+[5] src/bin/kestrel/tui/checks.rs:254
+/// Which soundfont goes underneath.
+///
+/// The later layer replaces the earlier wherever both define a program, so a
+/// General MIDI bank has to be the base and an instrument has to go on top of
+/// it -- the other way round the bank's own piano would bury the one that was
+/// picked for it. Otherwise the picking order stands.
+
+[6] src/bin/kestrel/tui/checks.rs:316
+/// Read a typed voice count.
+///
+/// Pressing Enter and typing the word both mean the default, because the
+/// prompt says "Enter" and people type what the prompt says. Thousands
+/// separators are accepted in the forms people write them, and `k` and `M`
+/// suffixes, so `700,000`, `700_000` and `700k` are the same answer.
+
+[7] src/bin/kestrel/tui/checks.rs:363
+/// Local time as it goes into a file name.
+///
+/// Asked for as `mm-dd-yyyy | hh:mm:ss`, 24-hour. Windows forbids both `|` and
+/// `:` in file names, so the bar is dropped and dots stand in for the colons.
+
+[8] src/bin/kestrel/tui/checks.rs:371
+/// Where a render of `midi` into `dir` goes: the MIDI's name with the
+/// container's extension, and never over an existing file. A clash gets the
+/// time in brackets, and a clash within the same second gets a count on top.
+
+[9] src/bin/kestrel/tui/checks.rs:395
+/// Split a typed line into arguments: whitespace separates, and single or
+/// double quotes group. Backslashes are literal, because they are Windows path
+/// separators far more often than escapes.
+
+[10] src/bin/kestrel/tui/checks.rs:444
+/// Flags no loader reads: they choose the device, the voice pool, the
+/// limiter, the output encoding, or diagnostics. A bank built before any of
+/// them was typed is still the bank they would build.
+///
+/// An allowlist on purpose. Anything not here forces a reload, so the failure
+/// mode of a missing entry is a few seconds, and a flag added later can never
+/// make a guided render differ from the same command on the command line.
+
+[11] src/bin/kestrel/tui/checks.rs:477
+/// Check typed flags against what the earlier steps already chose.
+///
+/// Anything clap itself would reject is left for clap, which says why better
+/// than this could; what is refused here is only what would collide with a
+/// step -- a second MIDI, soundfont or output -- plus `--adapter`, which only
+/// exists here.
+
+[12] src/bin/kestrel/tui/checks.rs:611
+    /// Every character the timestamp puts in a name has to be legal on
+    /// Windows, which is why it is not literally `mm-dd-yyyy | hh:mm:ss`.

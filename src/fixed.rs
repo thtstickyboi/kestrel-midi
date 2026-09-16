@@ -1,3 +1,7 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 //! 32.32 fixed-point phase arithmetic. \[1\]
 
 /// A 32.32 fixed-point number. The upper 32 bits are a sample index, the lower \[2\]

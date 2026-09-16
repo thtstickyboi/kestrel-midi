@@ -1,0 +1,116 @@
+# Comments extracted from src/gpu/vram.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/gpu/vram.rs:5
+//! How much video memory an adapter has, and how much of it is in use -- by
+//! every process on it, not only this one.
+//!
+//! wgpu reports none of that. Its counters cover only what Kestrel allocated,
+//! and although wgpu-hal asks DXGI and `VK_EXT_memory_budget` for budgets, it
+//! keeps the answers to itself. Windows publishes the whole-adapter figures in
+//! two places, both behind raw system calls: DXGI, for how much dedicated
+//! memory the adapter has and the budget it gives this process, and the
+//! performance counters Task Manager reads, for what every process together
+//! is using.
+//!
+//! **The only module besides the GPU buffer mapping layer allowed `unsafe`**,
+//! by the user's decision of 2026-09-12, and only for those calls. Every
+//! `unsafe` block says what makes it sound. Other platforms have no
+//! implementation yet and report nothing rather than a guess.
+
+[2] src/gpu/vram.rs:31
+    /// Dedicated video memory in use by every process on the adapter: the
+    /// figure Task Manager calls "Dedicated GPU memory".
+
+[3] src/gpu/vram.rs:34
+    /// System memory the adapter has mapped, for every process. Most of what
+    /// an integrated GPU uses is here rather than in dedicated memory.
+
+[4] src/gpu/vram.rs:39
+    /// How much dedicated memory the OS lets this process use before it
+    /// starts evicting. It shrinks as other processes take more.
+
+[5] src/gpu/vram.rs:49
+/// Reads an adapter's memory on a thread of its own, once a second, so asking
+/// for the latest figure never waits on the system. The first reading takes a
+/// moment -- the performance counters load their providers -- and until it
+/// lands, or on a platform with no implementation, `latest` is `None`.
+
+[6] src/gpu/vram.rs:59
+    /// Start watching the adapter with these PCI vendor and device ids, the
+    /// ones `wgpu::AdapterInfo` reports.
+
+[7] src/gpu/vram.rs:65
+        // A thread that cannot start leaves `latest` at `None`, which is what
+        // every reader already has to handle.
+
+[8] src/gpu/vram.rs:99
+/// One reading, taken now. Slow the first time in a process; read it through
+/// a `VramWatch` from anything that should not wait.
+
+[9] src/gpu/vram.rs:105
+/// The instance-name prefix the performance counters give an adapter,
+/// `luid_0x<high>_0x<low>_phys_` in lower-case hex. A linked multi-GPU adapter
+/// has several `phys` instances under one LUID, and they are summed.
+///
+/// Only the Windows probe calls it, but it is plain formatting and its test
+/// runs everywhere, so it is not compiled out elsewhere -- only the lint is.
+
+[10] src/gpu/vram.rs:157
+            // SAFETY: takes no arguments and returns an owned COM reference,
+            // released when the wrapper drops.
+
+[11] src/gpu/vram.rs:162
+                // SAFETY: an index past the last adapter returns
+                // DXGI_ERROR_NOT_FOUND, which ends the walk through `?`; an
+                // adapter that is returned is an owned reference.
+
+[12] src/gpu/vram.rs:190
+                // SAFETY: `info` is a live, writable struct of exactly the type
+                // the call fills, and node 0 exists on every adapter.
+
+[13] src/gpu/vram.rs:220
+            // SAFETY: a null data source asks for live data, and `query` is a
+            // writable handle slot.
+
+[14] src/gpu/vram.rs:226
+            // SAFETY: `query` is the query just opened; both paths are static
+            // NUL-terminated wide strings; the handle slots are writable, and
+            // the counters they receive belong to the query.
+
+[15] src/gpu/vram.rs:250
+        /// A counter's value summed over this adapter's instances, or `None`
+        /// if the adapter has none.
+
+[16] src/gpu/vram.rs:254
+            // SAFETY: with no buffer the call writes only the size it needs and
+            // the item count, both into writable locals.
+
+[17] src/gpu/vram.rs:262
+            // Whole u64 words, so the buffer is aligned for the item structs
+            // the call writes at its start. The names those items point to are
+            // written later in the same buffer.
+
+[18] src/gpu/vram.rs:267
+            // SAFETY: the buffer holds at least the `bytes` the first call
+            // asked for and is aligned for PDH_FMT_COUNTERVALUE_ITEM_W.
+
+[19] src/gpu/vram.rs:278
+                // SAFETY: the call wrote `count` items at the start of `buf`,
+                // which is neither freed nor moved during this loop, and each
+                // name points at a NUL-terminated string inside it.
+
+[20] src/gpu/vram.rs:310
+    /// The instance names as Windows writes them, taken from `Get-Counter
+    /// '\GPU Adapter Memory(*)\Dedicated Usage'` on the RTX 5060 machine,
+    /// 2026-09-12.
+
+[21] src/gpu/vram.rs:320
+    /// The adapter wgpu would render on reports a total, and a usage no
+    /// larger than it. Windows only: elsewhere there is no implementation, and
+    /// `sample` saying so is the correct answer.

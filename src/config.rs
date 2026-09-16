@@ -1,3 +1,7 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 //! All tunables live here. Nothing in this crate reads a magic constant that is \[1\]
 
 use crate::limiter::LimiterMode;
@@ -150,25 +154,25 @@ pub struct Config {
     pub steal_rule: StealRule,
     /// Which note-ons survive when a block oversubscribes the pool.
     pub admit_rule: AdmitRule,
-    /// Ceiling on how much of the pool one block may steal, in percent. \[21\]
+    /// Admission candidates one block may hold before they are thinned. \[21\]
+    pub max_block_candidates: u32,
+    /// Ceiling on how much of the pool one block may steal, in percent. \[22\]
     pub max_steal_percent: u32,
-    /// Frames a stolen voice fades over instead of being cut. \[22\]
+    /// Frames a stolen voice fades over instead of being cut. \[23\]
     pub steal_fade_frames: u32,
-    /// Re-sort the voice pool by (region, envelope stage, phase) during \[23\]
+    /// Re-sort the voice pool by (region, envelope stage, phase) during \[24\]
     pub sort_voices: bool,
 
     // ---- dsp -------------------------------------------------------------
     pub interpolation: Interpolation,
     pub decay_curve: EnvelopeCurve,
     pub release_curve: EnvelopeCurve,
-    /// Envelope level below which a releasing voice is considered dead. \[24\]
+    /// Envelope level below which a releasing voice is considered dead. \[25\]
     pub env_floor: f32,
-    /// Enable the per-voice low-pass filter. SoundFonts that leave the cutoff \[25\]
+    /// Enable the per-voice low-pass filter. SoundFonts that leave the cutoff \[26\]
     pub filter_enabled: bool,
     /// Linear gain applied to the final mix before limiting.
     pub master_volume: f32,
-    /// Where CC7 sits on a channel that never sends one. General MIDI says a \[26\]
-    pub default_channel_volume: u8,
     /// How many copies of the params table the sound controllers CC71-CC75 may \[27\]
     pub max_param_variants: u32,
     /// Apply the soft limiter to the mixed output.
@@ -243,6 +247,7 @@ impl Default for Config {
             max_layers: 16,
             steal_rule: StealRule::Quietest,
             admit_rule: AdmitRule::Loudest,
+            max_block_candidates: 1 << 27,
             max_steal_percent: 25,
             steal_fade_frames: 96,
             sort_voices: true,
@@ -253,7 +258,6 @@ impl Default for Config {
             env_floor: 1.0e-5, // -100 dB
             filter_enabled: true,
             master_volume: 1.0,
-            default_channel_volume: 127,
             max_param_variants: 32,
             limiter: true,
             limiter_mode: LimiterMode::Brickwall,
@@ -294,7 +298,7 @@ impl Config {
         if self.sample_rate < 8_000 || self.sample_rate > 768_000 {
             bail!("sample_rate {} out of range", self.sample_rate);
         }
-        if self.block_frames == 0 || self.block_frames % self.reduce_tile != 0 {
+        if self.block_frames == 0 || !self.block_frames.is_multiple_of(self.reduce_tile) {
             bail!(
                 "block_frames ({}) must be a non-zero multiple of reduce_tile ({})",
                 self.block_frames,
@@ -314,11 +318,12 @@ impl Config {
             bail!("reduce_tile {} must be a power of two", self.reduce_tile);
         }
         if self.gate_frames == 0
-            || self.gate_frames % self.reduce_tile != 0
-            || self.block_frames % self.gate_frames != 0
+            || !self.gate_frames.is_multiple_of(self.reduce_tile)
+            || !self.block_frames.is_multiple_of(self.gate_frames)
         {
             bail!(
-                "gate_frames ({}) must be a multiple of reduce_tile ({}) and divide                  block_frames ({})",
+                "gate_frames ({}) must be a multiple of reduce_tile ({}) and divide \
+                 block_frames ({})",
                 self.gate_frames,
                 self.reduce_tile,
                 self.block_frames

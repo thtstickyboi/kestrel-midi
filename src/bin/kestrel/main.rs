@@ -1,20 +1,39 @@
-//! Thin CLI over the library. No GUI, on purpose.
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+//! Kestrel's executable. Started with no arguments -- which is what
+//! double-clicking it does -- it opens the guided renderer in `tui`. The whole
+//! command line is still here, behind `--force-cli`, and both front ends drive
+//! the one render pipeline in `render`. Neither is a windowed GUI: the guided
+//! renderer is a terminal UI that borrows the platform's file pickers.
+
+mod api;
+mod feed;
+mod render;
+mod tui;
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
-use kestrel::backend::Backend;
 use kestrel::limiter::LimiterMode;
 use kestrel::config::{
     AdmitRule, BackendKind, Config, EnvelopeCurve, Interpolation, StealRule,
 };
-use kestrel::{bank::Bank, cpu::CpuSynth, driver::Driver, gpu, load_bank, testkit, wav};
+use kestrel::{gpu, load_bank, testkit, wav};
+use std::ffi::OsString;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Instant;
 
 #[derive(Parser)]
 #[command(name = "kestrel", version, about = "GPU-accelerated SoundFont/SFZ renderer for black MIDI")]
 struct Cli {
+    /// Run from the command line. Given any other arguments without this,
+    /// Kestrel points at the guided renderer instead of running them; with no
+    /// arguments at all it opens the guided renderer.
+    // Routed on before clap runs, in `route`. Declared so clap accepts it in
+    // any position and lists it in help, not so anything reads it here.
+    #[allow(dead_code)]
+    #[arg(long = "force-cli", global = true)]
+    force_cli: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -26,6 +45,7 @@ enum Cmd {
     Render(RenderArgs),
     /// Print what the loader made of a soundfont or MIDI file.
     Info {
+        /// A soundfont (.sf2, .sfz) or a MIDI file (.mid, .midi).
         path: PathBuf,
         /// Frames per render block, for the per-block density report. Match
         /// what you intend to render with.
@@ -58,7 +78,9 @@ enum Cmd {
     },
     /// Compare two WAV files and report the null-test difference.
     Null {
+        /// The reference render.
         a: PathBuf,
+        /// The render to compare against it.
         b: PathBuf,
         /// Fail if the peak difference is above this many dB.
         #[arg(long, default_value_t = -80.0)]
@@ -66,8 +88,53 @@ enum Cmd {
     },
     /// List the GPU adapters wgpu can see.
     GpuInfo,
+    /// Report which ffmpeg encoded output would use, where it was found, and
+    /// which containers this build can write. Exits non-zero if ffmpeg is
+    /// missing or an encoder a preset needs is absent, so it works as a setup
+    /// check and not only as something to read.
+    FfmpegInfo {
+        /// Use this ffmpeg instead of searching. Overrides the FFMPEG
+        /// environment variable.
+        #[arg(long = "ffmpeg", value_name = "PATH")]
+        ffmpeg: Option<PathBuf>,
+    },
+    /// Let another program drive Kestrel: requests as JSON lines on stdin,
+    /// responses, log lines and live render telemetry as JSON lines on
+    /// stdout. For GUIs; the protocol is in API.md.
+    ///
+    /// A session loads MIDIs and soundfonts, lists adapters, ffmpeg and every
+    /// render option with its default, runs renders with progress, pull-mode
+    /// snapshots and cancel, and keeps a soundfont loaded between renders. It
+    /// ends when stdin closes.
+    Api,
+    /// Download an ffmpeg into an `ffmpeg/` directory beside this executable.
+    ///
+    /// Deliberately a separate command and never part of a render: a flag on
+    /// `render` would end up in scripts and fetch unattended. Nothing is
+    /// installed system-wide and PATH is not modified, so undoing this is
+    /// deleting that directory.
+    GetFfmpeg {
+        /// Print what would be downloaded, and where, then exit.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+        /// Skip the confirmation prompt.
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
+        /// The SHA-256 the archive must have, from the vendor's published
+        /// checksum. Required, because no digest is pinned in this build; the
+        /// first run prints the one it saw so it can be checked and passed back.
+        #[arg(long = "accept-hash", value_name = "SHA256")]
+        accept_hash: Option<String>,
+        /// Install somewhere other than beside the executable.
+        #[arg(long = "dir", value_name = "PATH")]
+        dir: Option<PathBuf>,
+    },
     /// Write synthetic soundfonts and MIDI files, for benchmarking against
     /// material you can reproduce exactly.
+    ///
+    /// A development command: hidden from help and from the guided renderer,
+    /// and still here for the tests and the benchmarks.
+    #[command(hide = true)]
     GenAssets {
         dir: PathBuf,
         /// Also write a soundfont with a sample pool of this many MiB, for
@@ -97,20 +164,35 @@ struct RenderArgs {
     /// which for an .sfz is program 0.
     #[arg(long = "sf-programs", value_name = "LIST")]
     sf_programs: Option<String>,
-    /// Output WAV.
+    /// Output file. The extension picks the container: .wav is written
+    /// directly, and .opus/.mp3/.ogg/.flac/.m4a are encoded through ffmpeg at a
+    /// high-quality preset chosen per container. Encoding needs ffmpeg on PATH;
+    /// see `kestrel ffmpeg-info`.
     #[arg(short = 'o', long = "out")]
     out: PathBuf,
+    /// ffmpeg to use for encoded output. Only needed when it is not on PATH or
+    /// a specific build is wanted; overrides the FFMPEG environment variable.
+    #[arg(long = "ffmpeg", value_name = "PATH")]
+    ffmpeg: Option<PathBuf>,
 
+    /// Which renderer: the GPU, or the single-threaded CPU reference the GPU
+    /// is checked against. The CPU path exists for null tests and is far too
+    /// slow for real material.
     #[arg(long, default_value = "gpu", value_parser = ["cpu", "gpu"])]
     backend: String,
+    /// Output sample rate in Hz. Every sample in the soundfont is converted to
+    /// it when the soundfont loads.
     #[arg(long, default_value_t = 48000)]
     rate: u32,
+    /// Frames per render block. Admission and stealing are decided once a
+    /// block, so this is also their granularity.
     #[arg(long, default_value_t = 4096)]
     block: u32,
     /// Frames per workgroup reduction round, and the note-off gate resolution.
     #[arg(long = "reduce-tile", default_value_t = 4)]
     reduce_tile: u32,
-    /// Frames between note-off gate checks. A multiple of --reduce-tile.
+    /// Frames between note-off gate checks, and the rate at which channel
+    /// controllers and per-voice LFOs update. A multiple of --reduce-tile.
     #[arg(long = "gate-frames", default_value_t = 32)]
     gate_frames: u32,
     /// Invocations per render workgroup.
@@ -119,16 +201,26 @@ struct RenderArgs {
     /// Upper bound on render workgroups; sizes the partial buffer.
     #[arg(long = "render-workgroups", default_value_t = 2048)]
     render_workgroups: u32,
+    /// Most voices sounding at once. `gpu-info` prints the largest each
+    /// adapter takes.
     #[arg(long = "max-voices", default_value_t = 1 << 20)]
     max_voices: u32,
+    /// Most voices one note-on may spawn. Caps runaway presets; a stereo
+    /// sample is two.
     #[arg(long, default_value_t = 16)]
     layers: u32,
+    /// Sample interpolation: nearest, linear or cubic. Cubic reads twice as
+    /// many samples a voice.
     #[arg(long, default_value = "linear")]
     interp: String,
+    /// Shape of the envelope's decay stage: exponential or linear.
     #[arg(long = "decay-curve", default_value = "exponential")]
     decay_curve: String,
+    /// Shape of the envelope's release stage: exponential or linear.
     #[arg(long = "release-curve", default_value = "exponential")]
     release_curve: String,
+    /// Which voice goes when the pool is full: quietest, oldest, or drop-new,
+    /// which refuses the new note instead.
     #[arg(long, default_value = "quietest")]
     steal: String,
     /// Which note-ons survive when one block has more of them than the pool
@@ -140,9 +232,22 @@ struct RenderArgs {
     /// 100 lets a saturated block replace the entire pool, which pumps.
     #[arg(long = "steal-percent", default_value_t = 25)]
     steal_percent: u32,
+    /// WAV sample format. Encoded containers take float and refuse anything
+    /// else.
     #[arg(long, default_value = "float32", value_parser = ["float32", "pcm16"])]
     format: String,
-    #[arg(long, default_value_t = 1.0)]
+    /// Volume as a percentage, from 0 to 200: 100 leaves the mix as it is, 50
+    /// is half, 200 is twice, 0 is silent. Applied to every voice, before the
+    /// limiter. A dense mix sits far above full scale and the limiter holds it
+    /// at the ceiling, so lowering this eases the limiting more than it quietens
+    /// the file; --ceiling-db sets how loud the file can get.
+    #[arg(
+        long,
+        value_name = "PERCENT",
+        default_value_t = 100.0,
+        value_parser = parse_volume,
+        allow_negative_numbers = true
+    )]
     volume: f32,
     /// Turn the soft limiter off.
     #[arg(long = "no-limiter")]
@@ -151,9 +256,11 @@ struct RenderArgs {
     /// omni (the OmniConverter port, deprecated for rendering).
     #[arg(long, default_value = "brickwall", value_parser = ["brickwall", "omni", "off"])]
     limiter: String,
-    /// Brickwall ceiling in dBFS. 0 is flat full scale.
-    #[arg(long = "ceiling-db", default_value_t = 0.0)]
-    ceiling_db: f64,
+    /// Brickwall ceiling in dBFS. Defaults to 0 (flat full scale) for .wav and
+    /// .flac, and to -1 for the lossy containers, which need headroom because
+    /// their decoders overshoot what was encoded. An explicit value always wins.
+    #[arg(long = "ceiling-db", value_name = "DB", allow_negative_numbers = true)]
+    ceiling_db: Option<f64>,
     /// Brickwall lookahead in ms. Also the render latency.
     #[arg(long = "lookahead-ms", default_value_t = 2.0)]
     lookahead_ms: f64,
@@ -224,6 +331,51 @@ struct RenderArgs {
     /// anything upstream miscounts.
     #[arg(long = "unchecked-shaders")]
     unchecked_shaders: bool,
+
+    /// Report the render to another program instead of the terminal. `json`
+    /// writes one JSON object per line on stdout -- the phases, the device,
+    /// progress snapshots, and the result last -- and reads control messages
+    /// from stdin: {"interval_ms": N}, {"snapshot": true}, {"cancel": true}.
+    /// Log lines stay on stderr.
+    #[arg(long = "progress", value_name = "FORMAT", value_parser = ["json"])]
+    progress: Option<String>,
+    /// Milliseconds between progress snapshots under --progress, held to
+    /// 10..=60000. 0 sends them only when the reading program asks, and the
+    /// reading program can change it while the render runs.
+    #[arg(
+        long = "progress-interval",
+        value_name = "MS",
+        default_value_t = 250,
+        requires = "progress"
+    )]
+    progress_interval: u64,
+}
+
+/// `--volume`: a percentage from 0 to 200, with or without a trailing `%`.
+///
+/// A negative number is refused with what it would be as decibels, because a
+/// decibel value is the likeliest thing someone typing one meant.
+fn parse_volume(s: &str) -> std::result::Result<f32, String> {
+    let v: f32 = s
+        .trim()
+        .trim_end_matches('%')
+        .trim_end()
+        .parse()
+        .map_err(|_| format!("{s:?} is not a percentage; 100 leaves the mix as it is"))?;
+    if v.is_nan() || v < 0.0 {
+        let as_db = if v.is_finite() {
+            let pct = 100.0 * 10f32.powf(v / 20.0);
+            let pct = if pct >= 1.0 { format!("{pct:.1}") } else { format!("{pct:.3}") };
+            format!("; {s} dB would be --volume {pct}")
+        } else {
+            String::new()
+        };
+        return Err(format!("volume is a percentage from 0 to 200, not {s}{as_db}"));
+    }
+    if v > 200.0 {
+        return Err(format!("volume is at most 200, twice as loud, not {s}"));
+    }
+    Ok(v)
 }
 
 impl RenderArgs {
@@ -238,9 +390,11 @@ impl RenderArgs {
             max_voices: self.max_voices,
             max_layers: self.layers,
             max_steal_percent: self.steal_percent,
-            master_volume: self.volume,
+            master_volume: self.volume / 100.0,
             limiter: !self.no_limiter,
-            limiter_ceiling_db: self.ceiling_db,
+            // `None` here means "not chosen yet". `render` fills it in from
+            // the output container, which `to_config` cannot see.
+            limiter_ceiling_db: self.ceiling_db.unwrap_or(0.0),
             limiter_lookahead_ms: self.lookahead_ms,
             limiter_release_ms: self.limiter_release_ms,
             limiter_sustain_ms: self.limiter_sustain_ms,
@@ -258,6 +412,16 @@ impl RenderArgs {
             gpu_adapter: self.gpu_adapter.clone(),
             ..Default::default()
         };
+        // Until 0.3.0 this was a linear gain, so a script written then passes
+        // something like 0.5 and would now render 46 dB down without a word.
+        if self.volume > 0.0 && self.volume <= 2.0 {
+            log::warn!(
+                "--volume {v} is {v}% of the mix ({:.1} dB). It is a percentage now; a value \
+                 from the old linear scale needs multiplying by 100",
+                20.0 * (self.volume / 100.0).log10(),
+                v = self.volume
+            );
+        }
         if self.nan_guard {
             cfg.nan_guard = true;
         }
@@ -299,14 +463,64 @@ impl RenderArgs {
     }
 }
 
+/// Which front end a command line gets.
+#[derive(Debug, PartialEq, Eq)]
+enum Route {
+    /// No arguments: the guided renderer.
+    Guided,
+    /// The Extras window the guided renderer opens.
+    Extras,
+    /// Arguments without `--force-cli`: a pointer to the guided renderer.
+    Notice,
+    /// `--force-cli`, or a request for help or the version.
+    Cli,
+}
+
+fn route(args: &[OsString]) -> Route {
+    let is = |a: &OsString, s: &str| a.to_str() == Some(s);
+    if args.is_empty() {
+        return Route::Guided;
+    }
+    if args.len() == 1 && is(&args[0], tui::extras::FLAG) {
+        return Route::Extras;
+    }
+    if args.iter().any(|a| is(a, "--force-cli")) {
+        return Route::Cli;
+    }
+    // Help and the version are how anyone finds `--force-cli` in the first
+    // place, so they are never refused.
+    let asks = |a: &OsString| matches!(a.to_str(), Some("-h" | "--help" | "-V" | "--version"));
+    if args.iter().all(asks) || is(&args[0], "help") {
+        return Route::Cli;
+    }
+    Route::Notice
+}
+
 fn main() -> Result<()> {
+    let raw: Vec<OsString> = std::env::args_os().skip(1).collect();
+    match route(&raw) {
+        Route::Guided => return tui::run(),
+        Route::Extras => return tui::extras::run(),
+        Route::Notice => {
+            tui::notice(&raw);
+            std::process::exit(2);
+        }
+        Route::Cli => {}
+    }
+
+    let cli = Cli::parse();
+    // The API writes its log records as JSON lines of its own, so stdout
+    // carries nothing that is not a protocol line.
+    if matches!(cli.cmd, Cmd::Api) {
+        return api::run();
+    }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp(None)
         .init();
 
-    let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Render(args) => render(args),
+        Cmd::Api => unreachable!("handled above, before the logger"),
+        Cmd::Render(args) => render::render_cli(args),
         Cmd::Info {
             path,
             block,
@@ -317,6 +531,13 @@ fn main() -> Result<()> {
         } => info(path, block, rate, sf_layers, sf_release, soundfont),
         Cmd::Null { a, b, threshold } => null(a, b, threshold),
         Cmd::GpuInfo => gpu::print_adapters(),
+        Cmd::FfmpegInfo { ffmpeg } => ffmpeg_info(ffmpeg),
+        Cmd::GetFfmpeg {
+            dry_run,
+            yes,
+            accept_hash,
+            dir,
+        } => get_ffmpeg(dry_run, yes, accept_hash, dir),
         Cmd::GenAssets {
             dir,
             big_mb,
@@ -325,222 +546,173 @@ fn main() -> Result<()> {
     }
 }
 
-/// Parse `--sf-programs`: a comma-separated list of programs and `a-b` ranges.
-fn parse_programs(spec: &str) -> Result<Vec<u16>> {
-    let mut out = Vec::new();
-    for part in spec.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        match part.split_once('-') {
-            Some((a, b)) => {
-                let (a, b): (u16, u16) = (a.trim().parse()?, b.trim().parse()?);
-                if a > b {
-                    bail!("--sf-programs range {part:?} runs backwards");
-                }
-                out.extend(a..=b);
-            }
-            None => out.push(part.parse()?),
-        }
-    }
-    if out.is_empty() {
-        bail!("--sf-programs is empty");
-    }
-    if let Some(bad) = out.iter().find(|p| **p > 127) {
-        bail!("--sf-programs {bad} is out of range; GM programs are 0-127");
-    }
-    out.sort_unstable();
-    out.dedup();
-    Ok(out)
-}
-
-/// Load one or more soundfonts and layer them in order.
+/// Fetch an ffmpeg, verify it, and install it beside this executable.
 ///
-/// Each is merged on top of the ones before it, so a preset at the same bank
-/// and program replaces the earlier one. `--sf-programs` applies to the last
-/// soundfont only, which is the one doing the overriding.
-fn load_layered(paths: &[PathBuf], programs: Option<&str>, cfg: &Config) -> Result<Bank> {
-    let (first, rest) = paths.split_first().context("no soundfont given")?;
-    let mut bank = load_bank(first, cfg)?;
-    if rest.is_empty() {
-        if let Some(spec) = programs {
-            let progs = parse_programs(spec)?;
-            bank.remap_to_programs(&progs)?;
-            bank.build_params(cfg);
-            bank.finish();
+/// The order is the point: **the digest is checked before anything is
+/// extracted, and extraction happens before anything is executed.** A download
+/// that fails verification is deleted without ever being unpacked.
+fn get_ffmpeg(
+    dry_run: bool,
+    yes: bool,
+    accept_hash: Option<String>,
+    dir: Option<PathBuf>,
+) -> Result<()> {
+    use kestrel::ffmpeg;
+
+    let release = ffmpeg::release_for_host().with_context(|| {
+        format!(
+            "no ffmpeg build is listed for this platform ({} {}).\n\
+             Install ffmpeg yourself and it will be found on PATH.",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    })?;
+    let dest = match dir {
+        Some(d) => d,
+        None => ffmpeg::install_dir()?,
+    };
+
+    // Everything the operator needs in order to say no, before anything is
+    // fetched. Licence included: this is a GPL binary being placed next to an
+    // MPL program, which is a thing to be told rather than to discover.
+    println!("platform  {}", release.platform);
+    println!("url       {}", release.url);
+    println!("origin    {}", release.origin);
+    println!("licence   {}", release.license);
+    println!("size      {}", release.size_hint);
+    println!("install   {}", dest.join(ffmpeg::exe_name()).display());
+    println!(
+        "verify    {}",
+        match (&accept_hash, release.sha256) {
+            (Some(h), _) => format!("SHA-256 must equal {h}"),
+            (None, Some(h)) => format!("SHA-256 must equal the pinned {h}"),
+            (None, None) => "NO DIGEST GIVEN -- the download will be refused".to_string(),
         }
-        return Ok(bank);
+    );
+
+    if dry_run {
+        println!("\ndry run: nothing downloaded");
+        return Ok(());
     }
-    log::info!("layer 1: {}", bank.describe());
-    for (i, p) in rest.iter().enumerate() {
-        let mut top = load_bank(p, cfg)?;
-        log::info!("layer {}: {}", i + 2, top.describe());
-        // Only the last layer is remapped: it is the override.
-        if i + 1 == rest.len() {
-            if let Some(spec) = programs {
-                let progs = parse_programs(spec)?;
-                top.remap_to_programs(&progs)?;
-            }
+
+    if !yes {
+        use std::io::Write;
+        print!("\nDownload and install this? [y/N] ");
+        std::io::stdout().flush().ok();
+        let mut line = String::new();
+        // EOF means no controlling terminal, which is exactly when an
+        // unattended fetch would be worst. Refusing is the safe reading.
+        if std::io::stdin().read_line(&mut line).is_err() || !line.trim().eq_ignore_ascii_case("y")
+        {
+            bail!("cancelled");
         }
-        bank.merge(top);
     }
-    // Everything derived is rebuilt from the merged whole.
-    bank.build_params(cfg);
-    bank.finish();
-    Ok(bank)
+
+    std::fs::create_dir_all(&dest).with_context(|| format!("creating {}", dest.display()))?;
+    // Into the destination, not the system temp directory: a 40 MB archive
+    // should fail on the volume it is going to live on, not after crossing one.
+    let archive = dest.join("ffmpeg-download.part");
+
+    println!("\ndownloading...");
+    ffmpeg::download(release.url, &archive)?;
+    let size = std::fs::metadata(&archive).map(|m| m.len()).unwrap_or(0);
+    println!("got {:.1} MiB", size as f64 / 1048576.0);
+
+    print!("verifying... ");
+    use std::io::Write as _;
+    std::io::stdout().flush().ok();
+    let got = ffmpeg::sha256::hex_of_file(&archive)?;
+    println!("{got}");
+
+    if let Err(e) = ffmpeg::verify(release, &got, accept_hash.as_deref()) {
+        // An unverified archive is not left lying around to be picked up by a
+        // later run or a curious operator.
+        let _ = std::fs::remove_file(&archive);
+        return Err(e);
+    }
+
+    println!("extracting {}...", ffmpeg::exe_name());
+    let installed = ffmpeg::extract_binary(&archive, &dest)?;
+    let _ = std::fs::remove_file(&archive);
+
+    // Only now is it run, and only to confirm it is what it claims to be and
+    // can encode what the presets need.
+    let f = ffmpeg::probe(&installed, ffmpeg::Source::BesideExe)?;
+    println!("\ninstalled {}", installed.display());
+    println!("version   {}", f.version);
+
+    let missing = f.missing_encoders()?;
+    if missing.is_empty() {
+        println!("every container Kestrel encodes is available");
+    } else {
+        println!(
+            "warning: this build cannot write {}",
+            missing
+                .iter()
+                .map(|m| format!(".{}", m.ext))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    println!("\nKestrel will now find this automatically; no flags needed.");
+    Ok(())
 }
 
-fn render(args: RenderArgs) -> Result<()> {
-    let (mut cfg, kind) = args.to_config()?;
+/// Report the ffmpeg that encoded output would use.
+///
+/// Exits non-zero when there is none, or when the build is missing an encoder
+/// a 0.3.0 preset needs, so it is usable as a setup check in a script rather
+/// than only as something to read.
+fn ffmpeg_info(explicit: Option<PathBuf>) -> Result<()> {
+    let f = kestrel::ffmpeg::find(explicit.as_deref())?;
+    println!("ffmpeg  {}", f.path.display());
+    println!("found   via {}", f.source.describe());
+    println!("version {}", f.version);
 
-    let t0 = Instant::now();
-    let bank = Arc::new(load_layered(&args.soundfont, args.sf_programs.as_deref(), &cfg)?);
-    // A soundfont that drives no LFO should not pay for the machinery. This
-    // turns the shader constant off, so the whole evaluation compiles away
-    // rather than being branched over per voice per reduce tile.
-    if !bank.uses_lfo {
-        cfg.lfo_enabled = false;
-    }
-    if !bank.uses_mod_env {
-        cfg.mod_env_enabled = false;
-    }
-    log::info!("loaded {} in {:.2?}", bank.describe(), t0.elapsed());
-
-    let mut driver = Driver::open(&cfg, bank.clone(), &args.midi)?;
-    log::info!("{} has {} tracks", args.midi.display(), driver.track_count());
-
-    let format = wav::SampleFormat::parse(&args.format).unwrap();
-    let mut out = wav::WavWriter::create(&args.out, cfg.sample_rate, 2, format)?;
-    let mut block = vec![0.0f32; cfg.block_samples()];
-
-    let max_frames = args
-        .seconds
-        .map(|s| (s * cfg.sample_rate as f64) as u64)
-        .unwrap_or(u64::MAX);
-
-    let mut backend: Box<dyn Backend> = match kind {
-        BackendKind::Cpu => Box::new(CpuSynth::new(&cfg, bank.clone())),
-        BackendKind::Gpu => Box::new(gpu::GpuSynth::new(&cfg, bank.clone())?),
-    };
-    log::info!("rendering with the {} backend", backend.name());
-
-    let start = Instant::now();
-    let mut last_report = Instant::now();
-    let mut peak_voices = 0u64;
-
-    let mut csv = match &args.block_csv {
-        Some(p) => {
-            let mut f = std::io::BufWriter::new(std::fs::File::create(p)?);
-            use std::io::Write;
-            writeln!(f, "block,t,live,want,take,stolen,dropped,rms,peak,want_e,take_e")?;
-            Some(f)
-        }
-        None => None,
-    };
-
-    loop {
-        let more = driver.next_block(backend.as_mut(), &mut block)?;
-        out.write_block(&block)?;
-
-        let st = backend.stats();
-        peak_voices = peak_voices.max(st.active_voices);
-
-        if let Some(f) = csv.as_mut() {
-            use std::io::Write;
-            let n = block.len().max(1) as f64;
-            let ss: f64 = block.iter().map(|v| *v as f64 * *v as f64).sum();
-            let pk = block.iter().fold(0.0f32, |a, v| a.max(v.abs()));
-            let d = &driver.stats;
-            writeln!(
-                f,
-                "{},{:.6},{},{},{},{},{},{:.9},{:.9},{},{}",
-                d.blocks,
-                driver.seconds_rendered(),
-                d.last_live,
-                d.last_want,
-                d.last_take,
-                d.last_stolen,
-                d.dropped,
-                (ss / n).sqrt(),
-                pk,
-                d.last_want_energy,
-                d.last_take_energy
-            )?;
-        }
-
-        if last_report.elapsed().as_secs_f64() > 1.0 {
-            let secs = driver.seconds_rendered();
-            let wall = start.elapsed().as_secs_f64();
-            log::info!(
-                "{:>8.2}s rendered | {:>10} voices | {:>12} notes | {:.2}x realtime",
-                secs,
-                st.active_voices,
-                driver.stats.notes,
-                secs / wall.max(1e-9)
-            );
-            if cfg.profile {
-                let t = backend.timings();
-                if !t.is_empty() {
-                    let line: Vec<String> =
-                        t.iter().map(|(n, ms)| format!("{n} {ms:.3}ms")).collect();
-                    log::info!("  passes: {}", line.join("  "));
-                }
+    // `FFMPEG` losing to `--ffmpeg` is correct, but silently is not: someone
+    // debugging why their override "did nothing" should be told the other one
+    // exists and is being ignored.
+    if f.source == kestrel::ffmpeg::Source::Flag {
+        if let Some(v) = std::env::var_os("FFMPEG") {
+            if !v.is_empty() {
+                println!(
+                    "note    FFMPEG is also set ({}); --ffmpeg wins",
+                    PathBuf::from(v).display()
+                );
             }
-            last_report = Instant::now();
-        }
-
-        if !more || driver.stats.frames >= max_frames {
-            break;
         }
     }
 
-    let bytes = out.finish()?;
-    let wall = start.elapsed().as_secs_f64();
-    let secs = driver.seconds_rendered();
-    let st = backend.stats();
-    if driver.stats.variant_states > 1 || driver.stats.variant_fallbacks > 0 {
-        log::info!(
-            "sound controllers: {} distinct states, {} slots, {} rebuilds, {} approximated",
-            driver.stats.variant_states,
-            driver.stats.param_variants + 1,
-            driver.stats.variant_rebuilds,
-            driver.stats.variant_fallbacks
+    let missing = f.missing_encoders()?;
+    println!();
+    for p in kestrel::ffmpeg::PRESETS {
+        let ok = !missing.iter().any(|m| m.ext == p.ext);
+        println!(
+            "  .{:<5} {:<12} {:<8} {}",
+            p.ext,
+            p.encoder,
+            if ok { "present" } else { "MISSING" },
+            p.note
         );
     }
-    log::info!(
-        "wrote {} ({:.1} MiB, {:.2}s audio) in {:.2}s = {:.2}x realtime",
-        args.out.display(),
-        bytes as f64 / 1048576.0,
-        secs,
-        wall,
-        secs / wall.max(1e-9)
-    );
-    log::info!(
-        "{} notes, {} voices spawned, peak {} concurrent, {} stolen, {} dropped, peak level {:.3}",
-        driver.stats.notes,
-        driver.stats.voices_spawned,
-        peak_voices,
-        st.stolen,
-        // From the driver: admission happens before a voice is built, so the
-        // backend never sees a refused note-on to count.
-        driver.stats.dropped,
-        driver.stats.peak
-    );
-    if !cfg.clamp_output {
-        log::info!(
-            "final clamp is off: the limiter is off and the format is float32,              so the file holds the raw mix and may exceed +/-1.0. Peak was {:.3}.",
-            driver.stats.peak
+
+    if !missing.is_empty() {
+        println!();
+        bail!(
+            "this ffmpeg cannot write {}; it was built without {}",
+            missing
+                .iter()
+                .map(|m| format!(".{}", m.ext))
+                .collect::<Vec<_>>()
+                .join(", "),
+            missing
+                .iter()
+                .map(|m| m.encoder)
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
-    if driver.stats.clipped > 0 {
-        log::warn!(
-            "{} samples were hard-clipped at full scale ({:.4}% of the render);              each one is a discontinuity the limiter let through.              --limiter brickwall cannot produce them.",
-            driver.stats.clipped,
-            100.0 * driver.stats.clipped as f64
-                / (driver.stats.frames.max(1) * cfg.channels as u64) as f64
-        );
-    }
+    println!("\nevery container Kestrel encodes is available");
     Ok(())
 }
 
@@ -876,4 +1048,84 @@ fn gen_assets(dir: PathBuf, big_mb: Option<usize>, sustained: Option<usize>) -> 
     }
     println!("wrote test assets to {}", dir.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{route, Route};
+    use std::ffi::OsString;
+
+    fn r(args: &[&str]) -> Route {
+        route(&args.iter().map(OsString::from).collect::<Vec<_>>())
+    }
+
+    /// A bare launch gets the guided renderer; the command line is behind
+    /// `--force-cli` wherever it sits; and help is never refused, because it
+    /// is how `--force-cli` gets found.
+    #[test]
+    fn a_command_line_goes_to_the_front_end_it_asked_for() {
+        assert_eq!(r(&[]), Route::Guided);
+        assert_eq!(r(&["--extras-window"]), Route::Extras);
+        assert_eq!(r(&["render", "a.mid", "-s", "f.sf2", "-o", "a.wav"]), Route::Notice);
+        assert_eq!(r(&["gpu-info"]), Route::Notice);
+        assert_eq!(r(&["--force-cli", "render", "a.mid"]), Route::Cli);
+        assert_eq!(r(&["render", "a.mid", "--force-cli"]), Route::Cli);
+        assert_eq!(r(&["--help"]), Route::Cli);
+        assert_eq!(r(&["-V"]), Route::Cli);
+        assert_eq!(r(&["help", "render"]), Route::Cli);
+        // The Extras flag is honoured only on its own.
+        assert_eq!(r(&["--extras-window", "render"]), Route::Notice);
+    }
+
+    /// Declared to clap, so it parses on either side of the subcommand rather
+    /// than reaching one as an unknown argument.
+    #[test]
+    fn force_cli_parses_before_or_after_the_subcommand() {
+        use clap::Parser;
+        for argv in [
+            ["kestrel", "--force-cli", "gpu-info"],
+            ["kestrel", "gpu-info", "--force-cli"],
+        ] {
+            assert!(super::Cli::try_parse_from(argv).is_ok(), "{argv:?}");
+        }
+    }
+
+    fn render_args(extra: &[&str]) -> Result<super::RenderArgs, clap::Error> {
+        use clap::Parser;
+        let mut argv = vec!["kestrel", "render", "a.mid", "-s", "f.sf2", "-o", "a.wav"];
+        argv.extend_from_slice(extra);
+        match super::Cli::try_parse_from(argv)?.cmd {
+            super::Cmd::Render(args) => Ok(args),
+            _ => unreachable!("the argument list names the render subcommand"),
+        }
+    }
+
+    /// `--volume` is a percentage from 0 to 200, and 100 is exactly unity, so a
+    /// render that never names it is the render it was before. `-15` was
+    /// refused as an unknown `-1` until 2026-09-14; it is still refused, but
+    /// the message says what it would be as decibels.
+    #[test]
+    fn volume_is_a_percentage_up_to_200() {
+        let gain = |extra: &[&str]| {
+            render_args(extra).map(|a| a.to_config().unwrap().0.master_volume)
+        };
+        assert_eq!(gain(&[]).unwrap(), 1.0);
+        assert_eq!(gain(&["--volume", "50"]).unwrap(), 0.5);
+        assert_eq!(gain(&["--volume", "200"]).unwrap(), 2.0);
+        assert_eq!(gain(&["--volume", "0"]).unwrap(), 0.0);
+        assert_eq!(gain(&["--volume=17.5%"]).unwrap(), 0.175);
+        assert!(gain(&["--volume", "201"]).is_err());
+        let err = render_args(&["--volume", "-15"])
+            .err()
+            .expect("-15 is refused")
+            .to_string();
+        assert!(err.contains("--volume 17.8"), "{err}");
+    }
+
+    /// The ceiling's own help describes negative values, and clap refused them
+    /// with a space until 2026-09-14.
+    #[test]
+    fn a_negative_ceiling_parses_with_a_space() {
+        assert_eq!(render_args(&["--ceiling-db", "-1"]).unwrap().ceiling_db, Some(-1.0));
+    }
 }

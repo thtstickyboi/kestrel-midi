@@ -1,3 +1,7 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 //! Format-independent instrument bank. \[1\]
 
 use anyhow::{bail, Result};
@@ -234,18 +238,12 @@ pub struct RegionParams {
 /// SF2's LFO waveform: a triangle starting at zero, in `[-1, 1]`. \[21\]
 #[inline]
 pub fn lfo_tri(phase: u32) -> f32 {
-    // Signed distance from the half-turn, scaled to [-1, 1], then folded.
-    let t = phase as f32 * (1.0 / 4_294_967_296.0);
-    if t < 0.25 {
-        4.0 * t
-    } else if t < 0.75 {
-        2.0 - 4.0 * t
-    } else {
-        4.0 * t - 4.0
-    }
+    // [22]
+    let t = phase.wrapping_add(0x4000_0000) as f32 * (1.0 / 4_294_967_296.0);
+    1.0 - (4.0 * t - 2.0).abs()
 }
 
-/// Per-(region, key, velocity, variant) constants for the modulation envelope, \[22\]
+/// Per-(region, key, velocity, variant) constants for the modulation envelope, \[23\]
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ModEnvParams {
@@ -262,9 +260,9 @@ pub struct ModEnvParams {
     pub to_pitch: f32,
     /// Cents of cutoff at full modulation.
     pub to_filter: f32,
-    /// The unmodulated cutoff this entry was built for, in absolute cents. \[23\]
+    /// The unmodulated cutoff this entry was built for, in absolute cents. \[24\]
     pub fc_cents: f32,
-    /// The two resonance-dependent terms of `biquad_lowpass`, precomputed so \[24\]
+    /// The two resonance-dependent terms of `biquad_lowpass`, precomputed so \[25\]
     pub q_gain: f32,
     pub q_inv_2q: f32,
     pub _pad: [f32; 5],
@@ -289,7 +287,7 @@ impl Default for ModEnvParams {
     }
 }
 
-/// How far into its attack the modulation envelope is, given a linear ramp. \[25\]
+/// How far into its attack the modulation envelope is, given a linear ramp. \[26\]
 #[inline]
 pub fn mod_env_attack_level(u: f32, log2_tab: &[u32]) -> f32 {
     if u <= 0.0 {
@@ -303,7 +301,7 @@ pub const MOD_ENV_LOG2_BITS: u32 = 10;
 /// Bits of the mantissa used to interpolate between two entries.
 pub const MOD_ENV_LOG2_FRAC_BITS: u32 = 8;
 
-/// `log2(1 + i / 1024)` for `i` in `0..=1024`, in 0.30 fixed point. \[26\]
+/// `log2(1 + i / 1024)` for `i` in `0..=1024`, in 0.30 fixed point. \[27\]
 pub fn build_log2_tab() -> Vec<u32> {
     let n = 1usize << MOD_ENV_LOG2_BITS;
     (0..=n)
@@ -314,7 +312,7 @@ pub fn build_log2_tab() -> Vec<u32> {
         .collect()
 }
 
-/// `log2` computed identically on the host and on the device. \[27\]
+/// `log2` computed identically on the host and on the device. \[28\]
 #[inline]
 pub fn log2_exact(x: f32, tab: &[u32]) -> f32 {
     let bits = x.to_bits();
@@ -331,22 +329,22 @@ pub fn log2_exact(x: f32, tab: &[u32]) -> f32 {
     e as f32 + v as f32 * (1.0 / 1_073_741_824.0)
 }
 
-/// `(20 / 48) * log10(2)`, the slope of the attack curve against `log2(u)`. \[28\]
+/// `(20 / 48) * log10(2)`, the slope of the attack curve against `log2(u)`. \[29\]
 pub const MOD_ENV_ATTACK_SCALE: f32 = 0.125_429_17;
 
-/// Steps per cent in the modulation envelope's pitch-factor table. \[29\]
+/// Steps per cent in the modulation envelope's pitch-factor table. \[30\]
 pub const MOD_ENV_CENTS_STEPS: f32 = 64.0;
 
-/// Index into `Bank::menv_factors` for a pitch offset in cents. \[30\]
+/// Index into `Bank::menv_factors` for a pitch offset in cents. \[31\]
 #[inline]
 pub fn mod_env_pitch_index(cents: f32, half: u32) -> u32 {
-    // [31]
+    // [32]
     let q = (cents * MOD_ENV_CENTS_STEPS).round_ties_even();
     let i = q + half as f32;
     i.clamp(0.0, (half * 2) as f32) as u32
 }
 
-/// Round to a multiple of 2^-22, through an integer. \[32\]
+/// Round to a multiple of 2^-22, through an integer. \[33\]
 #[inline]
 pub fn quantise_level(x: f32) -> f32 {
     const S: f32 = 4_194_304.0; // 2^22
@@ -354,18 +352,18 @@ pub fn quantise_level(x: f32) -> f32 {
     t as f32 * (1.0 / S)
 }
 
-/// A release age no voice can reach, meaning "this voice has not released". \[33\]
+/// A release age no voice can reach, meaning "this voice has not released". \[34\]
 pub const NO_RELEASE_AGE: u32 = u32::MAX;
 
-/// The modulation envelope's level at a given age, in [0, 1]. \[34\]
+/// The modulation envelope's level at a given age, in [0, 1]. \[35\]
 #[inline]
 pub fn mod_env_level(p: &ModEnvParams, age: u32, release_age: u32, log2_tab: &[u32]) -> f32 {
-    // [35]
+    // [36]
     let pre = mod_env_pre_release(p, age.min(release_age), log2_tab);
     if age <= release_age {
         return pre;
     }
-    // [36]
+    // [37]
     (pre - quantise_level((age - release_age) as f32 * p.release_rate)).max(0.0)
 }
 
@@ -386,7 +384,7 @@ fn mod_env_pre_release(p: &ModEnvParams, age: u32, log2_tab: &[u32]) -> f32 {
     (1.0 - quantise_level(a as f32 * p.decay_rate)).max(p.sustain)
 }
 
-/// `biquad_lowpass` with the resonance-dependent terms already computed. \[37\]
+/// `biquad_lowpass` with the resonance-dependent terms already computed. \[38\]
 #[inline]
 pub fn biquad_lowpass_pre(fc: f32, q_gain: f32, inv_2q: f32, sr: f32) -> (f32, f32, f32, f32) {
     let w0 = 2.0 * std::f32::consts::PI * (fc / sr).clamp(1.0e-5, 0.49);
@@ -403,7 +401,7 @@ pub fn biquad_lowpass_pre(fc: f32, q_gain: f32, inv_2q: f32, sr: f32) -> (f32, f
 }
 
 pub const RP_FILTER: u32 = 1 << 0;
-/// This region drives a modulation envelope with at least one live \[38\]
+/// This region drives a modulation envelope with at least one live \[39\]
 pub const RP_MOD_ENV: u32 = 1 << 1;
 
 impl RegionParams {
@@ -430,12 +428,12 @@ impl RegionParams {
     }
 }
 
-/// What a channel's sound controllers do to a region's DSP constants. \[39\]
+/// What a channel's sound controllers do to a region's DSP constants. \[40\]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ParamMod {
     /// CC74 brightness, as an offset to the region's cutoff in cents.
     pub cutoff_cents: f32,
-    /// CC71 resonance, as an offset in centibels of Q. Never negative: see \[40\]
+    /// CC71 resonance, as an offset in centibels of Q. Never negative: see \[41\]
     pub q_cb: f32,
     /// CC73, CC75, CC72: what happens to each envelope time.
     pub attack: TimeMod,
@@ -443,7 +441,7 @@ pub struct ParamMod {
     pub release: TimeMod,
 }
 
-/// What a sound controller does to one envelope time. \[41\]
+/// What a sound controller does to one envelope time. \[42\]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TimeMod {
     pub scale: f32,
@@ -459,7 +457,7 @@ impl TimeMod {
         secs * self.scale + self.add
     }
 
-    /// One controller's contribution, 64 being neutral. \[42\]
+    /// One controller's contribution, 64 being neutral. \[43\]
     pub fn from_controller(v: u8) -> TimeMod {
         let d = v as f32 - 64.0;
         if d <= 0.0 {
@@ -488,21 +486,21 @@ impl Default for ParamMod {
     }
 }
 
-// [43]
+// [44]
 
-/// Cents of cutoff offset per CC74 step. \[44\]
+/// Cents of cutoff offset per CC74 step. \[45\]
 pub const CC_CUTOFF_CENTS_PER_STEP: f32 = 75.0;
 
-/// Centibels of resonance per CC71 step **above 64**. Below 64 BASSMIDI does \[45\]
+/// Centibels of resonance per CC71 step **above 64**. Below 64 BASSMIDI does \[46\]
 pub const CC_Q_CB_PER_STEP: f32 = 240.0 / 63.0;
 
-/// Controller steps per octave of envelope time below 64. The time halves every \[46\]
+/// Controller steps per octave of envelope time below 64. The time halves every \[47\]
 pub const CC_ENV_STEPS_PER_OCTAVE: f32 = 8.0;
 
-/// Seconds of envelope time *added* per cubed step above 64. \[47\]
+/// Seconds of envelope time *added* per cubed step above 64. \[48\]
 pub const CC_ENV_ADD_PER_CUBE: f32 = 6.0e-5;
 
-/// The shortest fade BASSMIDI performs, in seconds. \[48\]
+/// The shortest fade BASSMIDI performs, in seconds. \[49\]
 pub const CC_MIN_FADE_SECS: f32 = 0.004;
 
 impl ParamMod {
@@ -510,11 +508,11 @@ impl ParamMod {
         *self == ParamMod::default()
     }
 
-    /// Build from the raw controller values, 64 being the neutral position for \[49\]
+    /// Build from the raw controller values, 64 being the neutral position for \[50\]
     pub fn from_controllers(cc71: u8, cc72: u8, cc73: u8, cc74: u8, cc75: u8) -> Self {
         ParamMod {
             cutoff_cents: (cc74 as f32 - 64.0) * CC_CUTOFF_CENTS_PER_STEP,
-            // [50]
+            // [51]
             q_cb: (cc71 as f32 - 64.0).max(0.0) * CC_Q_CB_PER_STEP,
             attack: TimeMod::from_controller(cc73),
             decay: TimeMod::from_controller(cc75),
@@ -558,44 +556,47 @@ impl Preset {
 /// Everything the renderer needs from a soundfont.
 pub struct Bank {
     pub pool: Vec<i16>,
-    /// Rate every pool sample is stored at, or 0 when the pool is mixed-rate \[51\]
+    /// Rate every pool sample is stored at, or 0 when the pool is mixed-rate \[52\]
     pub pool_rate: u32,
     pub samples: Vec<SampleInfo>,
     pub regions: Vec<Region>,
     pub params: Vec<RegionParams>,
-    /// Modulation-envelope constants, parallel to `params` and read with the \[52\]
+    /// Modulation-envelope constants, parallel to `params` and read with the \[53\]
     pub menv: Vec<ModEnvParams>,
-    /// Phase-step factors in 8.24 fixed point for the modulation envelope's \[53\]
+    /// Phase-step factors in 8.24 fixed point for the modulation envelope's \[54\]
     pub menv_factors: Vec<u32>,
     pub menv_factor_half: u32,
-    /// Shared `log2` mantissa table; see `log2_exact`. Empty when the bank \[54\]
+    /// Shared `log2` mantissa table; see `log2_exact`. Empty when the bank \[55\]
     pub menv_log2: Vec<u32>,
     pub presets: Vec<Preset>,
     /// Sorted (bank, program) -> preset index.
     pub(crate) index: Vec<((u16, u16), u32)>,
     pub name: String,
-    /// True when any region drives an LFO anywhere. \[55\]
+    /// True when any region drives an LFO anywhere. \[56\]
     pub uses_lfo: bool,
-    /// True when any region narrows `lorand`/`hirand`. \[56\]
+    /// Whether any region drives the tremolo, and whether any drives pitch \[57\]
+    pub uses_lfo_volume: bool,
+    pub uses_lfo_pitch: bool,
+    /// True when any region narrows `lorand`/`hirand`. \[58\]
     pub uses_rand: bool,
-    /// True when any region drives a modulation envelope destination. \[57\]
+    /// True when any region drives a modulation envelope destination. \[59\]
     pub uses_mod_env: bool,
 
-    // [58]
+    // [60]
     pub(crate) gain_table: Vec<[f32; 2]>,
-    /// `build_voice`'s `delay_frames` per region. A region constant, and the \[59\]
+    /// `build_voice`'s `delay_frames` per region. A region constant, and the \[61\]
     pub(crate) delay_frames: Vec<u32>,
-    /// Bitset over `region * 128 + key`, set when `build_voice` would return \[60\]
+    /// Bitset over `region * 128 + key`, set when `build_voice` would return \[62\]
     pub(crate) key_ok: Vec<u64>,
 }
 
-/// One layer a note-on would produce, as far as admission needs to know it. \[61\]
+/// One layer a note-on would produce, as far as admission needs to know it. \[63\]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PreviewLayer {
     pub region: u32,
     pub gain_l: f32,
     pub gain_r: f32,
-    /// `VoiceSpawn::delay_frames`. Admission never sees a delayed voice -- it \[62\]
+    /// `VoiceSpawn::delay_frames`. Admission never sees a delayed voice -- it \[64\]
     pub delay_frames: u32,
 }
 
@@ -633,12 +634,19 @@ pub fn cents_to_hz(cents: f32) -> f32 {
     8.176 * (2.0f32).powf(cents / 1200.0)
 }
 
+/// Where a channel's volume (CC7) sits before a file sends one: 100, General \[65\]
+pub const POWER_ON_VOLUME: u8 = 100;
+
+/// The amplitude power-on channel volume stands for, `(100/127)^2`. It is part \[66\]
+pub const POWER_ON_GAIN: f32 =
+    (POWER_ON_VOLUME as f32 / 127.0) * (POWER_ON_VOLUME as f32 / 127.0);
+
 #[inline]
 pub fn cb_to_gain(cb: f32) -> f32 {
     (10.0f32).powf(-cb / 200.0)
 }
 
-/// The random draw for one note-on, in `[0, 1)`. \[63\]
+/// The random draw for one note-on, in `[0, 1)`. \[67\]
 #[inline]
 pub fn rand_draw(seed: u64) -> f32 {
     let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -649,10 +657,10 @@ pub fn rand_draw(seed: u64) -> f32 {
     ((z >> 40) as f32) * (1.0 / 16_777_216.0)
 }
 
-/// Linear gain from SFZ velocity crossfade, in `[0, 1]`. \[64\]
+/// Linear gain from SFZ velocity crossfade, in `[0, 1]`. \[68\]
 #[inline]
 pub fn xfade_gain(r: &Region, vel: u8) -> f32 {
-    // [65]
+    // [69]
     let fade_in = if vel >= r.xfin_hi {
         1.0
     } else if vel <= r.xfin_lo {
@@ -671,13 +679,13 @@ pub fn xfade_gain(r: &Region, vel: u8) -> f32 {
     fade_in * fade_out
 }
 
-/// Velocity to attenuation, in centibels, scaled by SFZ `amp_veltrack`. \[66\]
+/// Velocity to attenuation, in centibels, scaled by SFZ `amp_veltrack`. \[70\]
 #[inline]
 pub fn velocity_atten_cb(vel: u8, veltrack: f32) -> f32 {
     let v = vel.max(1) as f32 / 127.0;
     let t = veltrack.clamp(-100.0, 100.0) / 100.0;
     if t == 1.0 {
-        // [67]
+        // [71]
         return (-400.0 * v.log10()).clamp(0.0, 960.0);
     }
     let gain = if t >= 0.0 {
@@ -692,13 +700,13 @@ pub fn velocity_atten_cb(vel: u8, veltrack: f32) -> f32 {
 }
 
 impl Bank {
-    /// Layer `other` on top of this bank. \[68\]
+    /// Layer `other` on top of this bank. \[72\]
     pub fn merge(&mut self, mut other: Bank) {
         let pool_off = self.pool.len() as u32;
         let sample_off = self.samples.len() as u32;
         let region_off = self.regions.len() as u32;
 
-        // [69]
+        // [73]
         if self.pool_rate != other.pool_rate {
             self.pool_rate = 0;
         }
@@ -710,7 +718,7 @@ impl Bank {
         self.samples.append(&mut other.samples);
 
         for r in &mut other.regions {
-            // [70]
+            // [74]
             if r.sample != u32::MAX {
                 r.sample += sample_off;
             }
@@ -730,7 +738,7 @@ impl Bank {
         self.name = format!("{} + {}", self.name, other.name);
     }
 
-    /// Move this bank's single preset onto the given programs of bank 0. \[71\]
+    /// Move this bank's single preset onto the given programs of bank 0. \[75\]
     pub fn remap_to_programs(&mut self, programs: &[u16]) -> Result<()> {
         if self.presets.len() != 1 {
             bail!(
@@ -757,10 +765,13 @@ impl Bank {
             .regions
             .iter()
             .any(|r| r.rand_lo > 0.0 || r.rand_hi < 1.0);
-        self.uses_lfo = self.regions.iter().any(|r| {
-            r.mod_lfo_to_pitch != 0.0 || r.vib_lfo_to_pitch != 0.0 || r.mod_lfo_to_volume != 0.0
-        });
-        // [72]
+        self.uses_lfo_volume = self.regions.iter().any(|r| r.mod_lfo_to_volume != 0.0);
+        self.uses_lfo_pitch = self
+            .regions
+            .iter()
+            .any(|r| r.mod_lfo_to_pitch != 0.0 || r.vib_lfo_to_pitch != 0.0);
+        self.uses_lfo = self.uses_lfo_volume || self.uses_lfo_pitch;
+        // [76]
         self.uses_mod_env = self
             .regions
             .iter()
@@ -774,7 +785,7 @@ impl Bank {
         self.index.sort_by_key(|e| e.0);
     }
 
-    /// Resolve a (bank, program) pair, falling back the way hardware does: \[73\]
+    /// Resolve a (bank, program) pair, falling back the way hardware does: \[77\]
     pub fn find_preset(&self, bank: u16, program: u16) -> Option<u32> {
         if let Ok(i) = self.index.binary_search_by_key(&(bank, program), |e| e.0) {
             return Some(self.index[i].1);
@@ -787,7 +798,7 @@ impl Bank {
             if let Some(e) = self.index.iter().find(|e| e.0 .0 == 128) {
                 return Some(e.1);
             }
-            // [74]
+            // [78]
         }
         if let Ok(i) = self.index.binary_search_by_key(&(0, program), |e| e.0) {
             return Some(self.index[i].1);
@@ -795,7 +806,7 @@ impl Bank {
         self.index.first().map(|e| e.1)
     }
 
-    /// Build the voices for one note-on. Pushes into `out` rather than \[75\]
+    /// Build the voices for one note-on. Pushes into `out` rather than \[79\]
     #[allow(clippy::too_many_arguments)]
     pub fn note_on(
         &self,
@@ -814,7 +825,7 @@ impl Bank {
         let lo = p.key_index[key as usize] as usize;
         let hi = p.key_index[key as usize + 1] as usize;
         let mut layers = 0usize;
-        // [76]
+        // [80]
         let draw = if self.uses_rand { rand_draw(seed) } else { 0.0 };
 
         for &ri in &p.key_regions[lo..hi] {
@@ -835,7 +846,7 @@ impl Bank {
         }
     }
 
-    /// Build the one layer `preview_note_on` named, by its region index. \[77\]
+    /// Build the one layer `preview_note_on` named, by its region index. \[81\]
     pub fn build_layer(
         &self,
         region: u32,
@@ -876,7 +887,7 @@ impl Bank {
             + s.correction_cents as f64;
         let mut ratio = (cents / 1200.0).exp2();
 
-        // [78]
+        // [82]
         if self.pool_rate == 0 {
             ratio *= s.rate as f64 / cfg.sample_rate as f64;
         } else {
@@ -887,15 +898,15 @@ impl Bank {
         }
 
         let atten = r.attenuation_cb + velocity_atten_cb(eff_vel, r.amp_veltrack);
-        // [79]
-        let gain = cb_to_gain(atten) * cfg.master_volume * xfade_gain(r, eff_vel);
+        // [83]
+        let gain = cb_to_gain(atten) * cfg.master_volume * POWER_ON_GAIN * xfade_gain(r, eff_vel);
 
         // Constant-power pan.
         let theta = (r.pan.clamp(-1.0, 1.0) + 1.0) * 0.5 * (PI as f32 * 0.5);
         let gain_l = gain * theta.cos();
         let gain_r = gain * theta.sin();
 
-        // [80]
+        // [84]
         let scale = |v: i32| (v as f32 * s.resample_ratio).round() as i64;
         let start_offset = scale(r.addr_start).clamp(0, s.len as i64 - 1) as u32;
         let smp_len = (s.len as i64 + scale(r.addr_end)).clamp(1, s.len as i64) as u32;
@@ -904,7 +915,7 @@ impl Bank {
         let loop_end =
             (s.loop_end as i64 + scale(r.addr_loop_end)).clamp(0, smp_len as i64) as u32;
 
-        // [81]
+        // [85]
         let keys = if r.params_stride != 0 { 128u32 } else { 1 };
         let ki = if r.params_stride != 0 { eff_key as u32 } else { 0 };
         let vi = if r.params_vel_span > 1 {
@@ -939,11 +950,11 @@ impl Bank {
 
     /// Fill `params` from `regions`. Call once after all regions exist.
     pub fn build_params(&mut self, cfg: &Config) {
-        // [82]
+        // [86]
         let mut n = 0u32;
         for r in &mut self.regions {
             let per_key = r.keynum_to_decay != 0 || r.keynum_to_hold != 0;
-            // [83]
+            // [87]
             let vel_span = if r.filter_veltrack_cents != 0.0 {
                 (r.vel_hi.saturating_sub(r.vel_lo) as u32 + 1).min(128)
             } else {
@@ -960,7 +971,7 @@ impl Bank {
         self.build_admission_tables(cfg);
     }
 
-    /// Precompute what admission needs to rank a note-on without building it. \[84\]
+    /// Precompute what admission needs to rank a note-on without building it. \[88\]
     fn build_admission_tables(&mut self, cfg: &Config) {
         let n = self.regions.len();
         self.gain_table = vec![[0.0, 0.0]; n * 128];
@@ -972,17 +983,17 @@ impl Bank {
             .collect();
 
         for (ri, r) in self.regions.iter().enumerate() {
-            // [85]
+            // [89]
             let theta = (r.pan.clamp(-1.0, 1.0) + 1.0) * 0.5 * (PI as f32 * 0.5);
             let (pan_l, pan_r) = (theta.cos(), theta.sin());
             for v in 0..128u8 {
                 let eff_vel = if r.fixed_vel >= 0 { r.fixed_vel as u8 } else { v };
                 let atten = r.attenuation_cb + velocity_atten_cb(eff_vel, r.amp_veltrack);
-                let gain = cb_to_gain(atten) * cfg.master_volume * xfade_gain(r, eff_vel);
+                let gain = cb_to_gain(atten) * cfg.master_volume * POWER_ON_GAIN * xfade_gain(r, eff_vel);
                 self.gain_table[ri * 128 + v as usize] = [gain * pan_l, gain * pan_r];
             }
 
-            // [86]
+            // [90]
             let Some(s) = self.samples.get(r.sample as usize) else {
                 continue;
             };
@@ -1020,7 +1031,7 @@ impl Bank {
         self.key_ok[bit / 64] >> (bit % 64) & 1 != 0
     }
 
-    /// The layers `note_on` would produce, and each one's opening gain, without \[87\]
+    /// The layers `note_on` would produce, and each one's opening gain, without \[91\]
     pub fn preview_note_on(
         &self,
         preset: u32,
@@ -1037,7 +1048,7 @@ impl Bank {
         let lo = p.key_index[key as usize] as usize;
         let hi = p.key_index[key as usize + 1] as usize;
         let mut layers = 0usize;
-        // [88]
+        // [92]
         let draw = if self.uses_rand { rand_draw(seed) } else { 0.0 };
 
         for &ri in &p.key_regions[lo..hi] {
@@ -1065,7 +1076,7 @@ impl Bank {
         }
     }
 
-    /// Build one copy of the params table with a channel's sound controllers \[89\]
+    /// Build one copy of the params table with a channel's sound controllers \[93\]
     pub fn build_variant(&self, cfg: &Config, m: &ParamMod) -> Vec<RegionParams> {
         let sr = cfg.sample_rate as f32;
         let mut params = Vec::with_capacity(self.params.len());
@@ -1085,9 +1096,9 @@ impl Bank {
         params
     }
 
-    /// The modulation-envelope table for one controller state, laid out to the \[90\]
+    /// The modulation-envelope table for one controller state, laid out to the \[94\]
     pub fn build_menv_variant(&self, cfg: &Config, m: &ParamMod) -> Vec<ModEnvParams> {
-        // [91]
+        // [95]
         if self.mod_env_regions() == 0 {
             return vec![ModEnvParams::default()];
         }
@@ -1109,7 +1120,7 @@ impl Bank {
         out
     }
 
-    /// Build the pitch-factor table, sized to this bank's own largest \[92\]
+    /// Build the pitch-factor table, sized to this bank's own largest \[96\]
     fn build_menv_factors(&mut self) {
         let max_cents = self
             .regions
@@ -1185,7 +1196,7 @@ fn make_params(r: &Region, key: u8, vel: u8, sr: f32, cfg: &Config, m: &ParamMod
     let hold = r.hold * (2.0f32).powf(r.keynum_to_hold as f32 * key_delta / 1200.0);
     let decay = r.decay * (2.0f32).powf(r.keynum_to_decay as f32 * key_delta / 1200.0);
 
-    // [93]
+    // [97]
     let floor = |t: f32, base: f32| t.max(CC_MIN_FADE_SECS.min(base));
 
     let attack_frames = (m.attack.apply(r.attack) * sr).max(0.0);
@@ -1199,7 +1210,7 @@ fn make_params(r: &Region, key: u8, vel: u8, sr: f32, cfg: &Config, m: &ParamMod
     let sustain = r.sustain.clamp(0.0, 1.0);
     let floor = cfg.env_floor;
 
-    // [94]
+    // [98]
     let (decay_coef, release_coef) = match cfg.decay_curve {
         EnvelopeCurve::Exponential => (
             (10.0f32).powf(-100.0 / (20.0 * decay_frames)),
@@ -1217,12 +1228,12 @@ fn make_params(r: &Region, key: u8, vel: u8, sr: f32, cfg: &Config, m: &ParamMod
         ),
     };
 
-    // [95]
+    // [99]
     let fc_cents = r.filter_fc_cents + r.filter_veltrack_cents * (vel as f32 / 127.0)
         + m.cutoff_cents;
     let fc = cents_to_hz(fc_cents);
     let nyq_guard = sr * 0.49;
-    // [96]
+    // [100]
     let fc_lo_cents = fc_cents.min(fc_cents + r.mod_env_to_filter);
     let fc_lo = cents_to_hz(fc_lo_cents);
     let use_filter =
@@ -1234,7 +1245,7 @@ fn make_params(r: &Region, key: u8, vel: u8, sr: f32, cfg: &Config, m: &ParamMod
         (1.0, 0.0, 0.0, 0.0)
     };
 
-    // [97]
+    // [101]
     let inc = |hz: f32| -> u32 {
         let turns = (hz.max(0.0) / sr) as f64;
         (turns * 4_294_967_296.0) as u32
@@ -1275,9 +1286,9 @@ fn make_params(r: &Region, key: u8, vel: u8, sr: f32, cfg: &Config, m: &ParamMod
     }
 }
 
-/// The modulation-envelope entry matching one `make_params` entry. \[98\]
+/// The modulation-envelope entry matching one `make_params` entry. \[102\]
 fn make_menv(r: &Region, _key: u8, vel: u8, sr: f32, m: &ParamMod) -> ModEnvParams {
-    // [99]
+    // [103]
     let rate = |secs: f32| -> f32 {
         let frames = secs.max(0.0) * sr;
         if frames < 1.0 {
@@ -1287,18 +1298,18 @@ fn make_menv(r: &Region, _key: u8, vel: u8, sr: f32, m: &ParamMod) -> ModEnvPara
         }
     };
 
-    // [100]
+    // [104]
     let fc_cents = r.filter_fc_cents + r.filter_veltrack_cents * (vel as f32 / 127.0)
         + m.cutoff_cents;
 
-    // [101]
+    // [105]
     const Q_DEFAULT: f32 = std::f32::consts::FRAC_1_SQRT_2;
     let q_db = (r.filter_q_cb + m.q_cb) / 10.0 - 3.01;
     let q = (10.0f32).powf(q_db / 20.0).max(0.001);
 
     ModEnvParams {
         delay_frames: (r.mod_env_delay.max(0.0) * sr) as u32,
-        // [102]
+        // [106]
         attack_frames: {
             let f = r.mod_env_attack.max(0.0) * sr;
             if f < 1.0 {
@@ -1320,7 +1331,7 @@ fn make_menv(r: &Region, _key: u8, vel: u8, sr: f32, m: &ParamMod) -> ModEnvPara
     }
 }
 
-/// RBJ low-pass, normalised so resonance does not raise the passband level. \[103\]
+/// RBJ low-pass, normalised so resonance does not raise the passband level. \[107\]
 pub fn biquad_lowpass(fc: f32, q_cb: f32, sr: f32) -> (f32, f32, f32, f32) {
     const Q_DEFAULT: f32 = std::f32::consts::FRAC_1_SQRT_2;
     let q_db = q_cb / 10.0 - 3.01;
@@ -1368,7 +1379,7 @@ mod tests {
         }
         // Full velocity is unattenuated whatever the tracking.
         assert!(velocity_atten_cb(127, 50.0) < 0.01);
-        // [104]
+        // [108]
         assert!(velocity_atten_cb(127, -100.0) >= 960.0);
         assert!(velocity_atten_cb(1, -100.0) < 0.01);
     }
@@ -1379,7 +1390,7 @@ mod tests {
         // H(1) = (b0 + b1 + b2) / (1 + a1 + a2), with b2 == b0.
         let h = (2.0 * b0 + b1) / (1.0 + a1 + a2);
         assert!((h - 1.0).abs() < 0.02, "dc gain was {h}");
-        // [105]
+        // [109]
         let (b0, b1, a1, a2) = biquad_lowpass(1000.0, 120.0, 48000.0);
         let h_res = (2.0 * b0 + b1) / (1.0 + a1 + a2);
         assert!(h_res < h, "resonant filter raised dc gain to {h_res}");

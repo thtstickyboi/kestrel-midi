@@ -6,7 +6,7 @@
 # they always match it. The development tree keeps every comment
 # inline; its history is the place to compare versions.
 
-[1] shaders/select.wgsl:1
+[1] shaders/select.wgsl:5
 // Voice stealing: find the k-th smallest steal key in the pool.
 //
 // The key is `steal_key` in common.wgsl -- the note id, or the envelope level

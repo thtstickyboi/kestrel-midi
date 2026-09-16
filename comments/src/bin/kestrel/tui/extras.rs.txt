@@ -1,0 +1,39 @@
+# Comments extracted from src/bin/kestrel/tui/extras.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/bin/kestrel/tui/extras.rs:5
+//! Extras: the diagnostic commands, in a window of their own.
+//!
+//! They print a lot and are read at leisure, which is the opposite of what the
+//! render flow wants from its window, so they get a second one. Where no new
+//! terminal window can be opened they run in the current one instead.
+
+[2] src/bin/kestrel/tui/extras.rs:16
+/// The flag the new window is started with. Routed on only when it is the
+/// whole command line, and never listed in `--help`.
+
+[3] src/bin/kestrel/tui/extras.rs:29
+    // Through `start`, not by spawning the child with CREATE_NEW_CONSOLE. The
+    // standard library always hands a child this process's standard handles,
+    // so a child spawned straight into a new console window gets the window
+    // but reads its keys from this one -- where the main menu is already
+    // waiting on them. That shipped, and Extras could not be typed into
+    // (reported 2026-09-12). `start` gives the process in the new window that
+    // window's own input and output.
+
+[4] src/bin/kestrel/tui/extras.rs:61
+    // No standard way to ask for a terminal, so try the usual ones in turn,
+    // starting with whatever the session says it prefers.
+
+[5] src/bin/kestrel/tui/extras.rs:101
+    // These are the command-line tools, and they report the way the command
+    // line does.
+
+[6] src/bin/kestrel/tui/extras.rs:203
+/// Every public subcommand's flags, straight from the clap definitions that
+/// parse them, so this can never describe a flag that does not exist.

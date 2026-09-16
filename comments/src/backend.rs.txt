@@ -6,7 +6,7 @@
 # they always match it. The development tree keeps every comment
 # inline; its history is the place to compare versions.
 
-[1] src/backend.rs:1
+[1] src/backend.rs:5
 //! The interface the driver renders through.
 //!
 //! Deliberately narrow: the driver owns MIDI parsing, preset resolution and
@@ -14,19 +14,21 @@
 //! back mixed blocks. That is what lets the CPU reference and the GPU path be
 //! swapped under the same test.
 
-[2] src/backend.rs:23
+[2] src/backend.rs:27
     /// Publish this block's note-offs: `meta` is the interleaved per-slot
-    /// `[base, index]` table and `frames` the exact frame of each one. See
-    /// `GateTable::off_frames` for why the frames themselves have to travel.
+    /// `[base, run]` table and `runs` the interleaved `[cumulative count,
+    /// frame]` runs behind it. See `GateTable::off_runs` for why the frames
+    /// themselves have to travel, and `voice::off_frame` for how a voice
+    /// reads them.
 
-[3] src/backend.rs:28
+[3] src/backend.rs:34
     /// Publish this block's per-channel controller state. `rows` is
     /// `tiles * BEND_CHANNELS * CHAN_FIELDS` words, tile-major: an 8.24 bend
     /// factor and two f32 gains per channel. The two flags are false when that
     /// control sat at unity for the whole block, which lets a backend skip the
     /// work rather than multiply by one.
 
-[4] src/backend.rs:36
+[4] src/backend.rs:42
     /// Install one copy of the region params table. Variant 0 is the
     /// untouched one installed at construction; later ones are built when a
     /// channel's CC71-CC75 reach a combination not seen before, which is rare
@@ -34,14 +36,32 @@
     /// `menv` is the matching modulation-envelope table, one entry per entry
     /// of `data`, or a single default entry when the bank drives none.
 
-[5] src/backend.rs:49
+[5] src/backend.rs:55
     /// Add voices to the pool. May steal or drop according to the configured
     /// rule if the pool is full.
 
-[6] src/backend.rs:53
-    /// Render one block into `out`, interleaved stereo, `block_frames * 2`
-    /// samples. Advances every voice and compacts the pool.
+[6] src/backend.rs:59
+    /// Start rendering one block. Returns once the work is queued; the audio
+    /// is not available until `finish`.
+    ///
+    /// Split from `finish` so the driver can decode and build the *next*
+    /// block while this one is on the device. Measured 2026-09-05, the GPU
+    /// sits idle about 20% of a dense render waiting for exactly that host
+    /// work, and `render` -- which is still here, and is still what the tests
+    /// call -- gives that idle away by construction.
 
-[7] src/backend.rs:61
+[7] src/backend.rs:69
+    /// Wait for the block started by `submit` and write it into `out`,
+    /// interleaved stereo, `block_frames * 2` samples. Advances every voice
+    /// and compacts the pool.
+
+[8] src/backend.rs:74
+    /// Render one block, start to finish.
+    ///
+    /// The unpipelined form, kept because most callers want exactly this and
+    /// because a test that renders one block should not have to know the
+    /// backend has a pipeline.
+
+[9] src/backend.rs:88
     /// Per-pass timings from the last block, for `--profile`. Empty when the
     /// backend has nothing to report.

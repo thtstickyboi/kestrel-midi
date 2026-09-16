@@ -1,3 +1,7 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 //! Adapter selection, device creation and bind-group boilerplate.
 
 use crate::config::Config;
@@ -14,10 +18,27 @@ fn parse_backends(name: &str) -> Option<wgpu::Backends> {
     }
 }
 
-/// Pick an adapter and open a device. \[1\]
+/// Discrete first, then integrated. Within a tier, prefer Vulkan over DX12 \[1\]
+fn rank(i: &wgpu::AdapterInfo) -> (u8, u8) {
+    let t = match i.device_type {
+        wgpu::DeviceType::DiscreteGpu => 0,
+        wgpu::DeviceType::IntegratedGpu => 1,
+        wgpu::DeviceType::VirtualGpu => 2,
+        _ => 3,
+    };
+    let b = match i.backend {
+        wgpu::Backend::Vulkan => 0,
+        wgpu::Backend::Metal => 0,
+        wgpu::Backend::Dx12 => 1,
+        _ => 2,
+    };
+    (t, b)
+}
+
+/// Pick an adapter and open a device. \[2\]
 pub fn create(
     cfg: &Config,
-) -> Result<(wgpu::Device, wgpu::Queue, String, wgpu::Limits, bool)> {
+) -> Result<(wgpu::Device, wgpu::Queue, wgpu::AdapterInfo, wgpu::Limits, bool)> {
     let backends = match &cfg.gpu_backend {
         Some(b) => parse_backends(b)
             .ok_or_else(|| anyhow::anyhow!("unknown gpu backend {b:?}"))?,
@@ -43,24 +64,7 @@ pub fn create(
         }
     }
 
-    // [2]
-    let rank = |a: &wgpu::Adapter| -> (u8, u8) {
-        let i = a.get_info();
-        let t = match i.device_type {
-            wgpu::DeviceType::DiscreteGpu => 0,
-            wgpu::DeviceType::IntegratedGpu => 1,
-            wgpu::DeviceType::VirtualGpu => 2,
-            _ => 3,
-        };
-        let b = match i.backend {
-            wgpu::Backend::Vulkan => 0,
-            wgpu::Backend::Metal => 0,
-            wgpu::Backend::Dx12 => 1,
-            _ => 2,
-        };
-        (t, b)
-    };
-    candidates.sort_by_key(rank);
+    candidates.sort_by_key(|a| rank(&a.get_info()));
 
     let adapter = candidates.into_iter().next().ok_or_else(|| {
         anyhow::anyhow!(
@@ -70,7 +74,6 @@ pub fn create(
     })?;
 
     let info = adapter.get_info();
-    let name = format!("{} ({:?})", info.name, info.backend);
     let adapter_limits = adapter.limits();
 
     let has_timestamps = adapter
@@ -96,7 +99,7 @@ pub fn create(
         panic!("wgpu device error: {e}");
     }));
 
-    Ok((device, queue, name, adapter_limits, has_timestamps))
+    Ok((device, queue, info, adapter_limits, has_timestamps))
 }
 
 /// Compute-only bind group layout. `read_only[i]` says whether binding i is a \[4\]
@@ -189,4 +192,66 @@ pub fn print_adapters() -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// One adapter, as the guided renderer's environment check lists it.
+#[derive(Debug, Clone)]
+pub struct AdapterSummary {
+    pub name: String,
+    pub backend: wgpu::Backend,
+    pub device_type: wgpu::DeviceType,
+    /// The most of one buffer the adapter will bind to a shader, which is \[7\]
+    pub binding_bytes: u64,
+    /// The largest `--max-voices` that binding takes at the configured \[8\]
+    pub max_voices: u32,
+}
+
+impl AdapterSummary {
+    /// Listed, never chosen. See `create`.
+    pub fn is_software(&self) -> bool {
+        self.device_type == wgpu::DeviceType::Cpu
+    }
+}
+
+/// Every adapter wgpu can reach, best first, and the index of the one \[9\]
+pub fn survey(cfg: &Config) -> Result<(Vec<AdapterSummary>, Option<usize>)> {
+    let backends = match &cfg.gpu_backend {
+        Some(b) => parse_backends(b)
+            .ok_or_else(|| anyhow::anyhow!("unknown gpu backend {b:?}"))?,
+        None => wgpu::Backends::all(),
+    };
+    let want = cfg.gpu_adapter.as_ref().map(|w| w.to_ascii_lowercase());
+
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let mut found: Vec<(wgpu::AdapterInfo, wgpu::Limits)> = instance
+        .enumerate_adapters(wgpu::Backends::all())
+        .into_iter()
+        .map(|a| (a.get_info(), a.limits()))
+        .collect();
+    found.sort_by_key(|(i, _)| rank(i));
+
+    let pick = found.iter().position(|(i, _)| {
+        let named = match &want {
+            Some(w) => i.name.to_ascii_lowercase().contains(w),
+            None => true,
+        };
+        i.device_type != wgpu::DeviceType::Cpu
+            && backends.contains(wgpu::Backends::from(i.backend))
+            && named
+    });
+
+    let list = found
+        .into_iter()
+        .map(|(i, l)| {
+            let binding = (l.max_storage_buffer_binding_size as u64).min(l.max_buffer_size);
+            AdapterSummary {
+                name: i.name,
+                backend: i.backend,
+                device_type: i.device_type,
+                binding_bytes: binding,
+                max_voices: crate::gpu::max_voices_for_binding(binding, cfg.max_steal_percent),
+            }
+        })
+        .collect();
+    Ok((list, pick))
 }

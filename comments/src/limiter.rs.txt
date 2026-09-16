@@ -6,7 +6,7 @@
 # they always match it. The development tree keeps every comment
 # inline; its history is the place to compare versions.
 
-[1] src/limiter.rs:1
+[1] src/limiter.rs:19
 //! Soft limiter, ported from the one OmniConverter already ships.
 //!
 //! `OmniConverter/Extensions/Audio/Limiter.cs`, originally from Kiva by
@@ -19,29 +19,33 @@
 //! a pure function of the previous state and the input, so it does not disturb
 //! bit-exact reproducibility.
 
-[2] src/limiter.rs:117
+[2] src/limiter.rs:135
 /// Hard clamp, always applied last so nothing leaves the renderer out of range.
 /// Returns how many samples it had to move, which is the number of samples that
 /// would otherwise have left the renderer clipped.
 
-[3] src/limiter.rs:131
+[3] src/limiter.rs:149
 // ---------------------------------------------------------------------------
 // brickwall true-peak limiter
 // ---------------------------------------------------------------------------
 
-[4] src/limiter.rs:140
-    /// The port of the realtime limiter OmniConverter ships, above.
+[4] src/limiter.rs:158
+    /// The port of the realtime limiter OmniConverter ships, above, with
+    /// `Brickwall` behind it as a safety stage.
     ///
-    /// **Deprecated for rendering.** It does not bound its own output, so
-    /// `clamp_block` hard-clips behind it, and its 1/3 s release drags the
-    /// level down after every loud moment. Kept only for level-matching a
-    /// render against BASS or XSynth, which is the one thing it is better at.
+    /// **Deprecated for rendering.** Its 1/3 s release drags the level down
+    /// after every loud moment. Kept for level-matching a render against BASS
+    /// or XSynth, which is the one thing it is better at. On its own it does
+    /// not bound its output -- a sudden transient passes before the follower
+    /// catches up, and `clamp_block` used to hard-clip it -- so the driver runs
+    /// the brickwall after it at the render's ceiling. The brickwall is at
+    /// unity wherever omni's output stays under that ceiling.
 
-[5] src/limiter.rs:147
+[5] src/limiter.rs:169
     /// Lookahead true-peak brickwall. Guarantees the output never exceeds the
     /// ceiling, and only pulls the gain down around the peak that needs it.
 
-[6] src/limiter.rs:167
+[6] src/limiter.rs:189
 /// Lookahead true-peak brickwall limiter.
 ///
 /// The trouble with the follower above is that it is a *feedback* design: it
@@ -79,35 +83,35 @@
 ///
 /// Costs `L + g` frames of latency; the render comes out delayed by that much.
 
-[7] src/limiter.rs:207
+[7] src/limiter.rs:229
     /// Attack and release coefficients of the sustained stage. Both zero when
     /// the stage is disabled, which makes it a plain single-stage limiter.
 
-[8] src/limiter.rs:211
+[8] src/limiter.rs:233
     /// Gain the sustained stage is holding: a slow envelope of the
     /// requirement, in both directions, so brief peaks barely move it.
 
-[9] src/limiter.rs:231
+[9] src/limiter.rs:253
     /// Frames the audio is delayed by: the lookahead plus the detector's own
     /// group delay.
 
-[10] src/limiter.rs:238
+[10] src/limiter.rs:260
     /// Smallest gain the limiter had to apply, for reporting. **Not wired up**
     /// -- it is initialised to 1.0 and never assigned, so it reports nothing.
     /// See the entry under Bugs in the development notes; the fix is in the
     /// gain path, not here.
 
-[11] src/limiter.rs:257
+[11] src/limiter.rs:279
         // The sustained stage engages over its own time constant and lets go
         // over four times that, so it settles onto a steady loud passage and
         // then takes its time coming back rather than breathing with the
         // material. Zero disables it and leaves a plain single-stage limiter.
 
-[12] src/limiter.rs:270
+[12] src/limiter.rs:292
         // One-pole release. Expressed as a time constant so that a given
         // --limiter-release means the same thing at any sample rate.
 
-[13] src/limiter.rs:273
+[13] src/limiter.rs:295
         // The oversampler is a symmetric FIR, so its output describes the input
         // this many samples back. The audio has to be delayed by the lookahead
         // *plus* that, or the first few entries of the moving average describe
@@ -115,13 +119,13 @@
         // required gain is tiny, a handful of stray 1.0s in the mean dominate
         // it. That is not a small error: it measured 4.6x over the ceiling.
 
-[14] src/limiter.rs:311
+[14] src/limiter.rs:333
     /// True peak of one frame: the largest magnitude of the 4x oversampled
     /// signal, taken across both channels so the stereo image is preserved.
     /// With `true_peak` off this is the plain sample magnitude, which misses
     /// inter-sample overshoot but costs nothing.
 
-[15] src/limiter.rs:387
+[15] src/limiter.rs:409
             // Program-dependent release, as two stages.
             //
             // A single release time has to choose. Long, and the level stays
@@ -146,53 +150,53 @@
             // way down, so `g_fast <= ma / g_slow` and the product is at most
             // `ma`, whatever the slow stage is doing.
 
-[16] src/limiter.rs:441
+[16] src/limiter.rs:463
 /// A 4x polyphase interpolator for true-peak detection: a Blackman-windowed
 /// sinc, split by phase. BS.1770-4 specifies a longer filter than this; eight
 /// taps a phase catches the great majority of inter-sample overshoot at a
 /// fraction of the cost, and this is a detector, never in the signal path.
 /// Computed rather than tabulated so the window and the cutoff stay visible.
 
-[17] src/limiter.rs:463
+[17] src/limiter.rs:485
         // Normalise each phase to unity gain. Without this the window pulls
         // every phase down -- phase zero, which should be a plain delay, comes
         // out at 0.81 -- so the detector under-reports the peak it is there to
         // find and the limiter quietly under-corrects.
 
-[18] src/limiter.rs:484
+[18] src/limiter.rs:506
         // The loudness follower falls with a 1/3-second time constant, so it
         // needs a couple of seconds to reach the 0.4 floor. Once there, quiet
         // material is divided by 0.4 * 2 = 0.8.
 
-[19] src/limiter.rs:518
+[19] src/limiter.rs:540
     /// The whole point of a brickwall: whatever goes in, nothing comes out
     /// above the ceiling. If this ever fails, `clamp_block` starts hard-clipping
     /// and hard clipping is what a click is.
 
-[20] src/limiter.rs:525
+[20] src/limiter.rs:547
             // Loud sustained tone with violent transients on top, of the kind
             // a saturated black MIDI mix produces.
 
-[21] src/limiter.rs:549
+[21] src/limiter.rs:571
     /// The reason it exists. A brief transient must not pull down the material
     /// after it: that is the pumping the follower above is prone to, because it
     /// only sees a peak once the peak has gone past and needs a third of a
     /// second to recover.
 
-[22] src/limiter.rs:580
+[22] src/limiter.rs:602
         // 250 ms after it, the follower above would still be recovering. This
         // one has to be back.
 
-[23] src/limiter.rs:589
+[23] src/limiter.rs:611
     /// True-peak detection has to catch overshoot that sample-peak detection
     /// misses, or the name means nothing.
 
-[24] src/limiter.rs:598
+[24] src/limiter.rs:620
                     // Samples land on +/-1.0 while the waveform between them
                     // reaches sqrt(2). A sample-peak limiter sees nothing to
                     // do; a true-peak one has 3 dB to take off.
 
-[25] src/limiter.rs:631
+[25] src/limiter.rs:653
     /// The point of the sustained stage.
     ///
     /// A short release is what keeps the material after a transient at full
@@ -206,20 +210,32 @@
     /// recovered by dividing output by input, which is the direct statement of
     /// the property and does not conflate the source's own dynamics with it.
 
-[26] src/limiter.rs:646
+[26] src/limiter.rs:668
             // Two tones a 50 Hz beat apart, far above the ceiling. Nothing
             // here is a transient: all of the reduction is sustained.
 
-[27] src/limiter.rs:661
+[27] src/limiter.rs:683
             // Recover the applied gain, over the back half so the slow stage
             // has settled, and only where the input is big enough that the
             // division is not dominated by rounding near a zero crossing.
 
-[28] src/limiter.rs:677
+[28] src/limiter.rs:699
         // A fifth steadier, not an order of magnitude: the gain still has to
         // dip at every peak over the ceiling, and that is the attack. What the
         // stage removes is the depth the fast release works over.
 
-[29] src/limiter.rs:686
+[29] src/limiter.rs:709
     /// And it must not have cost the thing the fast release was for: a brief
     /// transient still has to let go quickly.
+
+[30] src/limiter.rs:732
+    /// `--limiter omni` runs the brickwall behind the follower as a safety
+    /// stage. The follower alone lets a sudden transient through before it
+    /// catches up -- 2,027 hard-clipped samples on one opus render
+    /// (2026-09-15) -- and the pair must not, at full scale or at a lossy
+    /// container's -1 dB. What the follower already kept under the ceiling has
+    /// to come out exactly as it was, only delayed.
+
+[31] src/limiter.rs:740
+        // A quiet second, so the follower settles at its floor, then a loud
+        // burst it has to chase.

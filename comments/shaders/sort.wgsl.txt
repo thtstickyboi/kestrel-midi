@@ -6,7 +6,7 @@
 # they always match it. The development tree keeps every comment
 # inline; its history is the place to compare versions.
 
-[1] shaders/sort.wgsl:1
+[1] shaders/sort.wgsl:5
 // Voice pool sort, run as part of compaction.
 //
 // Why this exists, measured rather than assumed. With a million voices on an
@@ -31,20 +31,20 @@
 // Determinism: a binary split is stable by construction and uses no atomics,
 // so the permutation is a pure function of the pool contents.
 
-[2] shaders/sort.wgsl:59
+[2] shaders/sort.wgsl:63
         // Dead voices get a region one past the last real one, so they sort
         // to the end and the gather simply stops before reaching them.
 
-[3] shaders/sort.wgsl:82
+[3] shaders/sort.wgsl:86
     // Same grid-stride over blocks as `compact.wgsl::scan_local`, and for the
     // same reason: the pool may hold more WG-sized blocks than one dispatch
     // dimension can address.
 
-[4] shaders/sort.wgsl:182
+[4] shaders/sort.wgsl:186
 /// Move the surviving voices into their sorted slots. One copy of the pool per
 /// block: this does the compaction and the reordering together, because the
 /// permutation already has the dead voices pushed past `S_LIVE_NEW`.
 
-[5] shaders/sort.wgsl:202
+[5] shaders/sort.wgsl:206
             // Start offsets and the born-under variant only apply to the
             // block a voice was born in.

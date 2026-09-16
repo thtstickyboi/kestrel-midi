@@ -1,0 +1,64 @@
+# Comments extracted from src/bin/kestrel/tui/style.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/bin/kestrel/tui/style.rs:5
+//! Colour, layout primitives and the banner.
+//!
+//! Screens are built as lines of styled spans and only then written, so a
+//! frame can be laid out, measured and tested as plain text without a
+//! terminal. Glyphs are kept to the WGL4 set -- box drawing, full and half
+//! blocks, shades, arrows, the bullet -- because that is what Consolas, the
+//! default font of a console window opened by double-clicking the executable,
+//! actually has. Check marks and the partial eighth blocks are not in it.
+
+[2] src/bin/kestrel/tui/style.rs:28
+/// Labels and secondary text: a warm grey that reads on dark and light
+/// backgrounds alike.
+
+[3] src/bin/kestrel/tui/style.rs:78
+/// Columns a line occupies. Not its length in chars: a CJK title is two
+/// columns a character.
+
+[4] src/bin/kestrel/tui/style.rs:89
+/// Truncate a line to `cols` columns, ending in an ellipsis if anything was
+/// cut, then pad it to exactly `cols`.
+
+[5] src/bin/kestrel/tui/style.rs:121
+/// Truncate a plain string from the middle, keeping both ends. File names are
+/// told apart by their ends as often as by their starts.
+
+[6] src/bin/kestrel/tui/style.rs:162
+/// Turn on escape-sequence processing where the console has to be asked.
+/// Every Windows 10 and later console supports it, but one opened by
+/// double-clicking an executable starts with it off.
+
+[7] src/bin/kestrel/tui/style.rs:172
+/// Word-wrap plain text to `cols` columns, keeping its own line breaks. A word
+/// longer than the width is broken where it overflows.
+
+[8] src/bin/kestrel/tui/style.rs:315
+/// The KESTREL banner. The gradient runs diagonally, and the outline glyphs
+/// take a darker shade of their column's colour so the letters read as lit
+/// from the front.
+
+[9] src/bin/kestrel/tui/style.rs:343
+/// The banner at the top of a screen. Its trailing blank row is dropped here,
+/// because every section that follows opens with a blank line of its own.
+
+[10] src/bin/kestrel/tui/style.rs:354
+/// A box around `body`, `inner` columns wide, with a title in the top edge and
+/// an optional note right-aligned in the bottom one.
+
+[11] src/bin/kestrel/tui/style.rs:391
+/// A bar `cells` wide filled to `frac`, at half-cell resolution, coloured along
+/// the gradient.
+
+[12] src/bin/kestrel/tui/style.rs:485
+        // Two columns a character, so ten columns into eight keeps three
+        // characters and the ellipsis, and the column left over is padding:
+        // half a character cannot be drawn.

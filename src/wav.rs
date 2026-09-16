@@ -1,3 +1,7 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 //! Minimal RIFF/WAVE reader and writer, plus a FLAC reading path. \[1\]
 
 use anyhow::{bail, Context, Result};
@@ -447,7 +451,7 @@ mod tests {
         let n = channels[0].len();
         assert!((1..=8).contains(&nch) && (1..=65536).contains(&n));
         assert!(channels.iter().all(|c| c.len() == n));
-        let last = if n % FIXTURE_BLOCK == 0 { FIXTURE_BLOCK } else { n % FIXTURE_BLOCK };
+        let last = if n.is_multiple_of(FIXTURE_BLOCK) { FIXTURE_BLOCK } else { n % FIXTURE_BLOCK };
 
         let mut out = b"fLaC".to_vec();
         out.push(0x80); // last metadata block, type 0 (STREAMINFO)

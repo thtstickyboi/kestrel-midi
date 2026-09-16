@@ -1,0 +1,269 @@
+# Comments extracted from src/ffmpeg.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/ffmpeg.rs:5
+//! Locating ffmpeg, and encoding a render through it.
+//!
+//! `-o mix.opus` needs no flags: the extension picks the container, `PRESETS`
+//! picks the settings, and the search below picks the binary. `--ffmpeg` is an
+//! override for the case where ffmpeg is not on `PATH`, never a requirement.
+//!
+//! Everything a render needs from this module is resolved *before* the
+//! soundfont load, because that is nine seconds on a real library and a
+//! misconfigured encode should not cost it. Specified in
+//! the development notes.
+//!
+//! Precedence, highest first:
+//!
+//! 1. an explicit path, from `--ffmpeg`
+//! 2. the `FFMPEG` environment variable
+//! 3. `ffmpeg` beside the Kestrel executable, or in an `ffmpeg/` directory
+//!    under it -- where a future `get-ffmpeg` would put it
+//! 4. `ffmpeg` on `PATH`
+//!
+//! **A candidate named explicitly is never silently skipped.** If `--ffmpeg`
+//! or `FFMPEG` points at something that is not a working ffmpeg, that is an
+//! error naming it, not a quiet fall through to `PATH`. Falling through would
+//! mean a typo in `FFMPEG` renders with a different binary than the one asked
+//! for and never says so, which is the failure mode `CLAUDE.md` forbids.
+
+[2] src/ffmpeg.rs:35
+/// Where a resolved ffmpeg came from. Reported so that a surprising version
+/// can be traced to the thing that selected it.
+
+[3] src/ffmpeg.rs:78
+/// A container Kestrel can write, and the settings it writes it with.
+///
+/// One preset per extension, chosen to be the best quality that is still
+/// reasonable rather than the maximum the format allows -- the point is that
+/// `-o mix.opus` needs no further flags to be a good file. Measured output on
+/// 10 s of real material, 2026-08-31, is in the comment on each entry.
+
+[4] src/ffmpeg.rs:94
+    /// Whether the codec reconstructs something other than what it was given.
+    ///
+    /// This decides the default limiter ceiling, and it is not cosmetic. A
+    /// lossy decoder does not preserve peak level: encode a mix limited to
+    /// exactly 0 dBFS and it decodes *above* full scale, which clips in any
+    /// player with an integer output stage. Measured 2026-09-02 on a 429 s
+    /// render whose WAV peaks at exactly 1.000000 with no samples over:
+    ///
+    /// | container | decoded peak | samples over |
+    /// |---|---|---|
+    /// | opus | +0.99 dBFS | 2,335 |
+    /// | ogg  | +0.34 dBFS | 1,596 |
+    /// | m4a  | +0.10 dBFS | 3 |
+    /// | mp3  | +0.05 dBFS | 467 |
+    /// | flac | 0.00 dBFS  | 0 |
+    ///
+    /// So every lossy container needs headroom and FLAC needs none.
+
+[5] src/ffmpeg.rs:114
+/// Default brickwall ceiling for a lossy container, in dBFS.
+///
+/// -1 dBTP is the usual delivery recommendation, and it is *just* enough here:
+/// at -1 the worst case above (opus) decodes to -0.07 dBFS with zero samples
+/// over, so this material uses 0.93 dB of the 1 dB. -1.5 leaves 0.47 dB spare
+/// and -2 leaves 0.90. If a future file still clips at -1, that margin is why,
+/// and the fix is a lower ceiling rather than a different codec.
+
+[6] src/ffmpeg.rs:127
+        // 161 kbps measured. Opus is always 48 kHz internally, so this
+        // resamples anything else; `warn_rate` says so when it would.
+
+[7] src/ffmpeg.rs:136
+        // V0, 247 kbps measured. Held equal or better than 320 CBR at three
+        // quarters the size, because it spends bits where they are needed.
+
+[8] src/ffmpeg.rs:153
+        // Level 8 is the usual sweet spot; 12 costs far more time for well
+        // under a percent. ffmpeg converts the f32 input to 24-bit integer, so
+        // this is lossless *relative to that conversion* and not to the mix.
+
+[9] src/ffmpeg.rs:163
+        // The native encoder. libfdk_aac is better at a given bitrate but is
+        // absent from most distributed builds, including this machine's, so
+        // depending on it would make the preset unreliable. 256k is high
+        // enough that the difference is small.
+
+[10] src/ffmpeg.rs:177
+/// Find an ffmpeg without running it. Returns the first candidate by
+/// precedence; see the module docs for why an explicit one that does not exist
+/// is an error rather than a skip.
+
+[11] src/ffmpeg.rs:189
+        // An empty variable is the shell's way of saying "unset" often enough
+        // that treating it as a path would only produce a confusing error.
+
+[12] src/ffmpeg.rs:204
+    // Beside the executable, then an `ffmpeg/` directory under it. This is
+    // where `get-ffmpeg` would land one, so it has to be searched before PATH
+    // or a fetched copy would be shadowed by a system install.
+
+[13] src/ffmpeg.rs:233
+/// Walk `PATH` for `name`. `Command` would do this itself on exec, but the
+/// resolved path has to be *reportable* before anything runs, so that
+/// `ffmpeg-info` can say which binary it means.
+
+[14] src/ffmpeg.rs:243
+/// Run `-version` and keep the version token. Doubles as the check that the
+/// thing found is an ffmpeg at all rather than a file of that name.
+
+[15] src/ffmpeg.rs:262
+    // "ffmpeg version <token> Copyright (c) ..." -- take the token after the
+    // word, rather than a fixed field, because distribution builds prepend
+    // their own wrapper text often enough to break positional parsing.
+
+[16] src/ffmpeg.rs:294
+    /// Encoder names this build advertises. One `-encoders` call; the caller
+    /// filters, because the list runs to hundreds of entries.
+
+[17] src/ffmpeg.rs:307
+            // Entries are ` A....D name  Description`; the flag column is six
+            // characters and the name is the token after it. Lines before the
+            // `------` separator are the legend and have no second token that
+            // survives this.
+
+[18] src/ffmpeg.rs:343
+    /// Start encoding to `out`. Raw `f32le` stereo goes in on stdin.
+    ///
+    /// The mix is handed over as float and converted by ffmpeg, which is the
+    /// one place a level above full scale would be silently clamped -- see
+    /// `Encoder` for why that is the caller's problem and not this one's.
+
+[19] src/ffmpeg.rs:353
+/// A running ffmpeg being fed raw PCM on stdin.
+///
+/// **Every container here clips.** ffmpeg converts the f32 input to a bounded
+/// representation on the way in, and that conversion clamps: a 3.0-peak signal
+/// measured back at 1.000 with 78.5% of samples pinned at the ceiling, with no
+/// warning and a zero exit status. Kestrel's raw mix routinely exceeds full
+/// scale -- a twelve-file merge measured 1088.86 -- so **the caller must
+/// guarantee the audio is limited before it reaches here.** `render` does that
+/// by refusing `--limiter off` for encoded output.
+
+[20] src/ffmpeg.rs:364
+    /// Taken in `finish`, which is what closes the pipe and tells ffmpeg to
+    /// flush. Dropping it is the only way to signal end of stream.
+
+[21] src/ffmpeg.rs:367
+    /// Drained on a thread. ffmpeg blocks once a full stderr pipe stops being
+    /// read, which on a long render is a deadlock rather than a slow write.
+
+[22] src/ffmpeg.rs:384
+            // Describe the input: ffmpeg cannot infer anything about a raw
+            // stream, and a wrong rate here silently changes the pitch.
+
+[23] src/ffmpeg.rs:428
+            // A broken pipe means ffmpeg already exited, and its stderr says
+            // why. Reporting the write error alone would name the symptom.
+
+[24] src/ffmpeg.rs:436
+    /// Collect ffmpeg's own complaint, which is the useful half of any failure
+    /// here. Consumes the stderr reader, so it is only ever called once on the
+    /// way out.
+
+[25] src/ffmpeg.rs:458
+    /// Close the pipe, wait for the encode to finish, and return the size of
+    /// the file written. Returning the *encoded* size rather than the bytes
+    /// fed in keeps the caller's "wrote N MiB" line honest.
+
+[26] src/ffmpeg.rs:476
+        // Anything on stderr with -loglevel error is worth passing on even
+        // when the exit status was clean.
+
+[27] src/ffmpeg.rs:490
+/// True when `name` looks like a path rather than a bare command. Used to keep
+/// `--ffmpeg ffmpeg` (a bare name someone meant to be found on PATH) from
+/// being treated as a relative file that does not exist.
+
+[28] src/ffmpeg.rs:643
+    /// Pinned digest of the archive, checked before anything is extracted or
+    /// run. `None` means this build ships no pin and the operator must supply
+    /// one; see `verify`.
+
+[29] src/ffmpeg.rs:652
+/// **No pins are shipped, on purpose.** These URLs are rolling "latest release"
+/// endpoints whose digest changes with every upstream release, so a constant
+/// baked in here would be stale within weeks and would have to be either
+/// ignored or updated blind. A digest nobody checked is worse than none,
+/// because it reads as a guarantee. The command therefore fails closed and
+/// makes the operator pin one deliberately, against the vendor's own published
+/// checksum.
+
+[30] src/ffmpeg.rs:664
+        // Measured 2026-08-31 on release 9.0.1. The other two are
+        // estimates and are marked as such; nobody has run them.
+
+[31] src/ffmpeg.rs:702
+/// Where `get-ffmpeg` installs: an `ffmpeg/` directory beside the Kestrel
+/// executable. `locate` searches there before `PATH`, so a fetched copy wins
+/// over a system install rather than being shadowed by one.
+///
+/// Never a system path, and nothing is added to `PATH`. The fetch stays inside
+/// the program's own directory, so undoing it is deleting a folder.
+
+[32] src/ffmpeg.rs:716
+/// Compare a computed digest against what the operator or the build pinned.
+///
+/// Fails closed: with neither a pinned nor an accepted digest, the download is
+/// reported and refused rather than trusted.
+
+[33] src/ffmpeg.rs:765
+/// Download `url` to `dest` with the platform's own curl.
+///
+/// curl rather than an HTTP crate: it ships with Windows 10 1803+, macOS and
+/// almost every Linux, it validates TLS against the system trust store, and it
+/// keeps this command at zero added dependencies. `--proto-redir =https`
+/// refuses a redirect that tries to leave TLS, which a plain `-L` would follow.
+
+[34] src/ffmpeg.rs:790
+/// Pull just the ffmpeg binary out of `archive` into `into`.
+///
+/// bsdtar reads zip as well as tar.xz and ships as `tar` on Windows 10+, macOS
+/// and most Linux, so one command covers all three archives. Only the binary is
+/// taken: ffplay, ffprobe, the documentation and the presets are most of the
+/// archive and nothing here uses any of them.
+
+[35] src/ffmpeg.rs:805
+            // Wildcard because the top directory carries the version, which
+            // changes with every release and cannot be written down here.
+
+[36] src/ffmpeg.rs:811
+    // Extraction keeps the archive's own directory structure, so find what
+    // landed rather than predicting it.
+
+[37] src/ffmpeg.rs:819
+        // Drop whatever version-named directory it came out of, innermost
+        // first. `remove_dir` only succeeds on an empty one, so this cannot
+        // take anything with it.
+
+[38] src/ffmpeg.rs:891
+    /// FIPS-180-4 vectors, plus a multi-block case that catches a wrong length
+    /// field and a chunked case that catches a wrong buffer boundary.
+
+[39] src/ffmpeg.rs:962
+    /// The wildcard extract plus relocate, which is the fiddly half of
+    ///  and the half that has no network in it. Builds an archive
+    /// shaped like a real one -- a version-named top directory with the binary
+    /// under  -- and checks the binary ends up flat in the destination
+    /// with the nesting cleaned up.
+
+[40] src/ffmpeg.rs:974
+        // Something that must NOT be extracted, to prove the wildcard is doing
+        // work rather than the whole archive being unpacked.
+
+[41] src/ffmpeg.rs:998
+    /// The bug this guards, found 2026-09-02: `.opus` rendered at the 0 dBFS
+    /// default decoded to +0.99 dBFS with 2,335 samples over full scale, heard
+    /// as high-frequency clicks. Lossy codecs do not preserve peak level, so
+    /// they need headroom and lossless does not.
+
+[42] src/ffmpeg.rs:1008
+        // Enough headroom to cover the worst measured overshoot (+0.99 dB on
+        // opus), and not so much that it throws away loudness.

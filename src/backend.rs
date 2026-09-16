@@ -1,3 +1,7 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 //! The interface the driver renders through. \[1\]
 
 use crate::voice::SpawnCmd;
@@ -16,7 +20,7 @@ pub struct BlockStats {
 
 pub trait Backend {
     /// Publish this block's note-offs: `meta` is the interleaved per-slot \[2\]
-    fn set_gates(&mut self, meta: &[u32], frames: &[u32]) -> Result<()>;
+    fn set_gates(&mut self, meta: &[u32], runs: &[u32]) -> Result<()>;
 
     /// Publish this block's per-channel controller state. `rows` is \[3\]
     fn set_channels(&mut self, rows: &[u32], bend: bool, gain: bool, variant: bool, cut: bool)
@@ -33,14 +37,23 @@ pub trait Backend {
     /// Add voices to the pool. May steal or drop according to the configured \[5\]
     fn spawn(&mut self, cmds: &[SpawnCmd]) -> Result<()>;
 
-    /// Render one block into `out`, interleaved stereo, `block_frames * 2` \[6\]
-    fn render(&mut self, out: &mut [f32]) -> Result<()>;
+    /// Start rendering one block. Returns once the work is queued; the audio \[6\]
+    fn submit(&mut self) -> Result<()>;
+
+    /// Wait for the block started by `submit` and write it into `out`, \[7\]
+    fn finish(&mut self, out: &mut [f32]) -> Result<()>;
+
+    /// Render one block, start to finish. \[8\]
+    fn render(&mut self, out: &mut [f32]) -> Result<()> {
+        self.submit()?;
+        self.finish(out)
+    }
 
     fn stats(&self) -> BlockStats;
 
     fn name(&self) -> &'static str;
 
-    /// Per-pass timings from the last block, for `--profile`. Empty when the \[7\]
+    /// Per-pass timings from the last block, for `--profile`. Empty when the \[9\]
     fn timings(&self) -> Vec<(&'static str, f64)> {
         Vec::new()
     }

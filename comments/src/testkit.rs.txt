@@ -6,40 +6,40 @@
 # they always match it. The development tree keeps every comment
 # inline; its history is the place to compare versions.
 
-[1] src/testkit.rs:1
+[1] src/testkit.rs:5
 //! Synthetic soundfonts and MIDI files for the test suite.
 //!
 //! The tests must not depend on a soundfont that happens to be installed, and
 //! a hand-built SF2 doubles as a check on the loader: everything written here
 //! is read back through the real parser.
 
-[2] src/testkit.rs:13
+[2] src/testkit.rs:17
 // ---------------------------------------------------------------------------
 // waveforms
 // ---------------------------------------------------------------------------
 
-[3] src/testkit.rs:17
+[3] src/testkit.rs:21
 /// One cycle repeated, so the loop points are exact and a looped render is a
 /// pure tone with no discontinuity.
 
-[4] src/testkit.rs:30
+[4] src/testkit.rs:34
 /// A ramp from -1 to 1 over `n` samples. Every sample is distinct, which makes
 /// phase-accumulator bugs show up as an obviously wrong slope.
 
-[5] src/testkit.rs:41
+[5] src/testkit.rs:45
 /// Deterministic pseudo-random noise. Not for listening, for catching indexing
 /// bugs: neighbouring samples are uncorrelated, so an off-by-one is loud.
 
-[6] src/testkit.rs:55
+[6] src/testkit.rs:59
 // ---------------------------------------------------------------------------
 // SF2 builder
 // ---------------------------------------------------------------------------
 
-[7] src/testkit.rs:84
+[7] src/testkit.rs:88
 /// One instrument zone. `gens` are extra (operator, amount) pairs written
 /// before the terminal sampleID generator.
 
-[8] src/testkit.rs:144
+[8] src/testkit.rs:148
 /// An SF2 `ZSTR`: the string, then one or two zero bytes, whichever makes the
 /// total length even.
 ///
@@ -50,7 +50,7 @@
 /// with `BASS_ERROR_FILEFORM`. This crate's own reader never noticed, because
 /// it seeks each chunk by name.
 
-[9] src/testkit.rs:276
+[9] src/testkit.rs:280
         // EOS. A shdr record is 46 bytes: 20 of name, then start, end,
         // startloop, endloop and rate as u32, originalKey and correction as
         // bytes, sampleLink and sampleType as u16. The terminal record has to
@@ -59,49 +59,49 @@
         // rejects such a file outright with BASS_ERROR_FILEFORM even though
         // this crate's own loader divides through and carries on.
 
-[10] src/testkit.rs:319
+[10] src/testkit.rs:323
 /// The default test soundfont: one looped sine, no envelope shaping, so a
 /// single note renders to exactly the sample repeated.
 
-[11] src/testkit.rs:350
+[11] src/testkit.rs:354
 /// A soundfont with several regions, key splits, panning, an envelope and a
 /// filter. Exercises the parts of the loader a real soundfont uses.
 
-[12] src/testkit.rs:391
+[12] src/testkit.rs:395
                     // Generator units, not centibels: every synth applies 0.4 dB
                     // per unit, so this is -4 dB. See `SF2_ATTENUATION_DB_PER_CB`.
 
-[13] src/testkit.rs:417
+[13] src/testkit.rs:421
 /// A soundfont whose sample pool is too big to sit in cache, one looped sample
 /// per key. This is what a real piano library looks like to the memory system,
 /// and it is the only way to see whether the region sort is doing anything:
 /// with a pool that fits in L2, every access pattern looks equally good.
 
-[14] src/testkit.rs:429
+[14] src/testkit.rs:433
         // A detuned pair beating slowly, so neighbouring samples are not
         // identical and the compiler cannot fold them away.
 
-[15] src/testkit.rs:474
+[15] src/testkit.rs:478
 // ---------------------------------------------------------------------------
 // MIDI generators
 // ---------------------------------------------------------------------------
 
-[16] src/testkit.rs:533
+[16] src/testkit.rs:537
     // 16 channels x 128 keys is only 2048 distinct notes, so the rest are
     // retriggers of the same keys, which is exactly what a black MIDI does.
 
-[17] src/testkit.rs:554
+[17] src/testkit.rs:558
 /// `notes` note-ons spread over `seconds`, none of them released until the
 /// very end. The voice count only ever climbs, which is what forces the pool
 /// to overflow and the stealing rule to be exercised.
 
-[18] src/testkit.rs:584
+[18] src/testkit.rs:588
 /// One note, one key, held for a known length. The single-voice test.
 /// A MIDI built from raw `(seconds, message, length)` triples at a fixed
 /// tempo. Controller tests care about the exact ordering of events around a
 /// note, which the shaped helpers above deliberately hide.
 
-[19] src/testkit.rs:603
+[19] src/testkit.rs:607
 /// The three messages that set a channel's bend range through RPN 0. Without
 /// them the range is the GM default of two semitones, which cannot express an
 /// exact interval: the largest bend is 8191/8192 of the range, not all of it.

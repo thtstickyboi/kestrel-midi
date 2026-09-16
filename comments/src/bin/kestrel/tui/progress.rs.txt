@@ -1,0 +1,54 @@
+# Comments extracted from src/bin/kestrel/tui/progress.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/bin/kestrel/tui/progress.rs:5
+//! The progress screen: one reader of a `session::Monitor`.
+//!
+//! The render runs on its own thread and only copies counters into the
+//! monitor; this thread takes a snapshot eight times a second and draws it.
+//! It is deliberately no different from any other front end reading the
+//! library, so what it can show is what a community UI can show.
+
+[2] src/bin/kestrel/tui/progress.rs:23
+/// Eight frames a second: smooth enough for the bar, slow enough that a
+/// number can be read before it changes.
+
+[3] src/bin/kestrel/tui/progress.rs:26
+/// How long a first Ctrl+C waits for the second. One keypress should not throw
+/// away an hour of rendering.
+
+[4] src/bin/kestrel/tui/progress.rs:39
+/// Recent speed and note rate, smoothed over a couple of seconds so the
+/// figures move rather than flicker. The snapshot's own `speed()` is the whole
+/// render's average, which is the figure the command line reports at the end.
+
+[5] src/bin/kestrel/tui/progress.rs:151
+            // Once the events are all read there is nothing left to estimate
+            // from, so the middle field says what is happening instead.
+
+[6] src/bin/kestrel/tui/progress.rs:221
+    // The whole adapter, every process counted. Kestrel's own figure alone
+    // cannot say whether the card is nearly full.
+
+[7] src/bin/kestrel/tui/progress.rs:276
+/// The terminal while the screen owns it: raw mode so Ctrl+C arrives as a key
+/// rather than killing the process, and no cursor. Restored on drop, which
+/// includes an unwinding panic.
+
+[8] src/bin/kestrel/tui/progress.rs:395
+            // The poll is the frame clock: it returns at the next key, or when
+            // the frame is up.
+
+[9] src/bin/kestrel/tui/progress.rs:476
+    /// Every phase lays out to the same rectangle, so the screen never leaves
+    /// a stale row behind when it moves from setup to rendering.
+
+[10] src/bin/kestrel/tui/progress.rs:505
+    /// Not a check: prints one frame per phase as plain text, to look at a
+    /// layout change without a terminal.
+    /// `cargo test --bin kestrel preview_frames -- --ignored --nocapture`

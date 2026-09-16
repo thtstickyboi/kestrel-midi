@@ -1,3 +1,7 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 //! Synthetic soundfonts and MIDI files for the test suite. \[1\]
 
 use crate::midi::MidiWriter;
@@ -162,7 +166,7 @@ impl Sf2Builder {
             let start = smpl.len() as u32;
             smpl.extend_from_slice(&s.data);
             let end = smpl.len() as u32;
-            smpl.extend(std::iter::repeat(0i16).take(Self::SAMPLE_GAP));
+            smpl.extend(std::iter::repeat_n(0i16, Self::SAMPLE_GAP));
             sample_ranges.push((start, end));
         }
         let smpl_bytes: Vec<u8> = smpl.iter().flat_map(|v| v.to_le_bytes()).collect();

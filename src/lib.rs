@@ -1,3 +1,7 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 //! GPU-accelerated SoundFont/SFZ synthesizer for black MIDI. \[1\]
 
 pub mod backend;
@@ -5,11 +9,13 @@ pub mod bank;
 pub mod config;
 pub mod cpu;
 pub mod driver;
+pub mod ffmpeg;
 pub mod fixed;
 pub mod gpu;
 pub mod limiter;
 pub mod midi;
 pub mod resample;
+pub mod session;
 pub mod sf2;
 pub mod sfz;
 pub mod testkit;

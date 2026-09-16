@@ -1,3 +1,7 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 //! CPU reference synthesizer. \[1\]
 
 use crate::backend::{Backend, BlockStats};
@@ -71,14 +75,15 @@ impl Pool {
         // [7]
         self.born_variant.push((c.variant + 1) | (c.row_bias << 16));
         self.stop_rel.push(0);
-        self.age.push(0);
+        // [8]
+        self.age.push(0u32.wrapping_sub(c.start_rel));
         self.rel_age.push(NO_RELEASE_AGE);
         self.note_id
             .push(((c.note_id_hi as u64) << 32) | c.note_id_lo as u64);
     }
 
     fn swap_remove_compact(&mut self, keep: &[bool]) {
-        // [8]
+        // [9]
         let mut w = 0usize;
         for (r, &alive) in keep.iter().enumerate().take(self.len()) {
             if alive {
@@ -140,6 +145,27 @@ impl Pool {
     }
 }
 
+/// The tremolo's linear gain at `age`: exactly one while the modulation LFO is \[10\]
+#[inline]
+fn lfo_tremolo(p: &RegionParams, age: u32) -> f32 {
+    let d = p.mod_lfo_delay();
+    let mv = p.mod_lfo_to_volume();
+    let on = if age >= d && mv != 0.0 { 1.0f32 } else { 0.0 };
+    let m = lfo_tri(age.wrapping_sub(d).wrapping_mul(p.mod_lfo_inc)) * on;
+    let x = -(m * mv) * (1.0 / 60.205_999);
+    1.0 + (x.exp2() - 1.0) * on
+}
+
+/// A voice's age at a block frame, from the age stored for the top of the \[11\]
+#[inline]
+fn note_age(raw: u32) -> u32 {
+    if raw >= 0x8000_0000 {
+        0
+    } else {
+        raw
+    }
+}
+
 pub struct CpuSynth {
     cfg: Config,
     bank: Arc<Bank>,
@@ -147,9 +173,9 @@ pub struct CpuSynth {
     /// Interleaved f64 accumulator for one block.
     mix: Vec<f64>,
     off_meta: Vec<u32>,
-    off_frames: Vec<u32>,
+    off_runs: Vec<u32>,
     chan_rows: Vec<u32>,
-    /// Copies of the params table beyond the bank's own. Index 0 is the \[9\]
+    /// Copies of the params table beyond the bank's own. Index 0 is the \[12\]
     variants: Vec<Vec<RegionParams>>,
     /// Modulation-envelope tables, one per params variant beyond zero.
     menv_variants: Vec<Vec<ModEnvParams>>,
@@ -173,7 +199,7 @@ impl CpuSynth {
             pool: Pool::default(),
             mix: vec![0.0; cfg.block_samples()],
             off_meta: vec![0; (GATE_SLOTS + 1) * 2],
-            off_frames: Vec::new(),
+            off_runs: Vec::new(),
             // One row past the last tile; see `voice::ChannelTable::row_bias`.
             chan_rows: vec![0; (tiles + 1) * BEND_CHANNELS * CHAN_FIELDS],
             variants: Vec::new(),
@@ -190,7 +216,7 @@ impl CpuSynth {
         }
     }
 
-    /// Read one pool sample, normalised the same way `unpack2x16snorm` does on \[10\]
+    /// Read one pool sample, normalised the same way `unpack2x16snorm` does on \[13\]
     #[inline(always)]
     fn fetch(&self, base: u32, idx: u32) -> f32 {
         let i = (base + idx) as usize;
@@ -198,7 +224,7 @@ impl CpuSynth {
         (v as f32 * (1.0 / 32767.0)).max(-1.0)
     }
 
-    /// Which queued spawn the `i`-th accepted one is. The driver has already \[11\]
+    /// Which queued spawn the `i`-th accepted one is. The driver has already \[14\]
     #[inline(always)]
     fn pick(&self, i: usize, want: usize, take: usize) -> usize {
         match self.cfg.admit_rule {
@@ -207,7 +233,7 @@ impl CpuSynth {
         }
     }
 
-    /// The 64-bit key voice stealing selects the k smallest of. Mirrors \[12\]
+    /// The 64-bit key voice stealing selects the k smallest of. Mirrors \[15\]
     #[inline(always)]
     fn steal_key(&self, i: usize) -> u64 {
         let id = self.pool.note_id[i];
@@ -219,7 +245,7 @@ impl CpuSynth {
         (q << 48) | (id & 0x0000_FFFF_FFFF_FFFF)
     }
 
-    /// One region's DSP constants out of one copy of the params table. \[13\]
+    /// One region's DSP constants out of one copy of the params table. \[16\]
     #[inline(always)]
     fn params_of(&self, variant: u32, params_base: usize) -> RegionParams {
         match variant.checked_sub(1) {
@@ -233,7 +259,7 @@ impl CpuSynth {
         }
     }
 
-    /// The modulation-envelope entry beside `params_of`'s, from the same \[14\]
+    /// The modulation-envelope entry beside `params_of`'s, from the same \[17\]
     #[inline(always)]
     fn menv_of(&self, variant: u32, params_base: usize) -> ModEnvParams {
         let fallback = || {
@@ -254,7 +280,7 @@ impl CpuSynth {
         }
     }
 
-    /// Index of the sample `off` frames after `idx`, honouring the loop. \[15\]
+    /// Index of the sample `off` frames after `idx`, honouring the loop. \[18\]
     #[inline(always)]
     fn advance_index(idx: u32, off: i32, looping: bool, loop_start: u32, loop_end: u32, len: u32) -> u32 {
         let raw = idx as i64 + off as i64;
@@ -348,10 +374,10 @@ impl Backend for CpuSynth {
         Ok(())
     }
 
-    fn set_gates(&mut self, meta: &[u32], frames: &[u32]) -> Result<()> {
+    fn set_gates(&mut self, meta: &[u32], runs: &[u32]) -> Result<()> {
         self.off_meta.copy_from_slice(meta);
-        self.off_frames.clear();
-        self.off_frames.extend_from_slice(frames);
+        self.off_runs.clear();
+        self.off_runs.extend_from_slice(runs);
         Ok(())
     }
 
@@ -371,16 +397,16 @@ impl Backend for CpuSynth {
                     return Ok(());
                 }
                 StealRule::Oldest | StealRule::Quietest => {
-                    // [16]
+                    // [19]
                     let need = (live + want).saturating_sub(cap);
-                    // [17]
+                    // [20]
                     let need = need.min(live).min(self.cfg.max_steal() as usize);
                     if need > 0 {
                         let mut order: Vec<u32> = (0..live as u32).collect();
                         order.select_nth_unstable_by_key(need - 1, |&i| {
                             self.steal_key(i as usize)
                         });
-                        // [18]
+                        // [21]
                         let span = self.cfg.steal_span();
                         for &i in &order[..need] {
                             let id = self.pool.note_id[i as usize] as u32;
@@ -388,7 +414,7 @@ impl Backend for CpuSynth {
                         }
                         self.stolen += need as u64;
                     }
-                    // [19]
+                    // [22]
                     let take = want.min(cap - (live - need));
                     self.dropped += (want - take) as u64;
                     for i in 0..take {
@@ -405,7 +431,12 @@ impl Backend for CpuSynth {
         Ok(())
     }
 
-    fn render(&mut self, out: &mut [f32]) -> Result<()> {
+    /// The reference backend has no device, so there is nothing to overlap: \[23\]
+    fn submit(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    fn finish(&mut self, out: &mut [f32]) -> Result<()> {
         let block = self.cfg.block_frames as usize;
         debug_assert_eq!(out.len(), block * 2);
         self.mix.iter_mut().for_each(|v| *v = 0.0);
@@ -422,18 +453,18 @@ impl Backend for CpuSynth {
                 continue;
             }
             let params_base = self.pool.params[v] as usize;
-            // [20]
+            // [24]
             let packed = self.pool.born_variant[v];
             let born_variant = packed & 0xFFFF;
-            // [21]
+            // [25]
             let born_bias = (packed >> 16) as usize;
             let mut variant = born_variant.saturating_sub(1);
             let mut p: RegionParams = self.params_of(variant, params_base);
             let mut use_filter = p.flags & RP_FILTER != 0;
-            // [22]
+            // [26]
             let (mut cb0, mut cb1, mut ca1, mut ca2) = (p.b0, p.b1, p.a1, p.a2);
             let (mut db0, mut db1, mut da1, mut da2) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
-            // [23]
+            // [27]
             let mut filter_mix = if use_filter { 1.0f32 } else { 0.0f32 };
             let mut d_filter_mix = 0.0f32;
 
@@ -446,12 +477,12 @@ impl Backend for CpuSynth {
             let loop_until_release = vflags & VF_LOOP_UNTIL_RELEASE != 0;
             let gate_slot = self.pool.gate_slot[v] as usize;
             let ordinal = self.pool.ordinal[v];
-            // [24]
+            // [28]
             let base_gain_l = self.pool.gain_l[v];
             let base_gain_r = self.pool.gain_r[v];
             let mut gain_l = base_gain_l;
             let mut gain_r = base_gain_r;
-            // [25]
+            // [29]
             let mut d_gain_l = 0.0f32;
             let mut d_gain_r = 0.0f32;
             let inv_gate_tile = 1.0f32 / self.tile_frames as f32;
@@ -459,7 +490,8 @@ impl Backend for CpuSynth {
             // Step after bend but before the LFOs; see `render.wgsl`.
             let mut bent = base_step;
             let age0 = self.pool.age[v];
-            let mut lfo_gain = 1.0f32;
+            // [30]
+            let mut lfo_factor = 1u32 << 24;
             let rtile = self.cfg.reduce_tile as usize;
             let channel = ChannelTable::channel_of(gate_slot as u32);
             let mut step = base_step;
@@ -471,26 +503,17 @@ impl Backend for CpuSynth {
             let mut z2 = self.pool.filt_z2[v];
             let start_rel = self.pool.start_rel[v] as usize;
             let mut stop_rel = self.pool.stop_rel[v] as usize;
-            // [26]
+            // [31]
             let born_tile = start_rel / self.tile_frames;
-            // [27]
+            // [32]
             let mut release_frame = usize::MAX;
             if stage0 < ENV_RELEASE {
-                let base = self.off_meta[gate_slot * 2];
-                if ordinal <= base {
-                    // Released before this block even started.
-                    release_frame = 0;
-                } else {
-                    let lo = self.off_meta[gate_slot * 2 + 1];
-                    let hi = self.off_meta[(gate_slot + 1) * 2 + 1];
-                    let j = ordinal - base;
-                    if j <= hi - lo {
-                        release_frame = self.off_frames[(lo + j - 1) as usize] as usize;
-                    }
+                if let Some(f) = off_frame(&self.off_meta, &self.off_runs, gate_slot, ordinal) {
+                    release_frame = f as usize;
                 }
             }
 
-            // [28]
+            // [33]
             let sr = self.cfg.sample_rate as f32;
             let mut use_menv = self.cfg.mod_env_enabled && p.flags & RP_MOD_ENV != 0;
             let mut mp = if use_menv {
@@ -500,19 +523,23 @@ impl Backend for CpuSynth {
             };
             let mut rel_age = self.pool.rel_age[v];
             if use_menv && release_frame != usize::MAX {
-                rel_age = age0 + release_frame as u32;
+                rel_age = note_age(age0.wrapping_add(release_frame as u32));
             }
             let mut menv_filter = use_menv && mp.to_filter != 0.0;
 
             'voice: for tile in 0..self.tiles {
+                // [34]
+                let mut tgt_l = base_gain_l;
+                let mut tgt_r = base_gain_r;
+                let mut snap = tile == 0;
 
                 if self.bend_active || self.gain_active || self.variant_active || self.cut_active
                 {
                     let ci = (tile * BEND_CHANNELS + channel) * CHAN_FIELDS;
-                    // [29]
+                    // [35]
                     let bias = if born_variant != 0 && tile <= born_tile { born_bias } else { 0 };
                     let gi = ((tile + bias) * BEND_CHANNELS + channel) * CHAN_FIELDS;
-                    // [30]
+                    // [36]
                     if self.cut_active {
                         let cut = self.chan_rows[ci + CHAN_CUT] as usize;
                         if cut != 0 && stop_rel == 0 {
@@ -528,11 +555,9 @@ impl Backend for CpuSynth {
                         step = bent;
                     }
                     if self.gain_active {
-                        let tgt_l =
-                            base_gain_l * f32::from_bits(self.chan_rows[gi + CHAN_GAIN_L]);
-                        let tgt_r =
-                            base_gain_r * f32::from_bits(self.chan_rows[gi + CHAN_GAIN_R]);
-                        // [31]
+                        tgt_l = base_gain_l * f32::from_bits(self.chan_rows[gi + CHAN_GAIN_L]);
+                        tgt_r = base_gain_r * f32::from_bits(self.chan_rows[gi + CHAN_GAIN_R]);
+                        // [37]
                         if self.cfg.gain_ramp && tile > born_tile {
                             d_gain_l = (tgt_l - gain_l) * inv_gate_tile;
                             d_gain_r = (tgt_r - gain_r) * inv_gate_tile;
@@ -541,9 +566,10 @@ impl Backend for CpuSynth {
                             gain_r = tgt_r;
                             d_gain_l = 0.0;
                             d_gain_r = 0.0;
+                            snap = true;
                         }
                     }
-                    // [32]
+                    // [38]
                     db0 = 0.0;
                     db1 = 0.0;
                     da1 = 0.0;
@@ -551,21 +577,21 @@ impl Backend for CpuSynth {
                     d_filter_mix = 0.0;
                     if self.variant_active {
                         let want = self.chan_rows[ci + CHAN_VARIANT];
-                        // [33]
+                        // [39]
                         let born_here = born_variant != 0 && tile <= born_tile;
                         if want != variant && !born_here {
                             variant = want;
                             let was_filtering = use_filter;
                             p = self.params_of(variant, params_base);
-                            // [34]
+                            // [40]
                             use_filter = p.flags & RP_FILTER != 0;
-                            // [35]
+                            // [41]
                             use_menv = self.cfg.mod_env_enabled && p.flags & RP_MOD_ENV != 0;
                             if use_menv {
                                 mp = self.menv_of(variant, params_base);
                             }
                             menv_filter = use_menv && mp.to_filter != 0.0;
-                            // [36]
+                            // [42]
                             let ramp_ok = self.cfg.filter_ramp && tile > born_tile;
                             if ramp_ok && use_filter && was_filtering {
                                 db0 = (p.b0 - cb0) * inv_gate_tile;
@@ -573,7 +599,7 @@ impl Backend for CpuSynth {
                                 da1 = (p.a1 - ca1) * inv_gate_tile;
                                 da2 = (p.a2 - ca2) * inv_gate_tile;
                             } else if ramp_ok && use_filter != was_filtering {
-                                // [37]
+                                // [43]
                                 if use_filter {
                                     z1 = 0.0;
                                     z2 = 0.0;
@@ -606,43 +632,45 @@ impl Backend for CpuSynth {
                     }
                 }
 
+                // [44]
+                if self.cfg.lfo_enabled {
+                    let f = tile * self.tile_frames;
+                    let age = note_age(age0.wrapping_add(f as u32));
+                    let next = note_age(age0.wrapping_add((f + self.tile_frames) as u32));
+                    let now = lfo_tremolo(&p, age);
+                    let trem = lfo_tremolo(&p, next);
+                    if snap {
+                        gain_l = tgt_l * now;
+                        gain_r = tgt_r * now;
+                    }
+                    d_gain_l = (tgt_l * trem - gain_l) * inv_gate_tile;
+                    d_gain_r = (tgt_r * trem - gain_r) * inv_gate_tile;
+                    let (vd, md) = (p.vib_lfo_delay(), p.mod_lfo_delay());
+                    let (vp, mlp) = (p.vib_lfo_to_pitch(), p.mod_lfo_to_pitch());
+                    let on_vib = (age >= vd && vp != 0.0) as u32;
+                    let on_mod = (age >= md && mlp != 0.0) as u32;
+                    let vib = lfo_tri(age.wrapping_sub(vd).wrapping_mul(p.vib_lfo_inc)) * on_vib as f32;
+                    let modl =
+                        lfo_tri(age.wrapping_sub(md).wrapping_mul(p.mod_lfo_inc)) * on_mod as f32;
+                    let cents = vp * vib + mlp * modl;
+                    // [45]
+                    let one = 1u32 << 24;
+                    let fx = ((cents * (1.0 / 1200.0)).exp2() * 16_777_216.0) as u32;
+                    lfo_factor = one.wrapping_add(fx.wrapping_sub(one).wrapping_mul(on_vib | on_mod));
+                    step = bent.scale(lfo_factor);
+                }
+
                 let f0 = tile * self.tile_frames;
                 for i in 0..self.tile_frames {
                     let f = f0 + i;
 
-                    // [38]
-                    if f % rtile == 0 && (self.cfg.lfo_enabled || use_menv) {
-                        let age = age0 + f as u32;
-                        let mut cents = 0.0f32;
-                        if self.cfg.lfo_enabled {
-                            let (vp, mlp, mv) = (
-                                p.vib_lfo_to_pitch(),
-                                p.mod_lfo_to_pitch(),
-                                p.mod_lfo_to_volume(),
-                            );
-                            if vp != 0.0 && age >= p.vib_lfo_delay() {
-                                cents += vp
-                                    * lfo_tri(
-                                        (age - p.vib_lfo_delay()).wrapping_mul(p.vib_lfo_inc),
-                                    );
-                            }
-                            let mut mod_lfo = 0.0f32;
-                            if (mlp != 0.0 || mv != 0.0) && age >= p.mod_lfo_delay() {
-                                mod_lfo = lfo_tri(
-                                    (age - p.mod_lfo_delay()).wrapping_mul(p.mod_lfo_inc),
-                                );
-                                cents += mlp * mod_lfo;
-                            }
-                            lfo_gain = if mv != 0.0 {
-                                (-(mod_lfo * mv) * (1.0 / 60.205_999)).exp2()
-                            } else {
-                                1.0
-                            };
-                        }
+                    // [46]
+                    if f.is_multiple_of(rtile) && use_menv {
+                        let age = note_age(age0.wrapping_add(f as u32));
                         let mut menv_factor = 0u32;
                         if use_menv {
                             let l = mod_env_level(&mp, age, rel_age, &self.bank.menv_log2);
-                            // [39]
+                            // [47]
                             if mp.to_pitch != 0.0 {
                                 let i = mod_env_pitch_index(
                                     mp.to_pitch * l,
@@ -652,7 +680,7 @@ impl Backend for CpuSynth {
                                     self.bank.menv_factors.get(i as usize).copied().unwrap_or(0);
                             }
                             if menv_filter {
-                                // [40]
+                                // [48]
                                 let fc = cents_to_hz(mp.fc_cents + mp.to_filter * l);
                                 let c = biquad_lowpass_pre(fc, mp.q_gain, mp.q_inv_2q, sr);
                                 cb0 = c.0;
@@ -665,12 +693,8 @@ impl Backend for CpuSynth {
                                 da2 = 0.0;
                             }
                         }
-                        step = if cents != 0.0 {
-                            let factor = ((cents * (1.0 / 1200.0)).exp2() * 16_777_216.0) as u32;
-                            bent.scale(factor)
-                        } else {
-                            bent
-                        };
+                        // [49]
+                        step = bent.scale(lfo_factor);
                         if menv_factor != 0 {
                             step = step.scale(menv_factor);
                         }
@@ -683,7 +707,7 @@ impl Backend for CpuSynth {
                         break 'voice;
                     }
 
-                    // [41]
+                    // [50]
                     if stage < ENV_RELEASE && f >= release_frame {
                         stage = ENV_RELEASE;
                         level = level.min(1.0);
@@ -699,7 +723,7 @@ impl Backend for CpuSynth {
                         break 'voice;
                     }
 
-                    // [42]
+                    // [51]
                     match stage {
                         ENV_ATTACK => {
                             level += p.attack_rate;
@@ -754,7 +778,7 @@ impl Backend for CpuSynth {
 
                     // Transposed direct form II. b2 == b0.
                     let y = if d_filter_mix != 0.0 {
-                        // [43]
+                        // [52]
                         let fy = cb0 * x + z1;
                         z1 = cb1 * x - ca1 * fy + z2;
                         z2 = cb0 * x - ca2 * fy;
@@ -771,7 +795,7 @@ impl Backend for CpuSynth {
                         x
                     };
 
-                    // [44]
+                    // [53]
                     let y = if stop_rel != 0 && f + 1 >= stop_rel {
                         let d = f + 1 - stop_rel;
                         if d >= fade {
@@ -783,11 +807,9 @@ impl Backend for CpuSynth {
                     } else {
                         y
                     };
-
-                    let y = if self.cfg.lfo_enabled { y * lfo_gain } else { y };
                     self.mix[f * 2] += (y * gain_l) as f64;
                     self.mix[f * 2 + 1] += (y * gain_r) as f64;
-                    // [45]
+                    // [54]
                     gain_l += d_gain_l;
                     gain_r += d_gain_r;
                     cb0 += db0;
@@ -816,8 +838,8 @@ impl Backend for CpuSynth {
             self.pool.start_rel[v] = 0;
             self.pool.born_variant[v] = 0;
             self.pool.stop_rel[v] = 0;
-            // [46]
-            self.pool.age[v] = age0 + self.cfg.block_frames;
+            // [55]
+            self.pool.age[v] = age0.wrapping_add(self.cfg.block_frames);
             self.pool.rel_age[v] = rel_age;
         }
 
