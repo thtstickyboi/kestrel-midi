@@ -1,0 +1,62 @@
+# Comments extracted from src/bin/kestrel/settings.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/bin/kestrel/settings.rs:5
+//! `ktrl.ini`, beside the executable: what Kestrel remembers between runs.
+//!
+//! Front-end state only -- where each file picker opens, and which releases
+//! the update check announces. Nothing a render reads is kept here, so a render
+//! still depends only on its arguments, and a guided render and the equivalent
+//! command still write the same file.
+//!
+//! INI rather than JSON: a Windows path goes in as it is written, where JSON
+//! wants every backslash doubled. The file carries no comments -- choices are
+//! made from Extras, not by editing it -- and the reader still skips `;` and
+//! `#` lines, so one added by hand does no harm until the next save drops it.
+//!
+//! Beside the executable, so a copy of Kestrel carries its settings with it
+//! and deleting the folder removes every trace. Where that folder cannot be
+//! written -- a mounted dmg, Program Files -- nothing is remembered, and the
+//! guided renderer says so once.
+
+[2] src/bin/kestrel/settings.rs:28
+/// Which releases the update check announces. Chosen by number from Extras,
+/// like every other choice in the guided renderer, and saved as that number.
+
+[3] src/bin/kestrel/settings.rs:35
+    /// 2: feature releases only -- a new minor or major version, such as 1.2.0
+    /// or 2.0.0, and not the fixes between them.
+
+[4] src/bin/kestrel/settings.rs:64
+/// The folders remembered, as `(key, what it is)`, in the order the file
+/// lists them. The key is the file's; the description is for the person.
+/// Only the render flow's three pickers: the Extras pickers remember their
+/// folder for the session and no longer.
+
+[5] src/bin/kestrel/settings.rs:85
+    /// Remember `dir` for `key`. A path the file cannot hold -- one that is not
+    /// valid Unicode, or has a line break in it -- is not remembered.
+
+[6] src/bin/kestrel/settings.rs:107
+/// The settings, and anything in the file that could not be used. A missing
+/// or unreadable file is every default and no problems: a first run is not a
+/// fault.
+
+[7] src/bin/kestrel/settings.rs:117
+/// Change the settings and save them. Read afresh first, so a change made
+/// meanwhile by another Kestrel window -- Extras runs as its own process --
+/// survives this one.
+
+[8] src/bin/kestrel/settings.rs:138
+    // Written beside and renamed over, so a crash part way leaves the old file
+    // rather than half of a new one.
+
+[9] src/bin/kestrel/settings.rs:146
+/// Lenient on purpose. Keys and sections it does not know are skipped without
+/// complaint, so a file written by a later Kestrel still loads in this one;
+/// only a value it knows the key of and cannot use is reported.

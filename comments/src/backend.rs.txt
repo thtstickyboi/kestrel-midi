@@ -37,10 +37,17 @@
     /// of `data`, or a single default entry when the bank drives none.
 
 [5] src/backend.rs:55
+    /// Whether a voice may be gliding at any point of the next block, so that
+    /// a backend with a separate glide path can leave it out of every block
+    /// where nothing glides. See `porta`. A voice that is not gliding renders
+    /// identically either way, so a backend that decides per voice from the
+    /// voice's own state can ignore this.
+
+[6] src/backend.rs:64
     /// Add voices to the pool. May steal or drop according to the configured
     /// rule if the pool is full.
 
-[6] src/backend.rs:59
+[7] src/backend.rs:68
     /// Start rendering one block. Returns once the work is queued; the audio
     /// is not available until `finish`.
     ///
@@ -50,18 +57,18 @@
     /// work, and `render` -- which is still here, and is still what the tests
     /// call -- gives that idle away by construction.
 
-[7] src/backend.rs:69
+[8] src/backend.rs:78
     /// Wait for the block started by `submit` and write it into `out`,
     /// interleaved stereo, `block_frames * 2` samples. Advances every voice
     /// and compacts the pool.
 
-[8] src/backend.rs:74
+[9] src/backend.rs:83
     /// Render one block, start to finish.
     ///
     /// The unpipelined form, kept because most callers want exactly this and
     /// because a test that renders one block should not have to know the
     /// backend has a pipeline.
 
-[9] src/backend.rs:88
+[10] src/backend.rs:97
     /// Per-pass timings from the last block, for `--profile`. Empty when the
     /// backend has nothing to report.

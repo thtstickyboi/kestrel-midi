@@ -11,7 +11,9 @@
 mod api;
 mod feed;
 mod render;
+mod settings;
 mod tui;
+mod update;
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -107,6 +109,11 @@ enum Cmd {
     /// snapshots and cancel, and keeps a soundfont loaded between renders. It
     /// ends when stdin closes.
     Api,
+    /// Ask GitHub whether a newer Kestrel has been released. Reads the latest
+    /// release's version and nothing else: nothing is downloaded or installed.
+    /// The guided renderer does the same check when it starts, unless the
+    /// KESTREL_NO_UPDATE_CHECK environment variable is set.
+    CheckUpdate,
     /// Download an ffmpeg into an `ffmpeg/` directory beside this executable.
     ///
     /// Deliberately a separate command and never part of a render: a flag on
@@ -532,6 +539,7 @@ fn main() -> Result<()> {
         Cmd::Null { a, b, threshold } => null(a, b, threshold),
         Cmd::GpuInfo => gpu::print_adapters(),
         Cmd::FfmpegInfo { ffmpeg } => ffmpeg_info(ffmpeg),
+        Cmd::CheckUpdate => update::run_cli(),
         Cmd::GetFfmpeg {
             dry_run,
             yes,

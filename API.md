@@ -30,7 +30,7 @@ A session can list GPUs and ffmpeg, describe MIDIs and soundfonts, list every re
 
 ## Commands
 
-**Quick commands** answer at once, and work while a render runs: `adapters`, `ffmpeg`, `options`, `inspect_midi`, `status`, `snapshot`, `set_interval`, `cancel`, `unload`, `shutdown`.
+**Quick commands** answer at once, and work while a render runs: `adapters`, `ffmpeg`, `options`, `inspect_midi`, `status`, `snapshot`, `set_interval`, `cancel`, `unload`, `shutdown`. `check_update` works while a render runs too, but asks GitHub, so it can take a few seconds.
 
 **Long commands** run one at a time: `load_soundfonts`, `scan_midi`, `render`. Sending one while another is running gets an error that starts with `busy`; wait for the running one's response, or cancel it.
 
@@ -48,6 +48,7 @@ A session can list GPUs and ffmpeg, describe MIDIs and soundfonts, list every re
 | `snapshot` | | The running render's current `progress` line |
 | `set_interval` | `interval_ms` | How often a render sends `progress`: 0 for never (use `snapshot` instead), otherwise held to 10–60,000 ms. Applies to the running render and later ones. Result: the `interval_ms` applied |
 | `status` | | `running` (`id` and `cmd`, or null), `loaded` (what `load_soundfonts` returned, or null), `interval_ms` |
+| `check_update` | | Asks GitHub for the latest Kestrel release; downloads nothing. `current` (this Kestrel's version), `latest`, `newer` (whether `latest` is newer than `current`), `ring` (the person's update ring: `fast` for every release, `slow` for feature releases such as 1.2.0 only), `announce` (whether their ring wants to hear about `latest`: show a notice when this is true) and `url` (the release page to send people to). An error when offline, when GitHub doesn't answer within about 5 seconds, or when `KESTREL_NO_UPDATE_CHECK` is set; show nothing in any of those cases |
 | `shutdown` | | Cancels anything running, answers, and exits |
 
 ### Soundfonts

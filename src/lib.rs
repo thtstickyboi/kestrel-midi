@@ -14,6 +14,7 @@ pub mod fixed;
 pub mod gpu;
 pub mod limiter;
 pub mod midi;
+pub mod porta;
 pub mod resample;
 pub mod session;
 pub mod sf2;

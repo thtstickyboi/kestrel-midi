@@ -152,12 +152,12 @@ jobs:
           state=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null || true)
           case "$state" in
             true)
-              gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title "Kestrel $TAG" --notes-file notes.md
+              gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title "Kestrel ${TAG#v}" --notes-file notes.md
               gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber dist/* ;;
             false)
               echo "::error::$TAG is already published; this workflow only writes drafts"
               exit 1 ;;
             *)
               gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
-                --title "Kestrel $TAG" --notes-file notes.md dist/* ;;
+                --title "Kestrel ${TAG#v}" --notes-file notes.md dist/* ;;
           esac

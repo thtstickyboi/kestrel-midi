@@ -96,14 +96,18 @@ The voice pool is one storage buffer, and every adapter caps how much of a singl
 
 Start `kestrel` with no arguments -- double-clicking it does exactly that -- and it walks you through a render:
 
-1. **Environment check.** Every GPU Kestrel can use, the most voices each will hold, and whether ffmpeg was found.
+1. **Environment check.** Every GPU Kestrel can use, the most voices each will hold, whether ffmpeg was found, and whether a newer Kestrel is out.
 2. **Menu.** Render a MIDI; per-track render (coming soon); Extras; exit.
 3. **MIDI and soundfonts**, through your system's own file pickers, from as many folders as you like. At most two soundfonts; if one of them is a General MIDI bank it goes underneath the other.
 4. **Voices, format and destination folder.** A name that is already taken gets the date and time added rather than being overwritten.
 5. **Additional flags**, one free-form line for anything the steps do not ask about -- `--limiter omni`, `--seconds 30`, `--volume 80`.
 6. **Progress**, with speed, voices, RAM and VRAM, then a summary and the option to start another render.
 
-**Extras** opens in a window of its own: GPU info, file info, the null test, and help for every flag.
+**Extras** opens in a window of its own: GPU info, file info, the null test, help for every flag, the update ring, and the folders Kestrel remembers.
+
+**Updates.** At startup the guided renderer asks GitHub for the latest release and tells you if there is a newer one. It never downloads or installs anything. In Extras, the **Fast Ring** (default) tells you about every release and the **Slow Ring** only about feature releases such as 1.2.0 or 2.0.0. Set `KESTREL_NO_UPDATE_CHECK=1` to turn the check off. The command line never checks unless you ask it to with `check-update`.
+
+**`ktrl.ini`**, next to the executable, keeps the update ring and the folders the MIDI, soundfont and destination pickers last opened. Delete it to reset them. If Kestrel's folder is read-only, nothing is remembered.
 
 A guided render is parsed through the same definition as the command line and runs through the same pipeline, so it writes a file byte-identical to the equivalent `--force-cli render`.
 
@@ -186,6 +190,7 @@ kestrel --force-cli info file.mid         # ...or of a MIDI: note counts, CC usa
 kestrel --force-cli null a.wav b.wav      # peak difference between two renders, in dB
 kestrel --force-cli ffmpeg-info           # the ffmpeg encoded output would use
 kestrel --force-cli get-ffmpeg            # fetch one; see Output formats
+kestrel --force-cli check-update          # is a newer Kestrel out? downloads nothing
 ```
 
 `kestrel info` is the first thing to reach for when a render sounds wrong: it tells you what Kestrel *thinks* your file contains, which is often not what you think it contains. On a MIDI it also sizes the job before you start it:
@@ -235,13 +240,12 @@ kestrel --force-cli render gm.mid -s general-midi.sf2 -s piano.sfz --sf-programs
 
 `--sf-programs` places the *last* soundfont on the programs you name, ranges included, so a one-preset SFZ piano can cover the whole piano family. Without it a soundfont takes only the program it declares -- which for an `.sfz` is program 0, GM's Acoustic Grand, so the common case needs no flag.
 
-Implemented: program change, bank select with the General MIDI fallback to bank 0, drum kits in bank 128 with their own fallback ladder, channel volume (powering on at 100, as General MIDI specifies), expression, pan, the sustain and sostenuto pedals, pitch bend, RPN 0/1/2 (bend range, fine and coarse tuning), CC71-75, CC120, CC121 and CC123-127. SF2 vibrato and tremolo LFOs are applied, as is the SF2 modulation envelope with both its pitch and filter destinations.
+Implemented: program change, bank select with the General MIDI fallback to bank 0, drum kits in bank 128 with their own fallback ladder, channel volume (powering on at 100, as General MIDI specifies), expression, pan, the sustain and sostenuto pedals, pitch bend, portamento (CC5, CC65 and CC84), RPN 0/1/2 (bend range, fine and coarse tuning), CC71-75, CC120, CC121 and CC123-127. SF2 vibrato and tremolo LFOs are applied, as is the SF2 modulation envelope with both its pitch and filter destinations.
 
 ### Where it is still wrong
 
 Measured against a reference GM synth. None of these stops a render; all of them mean it will not match what you are used to.
 
-- **Everything is louder than BASSMIDI**: 2.15 dB with mono samples, 5.16 dB with stereo SFZ samples. Both causes are measured. BASSMIDI carries a fixed -2.14 dB that Kestrel does not, and it plays each half of a stereo sample at the -3 dB a centred mono sample gets, where Kestrel plays the halves hard left and right at full level. It is a constant gain, not a balance error, so `--volume 78` level-matches a mono soundfont and `--volume 55` a stereo one. Whether Kestrel should change its own level is undecided.
 - **Several channels come out noticeably brighter** than the reference -- 1.2 to 1.4 times its spectral centroid. Ruled out as causes: the lowpass cutoff (measured exact at four settings), interpolation, and the envelopes. Cause unknown.
 - **The sample pool is resampled to one rate at load**, which band-limits a soundfont whose samples are recorded lower. On a 22 kHz General MIDI set that removes everything above 11 kHz, where the reference has content there. `--no-resample-pool` keeps the samples at their own rate and closes it.
 - **Only three SysEx messages are acted on**: the GS *use for rhythm part*, GS Reset and GM System On/Off. Master volume, part parameters and every bulk dump are ignored.
@@ -257,7 +261,7 @@ Where Kestrel and BASSMIDI disagree, BASSMIDI is taken as the reference, and the
 - **Tempo changes.** BASSMIDI advances a whole output sample at a time, fires an event -- a tempo change included -- on the first sample whose tick position has reached it, and carries the ticks that ran past a tempo change into the new tempo. Kestrel does the same, and agrees with it to 0.000 ms across 57 sections of back-to-back tempo changes. At ordinary tempos a sample is a fraction of a tick and nothing can be heard; in bursts of changes in the thousands of bpm it adds up to tens of milliseconds.
 - **Channel volume** powers on at 100, not 127.
 - **LFOs.** SFZ's amplitude and pitch LFOs were measured against BASSMIDI's: a triangle starting at zero, delayed from the note's own start, at the depth, rate and direction it plays them. SF2's run on the same oscillator. Every LFO and modulation envelope counts from its note's own start -- before 1.1.0 they could run up to a block early. They update once per `--gate-frames` (32 frames).
-- **Level** is the exception: see *Where it is still wrong*.
+- **Portamento.** CC65 turns it on, CC5 sets the speed and CC84 names the next note's starting key, as in BASSMIDI: a note glides in a straight line in pitch from the channel's last note, and CC5 = 0, the power-on value, means no glide. Kestrel's glides match BASSMIDI's speed to within 0.03%. Mono mode (CC126) is not implemented, so a note struck over a held one glides but does not cut it.
 
 ## Limiting
 
@@ -306,7 +310,6 @@ One command buffer per audio block, five compute passes: **steal**, **spawn**, *
 - **No effects.** No reverb, no chorus. CC91, CC93, CC94 and CC95 are recognised and do nothing. `kestrel info` on a MIDI marks the unimplemented controllers `MISSING` and reports what share of the file's controller events fall in that bucket.
 - **Note boundaries can click on presets with no attack or release.** Kestrel starts and stops a voice on its exact frame, where other synths apply a few milliseconds of fade. On a preset whose volume envelope is all defaults over a looped waveform -- a synth lead or a square-wave bass -- every note-on and note-off is then a step discontinuity, which reads as grit over the tone. It is the largest known audible gap.
 - **No realtime playback**, and **no host integration**: offline rendering only, no C ABI and no plugin build.
-- **Notes can keep sounding after the music stops, on some soundfonts.** Reported on a 44.7M-note file, from roughly two thirds of the way in. It reproduces at every pool size and on one soundfont but not another; the suspicion is note-offs arriving while the sustain pedal is down being deferred and never released. Not root-caused. If you hear it, `--limiter off` and a drier soundfont will tell you quickly whether it is the same thing.
 - **A render once failed with `buffer map failed: BufferAsyncError`.** Not reproduced. If you see it, the voice count, the MIDI and the soundfont are what would pin it down.
 - **On the densest files the host is the bottleneck.** MIDI reading and admission run on one CPU core, and a block carrying around a billion note-ons takes minutes of host work while the GPU waits.
 - **SFZ support is almost complete.** The common opcodes work, including `#include`, `#define`, velocity layers, `lorand`/`hirand`, velocity crossfade, `fil_veltrack`, `amp_veltrack`, `key`, `loopstart`/`loopend`, `pitch_keytrack`, `off_by`, and the amplitude and pitch LFOs (`amplfo_*`, `pitchlfo_*`). Not applied: `fillfo_depth`, the LFO `*_fade` opcodes (BASSMIDI ramps the depth in over them; Kestrel applies it at once), LFOs driven by a controller, SFZ v2's `lfoN_*`, `note_selfmask`, and the per-stage envelope velocity-tracking opcodes. Kestrel warns about every opcode it does not apply, so you will not hit this silently.

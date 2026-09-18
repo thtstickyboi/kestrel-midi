@@ -1,0 +1,58 @@
+# Comments extracted from src/bin/kestrel/update.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/bin/kestrel/update.rs:5
+//! Whether a newer Kestrel has been released: one request to GitHub's releases
+//! API, and a notice. Nothing is downloaded and nothing is installed -- the
+//! person follows the link and downloads the release themselves.
+//!
+//! That is also why a check costs nothing in the release's download counts.
+//! GitHub counts fetches of an asset file, and this reads only the release's
+//! description, so every count on the release page is still a person who
+//! downloaded it.
+//!
+//! The request carries no identifier and nothing about the machine: GitHub
+//! sees an address and a `kestrel/<version>` user agent, and Kestrel sees the
+//! latest release's tag.
+//!
+//! Which releases are announced is the person's update ring, chosen in Extras
+//! and kept in `ktrl.ini`: fast is every release, slow is feature releases
+//! only. `KESTREL_NO_UPDATE_CHECK` turns the check off.
+
+[2] src/bin/kestrel/update.rs:26
+/// The latest published release. Drafts and pre-releases are not "latest", so
+/// a draft being prepared never announces itself.
+
+[3] src/bin/kestrel/update.rs:46
+    /// Whether it is newer than this build. A development build ahead of the
+    /// latest release is not behind it.
+
+[4] src/bin/kestrel/update.rs:49
+    /// Whether it is newer in its major or minor number: a feature release,
+    /// which is all the slow ring announces. 1.2.0 over 1.1.x is, 1.1.1 over
+    /// 1.1.0 is not.
+
+[5] src/bin/kestrel/update.rs:70
+/// Ask GitHub. Bounded at a few seconds, so an offline machine or a filtered
+/// network costs a short wait and an error, never a hang.
+///
+/// curl rather than an HTTP crate, as `get-ffmpeg` does: it ships with
+/// Windows 10 1803+, macOS and almost every Linux, validates TLS against the
+/// system trust store, and adds no dependency.
+
+[6] src/bin/kestrel/update.rs:101
+        // curl's own error number, `(7) Failed to connect ...`, means nothing
+        // to the person reading it.
+
+[7] src/bin/kestrel/update.rs:130
+/// `v1.2.3` as `(1, 2, 3)`. A missing part is 0, and a pre-release or build
+/// suffix is ignored, which reads `1.2.0-rc1` as not newer than `1.2.0`.
+
+[8] src/bin/kestrel/update.rs:149
+/// `kestrel --force-cli check-update`. Asked for explicitly, so it checks
+/// whatever the ring, and says what the ring would have done.

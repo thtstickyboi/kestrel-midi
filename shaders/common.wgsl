@@ -193,7 +193,8 @@ struct Uniforms {
     menv_factor_half: u32,
     /// Where the shared `log2` mantissa table starts in `menv_factors`.
     menv_log2_base: u32,
-    pad0: u32,
+    /// Where portamento's speeds, and then its exponent table, start in \[17\]
+    glide_base: u32,
     pad1: u32,
 };
 
@@ -203,24 +204,24 @@ const CHAN_ACTIVE_GAIN: u32 = 2u;
 const CHAN_ACTIVE_VARIANT: u32 = 4u;
 const CHAN_ACTIVE_CUT: u32 = 8u;
 
-// [17]
+// [18]
 
 // Channels in a controller row. Sixteen, like the MIDI spec.
 const BEND_CHANNELS: u32 = 16u;
-// [18]
+// [19]
 const CHAN_FIELDS: u32 = 8u;
 const CHAN_BEND: u32 = 0u;
 const CHAN_GAIN_L: u32 = 1u;
 const CHAN_GAIN_R: u32 = 2u;
 const CHAN_VARIANT: u32 = 3u;
 const CHAN_CUT: u32 = 4u;
-// [19]
+// [20]
 const CHAN_CUT_ID_LO: u32 = 5u;
 const CHAN_CUT_ID_HI: u32 = 6u;
 // Fractional bits in a bend factor. Matches BEND_FRAC_BITS on the host.
 const BEND_SHIFT: u32 = 24u;
 
-// [20]
+// [21]
 fn steal_key(hi: u32, lo: u32, level_bits: u32) -> vec2<u32> {
     if (u.steal_by_level == 0u) {
         return vec2<u32>(hi, lo);
@@ -230,7 +231,7 @@ fn steal_key(hi: u32, lo: u32, level_bits: u32) -> vec2<u32> {
     return vec2<u32>((q << 16u) | (hi & 0xFFFFu), lo);
 }
 
-// [21]
+// [22]
 fn mul32(a: u32, b: u32) -> vec2<u32> {
     let a0 = a & 0xFFFFu;
     let a1 = a >> 16u;
@@ -247,7 +248,7 @@ fn mul32(a: u32, b: u32) -> vec2<u32> {
     return vec2<u32>(lo, hi);
 }
 
-// [22]
+// [23]
 fn scale64(hi: u32, lo: u32, factor: u32) -> vec2<u32> {
     let pl = mul32(lo, factor);   // product bits 0..63
     let ph = mul32(hi, factor);   // product bits 32..95
@@ -279,7 +280,7 @@ fn frac_of(lo: u32) -> f32 {
     return f32(lo) * (1.0 / 4294967296.0);
 }
 
-// [23]
+// [24]
 fn neighbour_index(idx: u32, off: i32, looping: bool, ls: u32, le: u32, len: u32) -> u32 {
     let raw = i32(idx) + off;
     if (looping) {
@@ -293,13 +294,13 @@ fn neighbour_index(idx: u32, off: i32, looping: bool, ls: u32, le: u32, len: u32
     return u32(clamp(raw, 0, i32(len) - 1));
 }
 
-// [24]
-
 // [25]
+
+// [26]
 const MOD_ENV_LOG2_BITS: u32 = 10u;
 const MOD_ENV_LOG2_FRAC_BITS: u32 = 8u;
 
-// [26]
+// [27]
 fn biquad_lowpass_pre(fc: f32, q_gain: f32, inv_2q: f32, sr: f32) -> vec4<f32> {
     let w0 = 6.2831855 * clamp(fc / sr, 1.0e-5, 0.49);
     let sin_w0 = sin(w0);
@@ -314,18 +315,18 @@ fn biquad_lowpass_pre(fc: f32, q_gain: f32, inv_2q: f32, sr: f32) -> vec4<f32> {
     return vec4<f32>(b0, b1, a1, a2);
 }
 
-// [27]
+// [28]
 const MOD_ENV_CENTS_STEPS: f32 = 64.0;
 
-// [28]
+// [29]
 fn mod_env_pitch_index(cents: f32, half: u32) -> u32 {
-    // [29]
+    // [30]
     let q = round(cents * MOD_ENV_CENTS_STEPS);
     let i = q + f32(half);
     return u32(clamp(i, 0.0, f32(half * 2u)));
 }
 
-// [30]
+// [31]
 fn quantise_level(x: f32) -> f32 {
     let t = i32(clamp(x, -2.0, 2.0) * 4194304.0);
     return f32(t) * (1.0 / 4194304.0);

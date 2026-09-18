@@ -34,16 +34,21 @@ pub trait Backend {
         menv: &[crate::bank::ModEnvParams],
     ) -> Result<()>;
 
-    /// Add voices to the pool. May steal or drop according to the configured \[5\]
+    /// Whether a voice may be gliding at any point of the next block, so that \[5\]
+    fn set_glide(&mut self, _active: bool) -> Result<()> {
+        Ok(())
+    }
+
+    /// Add voices to the pool. May steal or drop according to the configured \[6\]
     fn spawn(&mut self, cmds: &[SpawnCmd]) -> Result<()>;
 
-    /// Start rendering one block. Returns once the work is queued; the audio \[6\]
+    /// Start rendering one block. Returns once the work is queued; the audio \[7\]
     fn submit(&mut self) -> Result<()>;
 
-    /// Wait for the block started by `submit` and write it into `out`, \[7\]
+    /// Wait for the block started by `submit` and write it into `out`, \[8\]
     fn finish(&mut self, out: &mut [f32]) -> Result<()>;
 
-    /// Render one block, start to finish. \[8\]
+    /// Render one block, start to finish. \[9\]
     fn render(&mut self, out: &mut [f32]) -> Result<()> {
         self.submit()?;
         self.finish(out)
@@ -53,7 +58,7 @@ pub trait Backend {
 
     fn name(&self) -> &'static str;
 
-    /// Per-pass timings from the last block, for `--profile`. Empty when the \[9\]
+    /// Per-pass timings from the last block, for `--profile`. Empty when the \[10\]
     fn timings(&self) -> Vec<(&'static str, f64)> {
         Vec::new()
     }

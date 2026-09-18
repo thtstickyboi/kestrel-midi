@@ -1,0 +1,131 @@
+# Comments extracted from src/porta.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/porta.rs:5
+//! Portamento: CC5, CC65 and CC84, the way BASSMIDI does them.
+//!
+//! Measured 2026-09-18 on a looped sine, every rule below against BASSMIDI
+//! rather than the MIDI specification, which leaves most of it open:
+//!
+//! - **The glide is linear in pitch**, not in hertz and not an exponential
+//!   approach: a straight line in cents, within 1 to 3 cents of residual on
+//!   every glide slow enough to fit.
+//! - **CC5 sets a speed, not a duration.** At CC5 = 64 a glide moves 18.11
+//!   semitones a second whether it covers 5, 12 or 24 of them, up or down, and
+//!   from key 30, 60 or 84. The speeds are `RATE`, one measurement per value;
+//!   no simple curve fits them. CC5 = 0, which is also where a channel starts,
+//!   is no glide at all.
+//! - **A note glides from the previous note-on on its channel**, in stream
+//!   order: not the highest held note, not whatever is still sounding, and not
+//!   the pitch a still-gliding note has reached. It is remembered whether or not
+//!   CC65 was on when that note played, and it survives CC120, CC121, CC123 and
+//!   program changes. A chord glides note by note, each from the one before it
+//!   in the stream, even on the same tick. The first note a channel ever plays
+//!   has nothing to glide from.
+//! - **CC84 names the key the next note glides from**, once, and works with
+//!   CC65 off. Zero names nothing. CC5 still sets the speed, so CC84 with CC5 = 0
+//!   does nothing.
+//! - **A glide, once started, runs to its end.** CC65 off, a new CC5 and the
+//!   note-off all leave it alone; the speed is taken at the note-on.
+//! - **CC121 turns CC65 off** and leaves CC5 and a pending CC84 as they were.
+//! - Pitch bend and the LFOs multiply on top of it.
+//!
+//! BASSMIDI moves the pitch in 4 ms steps counted from the note-on, each one
+//! jumping to where a continuous glide would be at the end of the step, which
+//! puts it on average 2 ms ahead of the line. The glide here is continuous,
+//! held for a gate tile at a time like pitch bend, and 2 ms ahead.
+//!
+//! The probes and the measurements are in the development notes.
+//!
+//! # Where a glide lives
+//!
+//! In two words every voice already carries, not in a field of its own: one
+//! field is 4% of the pool's compaction bandwidth, and which files use
+//! portamento is not known until the stream reaches a CC65. The remaining
+//! length rides in the top 29 bits of the voice's flags, and the speed and
+//! direction in the top byte of its gate slot. See `spawn`.
+//!
+//! The pitch factor is exact integer arithmetic out of a shared table, as the
+//! modulation envelope's is, and for the same reason: a glide's offset persists
+//! long enough that an `exp2` the two backends compute differently integrates
+//! into the phase.
+
+[2] src/porta.rs:55
+/// Speed of a glide, in semitones a second, for each value of CC5. BASSMIDI's,
+/// fitted one value at a time over 24, 12 or 4 semitones. Values below about 15
+/// sit within 1% of the truth: BASSMIDI's 4 ms steps are a large share of a
+/// glide that fast. The rest agree across keys and intervals to 0.1%.
+
+[3] src/porta.rs:92
+/// Widest glide from above: just under eight octaves is what an 8.24 factor
+/// holds. A note gliding down from further away than that starts from 95
+/// semitones above. From below, all 127 fit.
+
+[4] src/porta.rs:99
+/// Where the remaining glide starts in the flags word: frames until the glide
+/// lands, counted from the first frame of the current block. Zero when the
+/// voice is not gliding, so `flags > FLAG_BITS` is "gliding".
+
+[5] src/porta.rs:108
+/// Set in a gate slot word when the note glides down onto its own pitch, from
+/// above.
+
+[6] src/porta.rs:112
+/// The exponent is evaluated as `2^(m / OCTAVE - MID_OCTAVES)`, with `m` kept
+/// non-negative for every offset `MAX_UP` and a 127-semitone rise allow.
+
+[7] src/porta.rs:116
+/// Largest offsets either way, as guards: `spawn` already keeps a glide inside
+/// them. Upwards, `m` stays below 19 octaves, so the factor below 256; downwards
+/// it stays at or above zero.
+
+[8] src/porta.rs:122
+/// The table both backends read: `RATES` per-frame speeds for this sample
+/// rate, in sixteenths of a cent with `RATE_FRAC_BITS` fractional bits, then
+/// `2^(i / OCTAVE)` in 2.30 for every step of one octave.
+///
+/// Built once in f64 and read by both, so neither computes a power.
+
+[9] src/porta.rs:143
+    /// `LEAD_SECONDS` plus half a gate tile, because the factor is evaluated
+    /// at the top of a tile and held across it.
+
+[10] src/porta.rs:166
+    /// The glide a voice starts with, as the bits to OR into its flags and its
+    /// gate slot. `semitones` is the key it glides from less its own key, and
+    /// `start_rel` the frame in the block it starts on.
+    ///
+    /// The remaining length is stored from the top of the block rather than
+    /// from the voice's start, so it counts down by a whole block at a time and
+    /// the frame within a block reads straight off it.
+
+[11] src/porta.rs:184
+/// The 8.24 pitch factor a gliding voice holds for the gate tile evaluated at
+/// frame `f` of the block. Exactly one once the glide has landed.
+///
+/// Mirrored by `glide_factor` in `render.wgsl`, operation for operation.
+
+[12] src/porta.rs:205
+/// The flags word after a block: the glide a block shorter, or gone once it
+/// has landed. Mirrored at the end of `render.wgsl`.
+
+[13] src/porta.rs:247
+            // At the voice's first frame the offset is the interval less the
+            // lead's worth of travel.
+
+[14] src/porta.rs:252
+            // A glide lasts a whole number of frames, so it can start up to one
+            // frame's travel short, plus the table's sixteenth of a cent.
+
+[15] src/porta.rs:275
+        // The factor at frame f of the next block is the factor at frame
+        // f + 4096 of this one.
+
+[16] src/porta.rs:306
+                // Ten octaves down an 8.24 factor is a few thousand counts, and
+                // one of them is a sixth of a cent.

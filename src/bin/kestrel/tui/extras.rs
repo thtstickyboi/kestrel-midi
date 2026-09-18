@@ -2,10 +2,12 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Extras: the diagnostic commands, in a window of their own. \[1\]
+//! Extras: the diagnostic commands, and what `ktrl.ini` keeps, in a window of \[1\]
 
-use super::style::{self, b, c, s, AMBER, DIM, ERR};
+use super::style::{self, b, c, s, AMBER, DIM, ERR, OK, WARN};
 use super::{prompt, Io, Native, Pick};
+use crate::settings::{self, Ring};
+use crate::update;
 use clap::CommandFactory;
 use std::path::Path;
 
@@ -96,7 +98,7 @@ pub fn run() -> anyhow::Result<()> {
             crossterm::terminal::SetTitle("Kestrel \u{00B7} Extras")
         );
     }
-    let mut io = Native::default();
+    let mut io = Native::remembered();
     menu(&mut io);
     Ok(())
 }
@@ -106,20 +108,26 @@ pub fn menu(io: &mut dyn Io) {
     loop {
         super::clear_screen();
         style::print_banner();
-        style::heading("Extras", "diagnostics");
+        style::heading("Extras", "diagnostics and settings");
         super::option("1", "GPU info", "every adapter wgpu can see, and its limits");
         super::option("2", "File info", "what the loader makes of a soundfont or MIDI");
         super::option("3", "Null test", "compare two WAV renders");
         super::option("4", "Flag help", "every flag, what it does, and how to use it");
-        super::option("5", "Close", "");
+        super::option(
+            "5",
+            "Update ring",
+            &format!("which releases Kestrel tells you about; now {}", ring_label(settings::load().0.ring)),
+        );
+        super::option("6", "Remembered folders", "where the MIDI, soundfont and destination pickers open");
+        super::option("7", "Close", "");
         let choice = loop {
             prompt();
             match io.line() {
                 None => return,
                 Some(l) => match l.trim() {
-                    "1" | "2" | "3" | "4" => break l.trim().to_string(),
-                    "5" | "0" | "q" | "Q" => return,
-                    _ => style::error("Type a number from 1 to 5."),
+                    "1" | "2" | "3" | "4" | "5" | "6" => break l.trim().to_string(),
+                    "7" | "0" | "q" | "Q" => return,
+                    _ => style::error("Type a number from 1 to 7."),
                 },
             }
         };
@@ -128,7 +136,13 @@ pub fn menu(io: &mut dyn Io) {
             "1" => gpu_info(),
             "2" => file_info(io),
             "3" => null_test(io),
-            _ => flag_help(),
+            "4" => flag_help(),
+            "5" => {
+                if !update_ring(io) {
+                    return;
+                }
+            }
+            _ => folders(),
         }
         style::blank();
         style::say(vec![c("Press Enter to go back to Extras.", DIM)]);
@@ -136,6 +150,78 @@ pub fn menu(io: &mut dyn Io) {
             return;
         }
     }
+}
+
+fn ring_label(ring: Ring) -> &'static str {
+    match ring {
+        Ring::Fast => "Fast Ring",
+        Ring::Slow => "Slow Ring",
+    }
+}
+
+fn ring_note(ring: Ring) -> &'static str {
+    match ring {
+        Ring::Fast => "every release, fixes such as 1.1.1 included",
+        Ring::Slow => "feature releases only, such as 1.2.0 or 2.0.0",
+    }
+}
+
+/// Choose the update ring, by its number. `false` once input has ended.
+fn update_ring(io: &mut dyn Io) -> bool {
+    style::heading("Update ring", "which new releases Kestrel tells you about when it starts");
+    style::say(vec![c("Kestrel only tells you about a release; it never downloads one.", DIM)]);
+    let current = settings::load().0.ring;
+    for ring in Ring::ALL {
+        let mark = if ring == current { c(" \u{25CF} ", OK) } else { s("   ") };
+        style::say(vec![
+            mark,
+            c(format!("[{}]", ring.number()), AMBER),
+            s(format!(" {:<24}", ring_label(ring))),
+            c(ring_note(ring), DIM),
+        ]);
+    }
+    if update::opted_out() {
+        style::detail(vec![c(
+            format!("{} is set on this machine, so Kestrel doesn't check at all.", update::OPT_OUT),
+            WARN,
+        )]);
+    }
+    let ring = loop {
+        prompt();
+        let Some(line) = io.line() else { return false };
+        match Ring::from_number(line.trim()) {
+            Some(ring) => break ring,
+            None => style::error("Type 1 or 2."),
+        }
+    };
+    style::blank();
+    match settings::update(|s| s.ring = ring) {
+        Ok(()) => style::status(
+            OK,
+            vec![
+                s(format!("Saved: {}.", ring_label(ring))),
+                c("  Used from the next time Kestrel starts.", DIM),
+            ],
+        ),
+        Err(e) => style::error(format!("Couldn't save {}: {e:#}", settings::FILE)),
+    }
+    true
+}
+
+fn folders() {
+    style::heading("Remembered folders", "where the render's file pickers open");
+    let saved = settings::load().0;
+    for (key, what) in settings::FOLDERS {
+        let dir = match saved.folder(key) {
+            Some(d) => s(d.display().to_string()),
+            None => c("not yet", DIM),
+        };
+        style::say(vec![s(format!("  {what:<26}")), dir]);
+    }
+    style::blank();
+    let place = settings::path().map_or_else(|_| settings::FILE.into(), |p| p.display().to_string());
+    style::say(vec![c("Filled in as you pick files, and kept in ", DIM), s(place)]);
+    style::say(vec![c(format!("Delete {} to forget them all.", settings::FILE), DIM)]);
 }
 
 fn gpu_info() {

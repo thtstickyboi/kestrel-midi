@@ -7,17 +7,18 @@
 # inline; its history is the place to compare versions.
 
 [1] src/bin/kestrel/tui/extras.rs:5
-//! Extras: the diagnostic commands, in a window of their own.
+//! Extras: the diagnostic commands, and what `ktrl.ini` keeps, in a window of
+//! their own.
 //!
 //! They print a lot and are read at leisure, which is the opposite of what the
 //! render flow wants from its window, so they get a second one. Where no new
 //! terminal window can be opened they run in the current one instead.
 
-[2] src/bin/kestrel/tui/extras.rs:16
+[2] src/bin/kestrel/tui/extras.rs:19
 /// The flag the new window is started with. Routed on only when it is the
 /// whole command line, and never listed in `--help`.
 
-[3] src/bin/kestrel/tui/extras.rs:29
+[3] src/bin/kestrel/tui/extras.rs:32
     // Through `start`, not by spawning the child with CREATE_NEW_CONSOLE. The
     // standard library always hands a child this process's standard handles,
     // so a child spawned straight into a new console window gets the window
@@ -26,14 +27,14 @@
     // (reported 2026-09-12). `start` gives the process in the new window that
     // window's own input and output.
 
-[4] src/bin/kestrel/tui/extras.rs:61
+[4] src/bin/kestrel/tui/extras.rs:64
     // No standard way to ask for a terminal, so try the usual ones in turn,
     // starting with whatever the session says it prefers.
 
-[5] src/bin/kestrel/tui/extras.rs:101
+[5] src/bin/kestrel/tui/extras.rs:104
     // These are the command-line tools, and they report the way the command
     // line does.
 
-[6] src/bin/kestrel/tui/extras.rs:203
+[6] src/bin/kestrel/tui/extras.rs:290
 /// Every public subcommand's flags, straight from the clap definitions that
 /// parse them, so this can never describe a flag that does not exist.

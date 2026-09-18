@@ -95,21 +95,25 @@
     /// Half-width of the modulation envelope's pitch-factor table, in
     /// sixteenths of a cent.
 
-[17] shaders/common.wgsl:247
+[17] shaders/common.wgsl:237
+    /// Where portamento's speeds, and then its exponent table, start in
+    /// `menv_factors`. See `porta::tables`.
+
+[18] shaders/common.wgsl:249
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 
-[18] shaders/common.wgsl:253
+[19] shaders/common.wgsl:255
 // Words per channel: bend, left gain, right gain, variant, the CC120 cut,
 // and spares to keep the stride a power of two. Mirrors `voice::CHAN_FIELDS`.
 
-[19] shaders/common.wgsl:261
+[20] shaders/common.wgsl:263
 // The note id that cut applies below. See `voice::CHAN_CUT_ID_LO`: a CC120
 // silences by event order, not by frame, and a file that uses it as a choke
 // puts the cut and the restrike on the same frame.
 
-[20] shaders/common.wgsl:269
+[21] shaders/common.wgsl:271
 // The 64-bit key voice stealing selects the k smallest of, as (hi, lo). The
 // caller loads the words; this only decides how they are combined, so that the
 // selection and the marking cannot disagree about the ordering.
@@ -123,7 +127,7 @@
 // exactly 0.0. A note id needs 48 bits to stay unique for any file this will
 // see -- 2.8e14 against the 5.5e9 of the largest known.
 
-[21] shaders/common.wgsl:290
+[22] shaders/common.wgsl:292
 // 32.32 fixed point, held as two u32 lanes because WGSL has no portable u64.
 // `mul32` / `scale64` / `add64` / `less64` below are that arithmetic.
 //
@@ -131,7 +135,7 @@
 // version in 16-bit limbs, with the middle carry handled explicitly because
 // `p01 + p10` overflows 32 bits.
 
-[22] shaders/common.wgsl:312
+[23] shaders/common.wgsl:314
 // Scale a 32.32 value by an 8.24 fixed-point factor, truncating, saturating
 // rather than wrapping. Returns (hi, lo) like `add64`.
 //
@@ -139,11 +143,11 @@
 // bent voice gets its step, and a step that differs in its low bits does not
 // null as an error, it nulls as two renders drifting apart over a block.
 
-[23] shaders/common.wgsl:349
+[24] shaders/common.wgsl:351
 // The index `off` frames away from `idx`, honouring the loop. Mirrors
 // `CpuSynth::advance_index` statement for statement.
 
-[24] shaders/common.wgsl:364
+[25] shaders/common.wgsl:366
 // ---------------------------------------------------------------------------
 // modulation envelope
 // ---------------------------------------------------------------------------
@@ -151,30 +155,30 @@
 // binds the tables it reads. What is here is what the other passes can also
 // see, and the constants both sides have to agree on.
 
-[25] shaders/common.wgsl:371
+[26] shaders/common.wgsl:373
 // Entries in the shared `log2` mantissa table, and the bits used to
 // interpolate between two of them. Mirror `bank::MOD_ENV_LOG2_BITS`.
 
-[26] shaders/common.wgsl:376
+[27] shaders/common.wgsl:378
 // `biquad_lowpass` with the resonance-dependent terms already computed on the
 // host. Mirrors `bank::biquad_lowpass_pre`; only the sine and the cosine are
 // left for the two backends to agree on.
 
-[27] shaders/common.wgsl:393
+[28] shaders/common.wgsl:395
 // Steps per cent in the modulation envelope's pitch-factor table. Mirrors
 // `bank::MOD_ENV_CENTS_STEPS`, where the reason for the table is written down.
 
-[28] shaders/common.wgsl:397
+[29] shaders/common.wgsl:399
 // Index into the pitch-factor table. Mirrors `bank::mod_env_pitch_index`, and
 // built out of `floor` and a clamp rather than a cast because those are
 // exactly specified everywhere -- which is the whole point of the table.
 
-[29] shaders/common.wgsl:401
+[30] shaders/common.wgsl:403
     // `round` rather than `floor(x + 0.5)`: the addition would sit next to the
     // multiply and be contracted into a fused multiply-add here but not on the
     // host. Ties go to even on both sides.
 
-[30] shaders/common.wgsl:409
+[31] shaders/common.wgsl:411
 // Round to a multiple of 2^-22, through an integer. Mirrors
 // `bank::quantise_level`, where what this is for is written down: the integer
 // conversion forces the multiply feeding it to be rounded, so a compiler cannot

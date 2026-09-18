@@ -21,6 +21,8 @@ mod style;
 
 use kestrel::session::{self, Job, Plan, Summary};
 use crate::{Cli, Cmd, RenderArgs};
+use crate::settings::{self, Ring};
+use crate::update::{self, Latest};
 use anyhow::Result;
 use checks::{FontProfile, MidiInfo, Verdict, VoiceAnswer};
 use clap::Parser;
@@ -41,8 +43,9 @@ use unicode_width::UnicodeWidthStr;
 // ---- input ----------------------------------------------------------------
 
 /// What a picker asks for. Each kind remembers the folder it was last answered
-/// from for the rest of the session, so a second render starts where the first
-/// one's files were.
+/// from for the rest of the session. The render flow's three -- MIDI,
+/// soundfont and destination -- also keep it in `ktrl.ini`, so a render starts
+/// where the last one's files were, even the last time Kestrel ran.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Pick {
     Midi,
@@ -50,6 +53,20 @@ pub enum Pick {
     Inspect,
     Wav,
     Folder,
+}
+
+impl Pick {
+    const SAVED: [Pick; 3] = [Pick::Midi, Pick::Soundfont, Pick::Folder];
+
+    /// Its line in `ktrl.ini`'s `[folders]`, for the kinds kept there.
+    fn key(self) -> Option<&'static str> {
+        match self {
+            Pick::Midi => Some("midi"),
+            Pick::Soundfont => Some("soundfont"),
+            Pick::Folder => Some("output"),
+            Pick::Inspect | Pick::Wav => None,
+        }
+    }
 }
 
 /// Everything the flow reads from the person at the keyboard. A trait so a
@@ -63,9 +80,52 @@ pub trait Io {
 }
 
 /// The keyboard and the platform's own file pickers.
-#[derive(Default)]
 pub struct Native {
     dirs: HashMap<Pick, PathBuf>,
+    /// Set once saving a folder has failed, so the warning is given once.
+    unsaved: bool,
+}
+
+impl Native {
+    /// Opening where `ktrl.ini` says each picker was last answered from.
+    pub fn remembered() -> Self {
+        let (saved, _) = settings::load();
+        let dirs = Pick::SAVED
+            .into_iter()
+            .filter_map(|kind| {
+                let dir = saved.folder(kind.key()?)?;
+                Some((kind, dir.to_path_buf()))
+            })
+            .collect();
+        Native { dirs, unsaved: false }
+    }
+
+    fn remember(&mut self, kind: Pick, dir: PathBuf) {
+        if self.dirs.get(&kind) == Some(&dir) {
+            return;
+        }
+        let saved = match kind.key() {
+            Some(key) => settings::update(|s| s.set_folder(key, &dir)),
+            None => Ok(()),
+        };
+        self.dirs.insert(kind, dir);
+        if let Err(e) = saved {
+            if !self.unsaved {
+                self.unsaved = true;
+                style::warn(format!(
+                    "Couldn't save {} ({e:#}), so folders won't be remembered next time.",
+                    settings::FILE
+                ));
+            }
+        }
+    }
+
+    /// A remembered folder that still exists. One since deleted or on a drive
+    /// no longer attached is passed over, and the picker opens wherever the
+    /// system chooses.
+    fn dir(&self, kind: Pick) -> Option<&Path> {
+        self.dirs.get(&kind).map(PathBuf::as_path).filter(|d| d.is_dir())
+    }
 }
 
 impl Io for Native {
@@ -89,7 +149,7 @@ impl Io for Native {
             Pick::Folder => dialog,
         };
         dialog = dialog.add_filter("All files", &["*"]);
-        if let Some(dir) = self.dirs.get(&kind) {
+        if let Some(dir) = self.dir(kind) {
             dialog = dialog.set_directory(dir);
         }
         let picked = match kind {
@@ -97,18 +157,18 @@ impl Io for Native {
             _ => vec![dialog.pick_file()?],
         };
         if let Some(dir) = picked.first().and_then(|p| p.parent()) {
-            self.dirs.insert(kind, dir.to_path_buf());
+            self.remember(kind, dir.to_path_buf());
         }
         Some(picked)
     }
 
     fn pick_folder(&mut self, title: &str, start: Option<&Path>) -> Option<PathBuf> {
         let mut dialog = rfd::FileDialog::new().set_title(title);
-        if let Some(dir) = self.dirs.get(&Pick::Folder).map(PathBuf::as_path).or(start) {
+        if let Some(dir) = self.dir(Pick::Folder).or(start) {
             dialog = dialog.set_directory(dir);
         }
         let picked = dialog.pick_folder()?;
-        self.dirs.insert(Pick::Folder, picked.clone());
+        self.remember(Pick::Folder, picked.clone());
         Some(picked)
     }
 }
@@ -224,6 +284,10 @@ struct Env {
     default_adapter: Option<usize>,
     gpu_error: Option<String>,
     ffmpeg: Result<Ffmpeg, String>,
+    /// The update ring the check ran on, as `ktrl.ini` had it at startup.
+    ring: Ring,
+    /// `None` when the check is turned off.
+    update: Option<Result<Latest, String>>,
 }
 
 impl Env {
@@ -322,6 +386,11 @@ fn adapter_lines(env: &Env) -> Vec<Line> {
 
 fn check_environment() -> Env {
     style::heading("Checking the environment", "");
+    let (saved, problems) = settings::load();
+    let ring = saved.ring;
+    // Started first, so the request runs behind the adapter survey rather than
+    // after it, and is usually answered before anything waits on it.
+    let update = (!update::opted_out()).then(|| std::thread::spawn(update::check));
     let cfg = Config::default();
     let survey = spin("Looking for GPU adapters", || kestrel::gpu::survey(&cfg));
     let _ = capture::problems();
@@ -330,11 +399,18 @@ fn check_environment() -> Env {
         Err(e) => (Vec::new(), None, Some(format!("{e:#}"))),
     };
     let ffmpeg = spin("Looking for ffmpeg", probe_ffmpeg);
+    let update = update.map(|check| match spin("Checking for updates", || check.join()) {
+        Ok(Ok(latest)) => Ok(latest),
+        Ok(Err(e)) => Err(format!("{e:#}")),
+        Err(_) => Err("the check failed".into()),
+    });
     let env = Env {
         adapters,
         default_adapter,
         gpu_error,
         ffmpeg,
+        ring,
+        update,
     };
 
     match (&env.gpu_error, env.default_adapter()) {
@@ -376,10 +452,38 @@ fn check_environment() -> Env {
             )]);
         }
     }
+
+    // An offline machine gets a dim line, not a warning: nothing about a render
+    // depends on the answer.
+    match &env.update {
+        Some(Ok(latest)) if latest.announced(env.ring) => {
+            style::status(
+                AMBER,
+                vec![
+                    b(format!("Kestrel {} is out", latest.version), AMBER),
+                    c(format!("  you have {}", update::CURRENT), DIM),
+                ],
+            );
+            style::detail(vec![c(latest.url.clone(), DIM)]);
+        }
+        Some(Ok(_)) if env.ring == Ring::Slow => {
+            style::status(OK, vec![s("Kestrel is up to date"), c("  Slow Ring", DIM)])
+        }
+        Some(Ok(_)) => style::status(OK, vec![s("Kestrel is up to date")]),
+        Some(Err(e)) => {
+            style::status(DIM, vec![c("Couldn't check for updates", DIM)]);
+            style::detail(vec![c(e.clone(), DIM)]);
+        }
+        None => {}
+    }
+    for problem in problems {
+        style::warn(format!("{}: {problem}", settings::FILE));
+    }
     env
 }
 
-/// The environment in two lines, for the top of every screen after the first.
+/// The environment in two lines, for the top of every screen after the first,
+/// and a third while a newer release is out.
 fn compact_env(env: &Env) {
     match env.default_adapter() {
         Some(a) => style::status(
@@ -401,6 +505,17 @@ fn compact_env(env: &Env) {
     match &env.ffmpeg {
         Ok(f) => style::status(OK, vec![s("ffmpeg "), c(f.version.clone(), DIM)]),
         Err(_) => style::status(WARN, vec![s("ffmpeg not found"), c("  WAV only", DIM)]),
+    }
+    if let Some(Ok(latest)) = &env.update {
+        if latest.announced(env.ring) {
+            style::status(
+                AMBER,
+                vec![
+                    b(format!("Kestrel {} is out", latest.version), AMBER),
+                    c(format!("  {}", latest.url), DIM),
+                ],
+            );
+        }
     }
 }
 
@@ -452,7 +567,7 @@ pub fn run() -> Result<()> {
     if std::io::stdout().is_tty() {
         let _ = execute!(std::io::stdout(), terminal::SetTitle("Kestrel"));
     }
-    let mut io = Native::default();
+    let mut io = Native::remembered();
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| guided(&mut io)));
     let failure = match outcome {
         Ok(Ok(())) => None,
@@ -588,7 +703,7 @@ fn main_menu(io: &mut dyn Io) -> Choice {
     style::heading("What would you like to do?", "");
     option("1", "Single / Multiple MIDIs", "render a MIDI to audio");
     option("2", "Per-Track Render", "coming soon");
-    option("3", "Extras", "GPU info, file info, null test, flag help");
+    option("3", "Extras", "GPU info, file info, null test, flag help, updates");
     option("4", "Exit", "");
     loop {
         prompt();
@@ -627,6 +742,12 @@ fn render_loop(io: &mut dyn Io, env: &Env) -> Result<Next> {
         }
         style::detail(writes);
         let ready = step!(step_flags(io, env, &midi, &fonts, voices, &out));
+        // The render holds its own handle on this bank when it can use it,
+        // and loads a new one when a typed flag changes how soundfonts load.
+        // Either way this handle is done with. Kept, it held the step 2 bank
+        // resident under the reloaded one: 1.9 GiB against 1.2 GiB for a
+        // 757 MiB piano with `--volume 80` typed (2026-09-18).
+        drop(fonts.bank);
 
         let labels = progress::Labels {
             midi: file_name(&midi.path),

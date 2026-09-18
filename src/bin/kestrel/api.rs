@@ -41,6 +41,7 @@ const COMMANDS: &[&str] = &[
     "set_interval",
     "snapshot",
     "status",
+    "check_update",
     "shutdown",
 ];
 
@@ -235,7 +236,7 @@ pub fn run() -> Result<()> {
                 respond_ok(&id, json!({"unloaded": was}));
             }
             // [13]
-            "adapters" | "ffmpeg" | "options" | "inspect_midi" => {
+            "adapters" | "ffmpeg" | "options" | "inspect_midi" | "check_update" => {
                 let (cmd, id, req) = (cmd.to_string(), id.clone(), req.clone());
                 quick.retain(|h| !h.is_finished());
                 quick.push(std::thread::spawn(move || {
@@ -243,6 +244,7 @@ pub fn run() -> Result<()> {
                         "adapters" => adapters(),
                         "ffmpeg" => ffmpeg(&req),
                         "options" => Ok(options()),
+                        "check_update" => check_update(),
                         _ => inspect_midi(&req),
                     };
                     match result {
@@ -723,6 +725,23 @@ fn adapters() -> Result<Value> {
     Ok(json!({"adapters": adapters}))
 }
 
+/// The guided renderer's update check, on the person's update ring from \[18\]
+fn check_update() -> Result<Value> {
+    if crate::update::opted_out() {
+        bail!("update checks are turned off by {}", crate::update::OPT_OUT);
+    }
+    let ring = crate::settings::load().0.ring;
+    let latest = crate::update::check().context("couldn't check for updates")?;
+    Ok(json!({
+        "current": crate::update::CURRENT,
+        "latest": latest.version,
+        "newer": latest.newer,
+        "ring": ring.name(),
+        "announce": latest.announced(ring),
+        "url": latest.url,
+    }))
+}
+
 fn ffmpeg(req: &Map<String, Value>) -> Result<Value> {
     let explicit = match req.get("path") {
         None | Some(Value::Null) => None,
@@ -766,7 +785,7 @@ fn inspect_midi(req: &Map<String, Value>) -> Result<Value> {
             "format": m.format,
             "tracks": m.tracks,
             "division": division_value(m.division),
-            // [18]
+            // [19]
             "warnings": m.notes,
         }),
         Verdict::Invalid { path, reason } => json!({
@@ -797,7 +816,7 @@ struct OptionSpec {
     help: String,
 }
 
-/// Every option `render` takes that a request passes in `options`, read off \[19\]
+/// Every option `render` takes that a request passes in `options`, read off \[20\]
 fn option_specs() -> Vec<OptionSpec> {
     let cli = Cli::command();
     let render = cli
@@ -867,7 +886,7 @@ fn options() -> Value {
 
 // ---- Options to arguments -------------------------------------------------
 
-/// Turn `options` into the arguments the command line would have been given. \[20\]
+/// Turn `options` into the arguments the command line would have been given. \[21\]
 fn option_flags(options: Option<&Value>) -> Result<Vec<String>> {
     let map = match options {
         None | Some(Value::Null) => return Ok(Vec::new()),
@@ -900,7 +919,7 @@ fn option_flags(options: Option<&Value>) -> Result<Vec<String>> {
             Value::Null => continue,
             Value::String(s) => s.clone(),
             Value::Bool(b) => b.to_string(),
-            // [21]
+            // [22]
             Value::Number(n) => match n.as_f64() {
                 Some(f) if !n.is_i64() && !n.is_u64() && f.fract() == 0.0 && f.abs() < 9.0e15 => {
                     format!("{}", f as i64)
@@ -979,7 +998,7 @@ fn parse_render(argv: Vec<OsString>) -> Result<RenderArgs> {
             _ => unreachable!("the argument list names the render subcommand"),
         },
         Err(e) => {
-            // [22]
+            // [23]
             let text = e.render().to_string();
             let kept: Vec<&str> = text
                 .lines()
