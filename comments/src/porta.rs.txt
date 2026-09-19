@@ -71,31 +71,35 @@
 /// lands, counted from the first frame of the current block. Zero when the
 /// voice is not gliding, so `flags > FLAG_BITS` is "gliding".
 
-[5] src/porta.rs:108
+[5] src/porta.rs:104
+/// The part of a gate slot word that is the slot. Bits 11-23 are the voice's
+/// position on the envelope grid, `voice::GRID_SHIFT`.
+
+[6] src/porta.rs:109
 /// Set in a gate slot word when the note glides down onto its own pitch, from
 /// above.
 
-[6] src/porta.rs:112
+[7] src/porta.rs:113
 /// The exponent is evaluated as `2^(m / OCTAVE - MID_OCTAVES)`, with `m` kept
 /// non-negative for every offset `MAX_UP` and a 127-semitone rise allow.
 
-[7] src/porta.rs:116
+[8] src/porta.rs:117
 /// Largest offsets either way, as guards: `spawn` already keeps a glide inside
 /// them. Upwards, `m` stays below 19 octaves, so the factor below 256; downwards
 /// it stays at or above zero.
 
-[8] src/porta.rs:122
+[9] src/porta.rs:123
 /// The table both backends read: `RATES` per-frame speeds for this sample
 /// rate, in sixteenths of a cent with `RATE_FRAC_BITS` fractional bits, then
 /// `2^(i / OCTAVE)` in 2.30 for every step of one octave.
 ///
 /// Built once in f64 and read by both, so neither computes a power.
 
-[9] src/porta.rs:143
+[10] src/porta.rs:144
     /// `LEAD_SECONDS` plus half a gate tile, because the factor is evaluated
     /// at the top of a tile and held across it.
 
-[10] src/porta.rs:166
+[11] src/porta.rs:167
     /// The glide a voice starts with, as the bits to OR into its flags and its
     /// gate slot. `semitones` is the key it glides from less its own key, and
     /// `start_rel` the frame in the block it starts on.
@@ -104,28 +108,28 @@
     /// from the voice's start, so it counts down by a whole block at a time and
     /// the frame within a block reads straight off it.
 
-[11] src/porta.rs:184
+[12] src/porta.rs:185
 /// The 8.24 pitch factor a gliding voice holds for the gate tile evaluated at
 /// frame `f` of the block. Exactly one once the glide has landed.
 ///
 /// Mirrored by `glide_factor` in `render.wgsl`, operation for operation.
 
-[12] src/porta.rs:205
+[13] src/porta.rs:206
 /// The flags word after a block: the glide a block shorter, or gone once it
 /// has landed. Mirrored at the end of `render.wgsl`.
 
-[13] src/porta.rs:247
+[14] src/porta.rs:248
             // At the voice's first frame the offset is the interval less the
             // lead's worth of travel.
 
-[14] src/porta.rs:252
+[15] src/porta.rs:253
             // A glide lasts a whole number of frames, so it can start up to one
             // frame's travel short, plus the table's sixteenth of a cent.
 
-[15] src/porta.rs:275
+[16] src/porta.rs:276
         // The factor at frame f of the next block is the factor at frame
         // f + 4096 of this one.
 
-[16] src/porta.rs:306
+[17] src/porta.rs:307
                 // Ten octaves down an 8.24 factor is a few thousand counts, and
                 // one of them is a sixth of a cent.

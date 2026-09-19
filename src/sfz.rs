@@ -669,9 +669,20 @@ const UNIMPLEMENTED_GROUPS: &[(&str, &[&str])] = &[
     ("CC labelling", &["set_cc", "label_cc", "label_key"]),
 ];
 
+/// Controller ranges: `loccN`/`hiccN`, which gate a region on a controller's \[25\]
+const SILENT_CC_RANGES: &[&str] =
+    &["locc", "hicc", "xfin_locc", "xfin_hicc", "xfout_locc", "xfout_hicc"];
+
+fn silently_ignored(op: &str) -> bool {
+    SILENT_CC_RANGES.iter().any(|p| {
+        op.strip_prefix(p)
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    })
+}
+
 fn note_unhandled(ops: &OpcodeSet, unknown: &mut HashMap<String, u32>) {
     for k in ops.0.keys() {
-        if KNOWN_OPCODES.contains(&k.as_str()) {
+        if KNOWN_OPCODES.contains(&k.as_str()) || silently_ignored(k) {
             continue;
         }
         let group = UNIMPLEMENTED_GROUPS
@@ -696,7 +707,7 @@ fn region_from_opcodes(
         ..Default::default()
     };
 
-    // [25]
+    // [26]
     if let Some(k) = ops.key("lokey") {
         r.key_lo = k.clamp(0, 127) as u8;
     }
@@ -735,7 +746,7 @@ fn region_from_opcodes(
         r.amp_veltrack = v.clamp(-100.0, 100.0);
     }
 
-    // [26]
+    // [27]
     r.loop_mode = match ops.get("loop_mode").unwrap_or("") {
         "loop_continuous" => LoopMode::Continuous,
         "loop_sustain" => LoopMode::UntilRelease,
@@ -749,14 +760,14 @@ fn region_from_opcodes(
                 LoopMode::NoLoop
             }
         }
-        // [27]
+        // [28]
         other => {
             unhandled.push(format!("loop_mode={other} (unknown, treated as no_loop)"));
             LoopMode::NoLoop
         }
     };
 
-    // [28]
+    // [29]
     if let Some(v) = ops.i32("xfin_lovel") {
         r.xfin_lo = v.clamp(0, 127) as u8;
     }
@@ -769,7 +780,7 @@ fn region_from_opcodes(
     if let Some(v) = ops.i32("xfout_hivel") {
         r.xfout_hi = v.clamp(0, 127) as u8;
     }
-    // [29]
+    // [30]
     if r.xfin_hi < r.xfin_lo {
         unhandled.push("xfin_hivel < xfin_lovel (ignored)".to_string());
         r.xfin_lo = 0;
@@ -781,7 +792,7 @@ fn region_from_opcodes(
         r.xfout_hi = 127;
     }
 
-    // [30]
+    // [31]
     if let Some(v) = ops.f32("lorand") {
         r.rand_lo = v.clamp(0.0, 1.0);
     }
@@ -793,7 +804,7 @@ fn region_from_opcodes(
             "lorand={} > hirand={} (empty range, ignored)",
             r.rand_lo, r.rand_hi
         ));
-        // [31]
+        // [32]
         r.rand_lo = 0.0;
         r.rand_hi = 1.0;
     }
@@ -801,7 +812,7 @@ fn region_from_opcodes(
     if let Some(o) = ops.i32("offset") {
         r.addr_start = o.max(0);
     }
-    // [32]
+    // [33]
     let to_source = |resampled: u32| {
         if info.resample_ratio > 0.0 {
             (resampled as f32 / info.resample_ratio).round() as i32
@@ -821,7 +832,7 @@ fn region_from_opcodes(
         r.addr_loop_end = le - to_source(info.loop_end);
     }
 
-    // [33]
+    // [34]
     if let Some(d) = ops.f32("amplfo_depth") {
         r.mod_lfo_to_volume = -10.0 * d;
         r.mod_lfo_hz = ops.f32("amplfo_freq").unwrap_or(0.0).max(0.0);
@@ -832,7 +843,7 @@ fn region_from_opcodes(
         r.vib_lfo_hz = ops.f32("pitchlfo_freq").unwrap_or(0.0).max(0.0);
         r.vib_lfo_delay = ops.f32("pitchlfo_delay").unwrap_or(0.0).max(0.0);
     }
-    // [34]
+    // [35]
     if ops.f32("fillfo_depth").is_some_and(|d| d != 0.0) {
         unhandled.push("fillfo_depth (the filter LFO is not implemented)".to_string());
     }
@@ -860,20 +871,20 @@ fn region_from_opcodes(
     if let Some(vt) = ops.f32("fil_veltrack") {
         r.filter_veltrack_cents = vt.clamp(-9600.0, 9600.0);
     }
-    // [35]
+    // [36]
     if let Some(kind) = ops.get("fil_type") {
         if !kind.starts_with("lpf") {
             r.filter_fc_cents = 13500.0;
             r.filter_veltrack_cents = 0.0;
         }
     }
-    // [36]
+    // [37]
     let group_id = ops.i32("group").unwrap_or(0).clamp(0, 255);
     match ops.i32("off_by") {
         Some(off) if off.clamp(0, 255) == group_id && group_id > 0 => {
             r.exclusive_class = group_id as u8;
         }
-        // [37]
+        // [38]
         Some(_) => unhandled.push("off_by (cross-group, not implemented)".to_string()),
         None => {}
     }
@@ -891,6 +902,16 @@ mod tests {
         assert_eq!(parse_note_name("a4"), Some(69));
         assert_eq!(parse_note_name("c#4"), Some(61));
         assert_eq!(parse_note_name("c-1"), Some(0));
+    }
+
+    #[test]
+    fn controller_ranges_are_ignored_quietly_and_nothing_else_is() {
+        for op in ["locc1", "hicc64", "xfin_locc14", "xfin_hicc14", "xfout_locc20", "xfout_hicc127"] {
+            assert!(silently_ignored(op), "{op}");
+        }
+        for op in ["locc", "xfin_lovel", "on_locc64", "hicc1x", "loccN", "xfin_locc", "xf_cccurve"] {
+            assert!(!silently_ignored(op), "{op}");
+        }
     }
 
     #[test]
@@ -939,14 +960,14 @@ mod tests {
         assert_eq!(out, ["sample=WYV-64-64.wav"]);
     }
 
-    /// `$KEY` and `$KEYS` can both be defined. Replacing the shorter one first \[38\]
+    /// `$KEY` and `$KEYS` can both be defined. Replacing the shorter one first \[39\]
     #[test]
     fn longest_name_wins() {
         let out = expand(&["#define $KEY a", "#define $KEYS b", "sample=$KEYS/$KEY.wav"]);
         assert_eq!(out, ["sample=b/a.wav"]);
     }
 
-    /// Redefinition takes effect from that point on, which is how a library \[39\]
+    /// Redefinition takes effect from that point on, which is how a library \[40\]
     #[test]
     fn redefinition_applies_from_that_point() {
         let out = expand(&["#define $L 1", "a=$L", "#define $L 2", "b=$L"]);
@@ -965,7 +986,7 @@ mod tests {
         assert_eq!(out, ["sample=root/v1/s.wav"]);
     }
 
-    /// Left in place rather than blanked, so it survives into the resolved \[40\]
+    /// Left in place rather than blanked, so it survives into the resolved \[41\]
     #[test]
     fn an_undefined_name_survives_for_the_report() {
         let out = expand(&["#define $A a", "sample=$A-$NOPE.wav"]);

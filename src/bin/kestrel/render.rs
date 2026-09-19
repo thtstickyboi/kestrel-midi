@@ -26,7 +26,7 @@ impl RenderArgs {
                 .expect("clap limits --format to the two names SampleFormat parses"),
             ceiling_db: self.ceiling_db,
             seconds: self.seconds,
-            block_csv: self.block_csv.clone(),
+            block_csv: self.dev_args().block_csv,
             backend,
             cfg,
         })

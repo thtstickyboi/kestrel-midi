@@ -12,8 +12,9 @@ A session can list GPUs and ffmpeg, describe MIDIs and soundfonts, list every re
 
 - **Kestrel speaks first.** The first line is `ready`:
   ```json
-  {"type": "ready", "api": 1, "version": "1.1.0", "commands": ["adapters", "ffmpeg", "..."]}
+  {"type": "ready", "api": 1, "version": "1.1.2", "build": "release", "commands": ["adapters", "ffmpeg", "..."]}
   ```
+  `build` is `release` for the downloadable zips and `dev` for a build made with `--features dev`, which takes the developer options too (from 1.1.2; absent before).
 - **A request** is an object with an `id` of your choosing (a number or a string) and a `cmd`:
   ```json
   {"id": 7, "cmd": "inspect_midi", "path": "C:/Music/song.mid"}
@@ -65,14 +66,16 @@ A render with no `soundfonts` uses the loaded ones. **A loaded soundfont is reus
 {"key": "max_voices", "flag": "--max-voices", "kind": "value", "default": "1048576", "values": [],
  "value_name": "MAX_VOICES", "reloads_soundfonts": false, "help": "Most voices sounding at once. ..."}
 {"key": "limiter", "flag": "--limiter", "kind": "value", "default": "brickwall", "values": ["brickwall", "omni", "off"], "...": "..."}
-{"key": "no_lfo", "flag": "--no-lfo", "kind": "switch", "default": false, "...": "..."}
+{"key": "note_grid", "flag": "--note-grid", "kind": "switch", "default": false, "...": "..."}
 ```
+
+**The list depends on the build.** From 1.1.2 the release build leaves out the developer options (engine tuning, switches back to old behaviour, diagnostics such as `no_lfo`, `steal` or `block_csv`), and a render that names one gets `unknown option`. A dev build lists and takes them. Build a GUI from `options` rather than from a list of your own, and it works with either.
 
 Pass options as an object under `options`, keyed by `key`:
 
 ```json
 {"id": 3, "cmd": "render", "midi": "song.mid", "out": "song.flac",
- "options": {"max_voices": 4194304, "limiter": "omni", "volume": 80, "no_lfo": true}}
+ "options": {"max_voices": 4194304, "limiter": "omni", "volume": 80, "note_grid": true}}
 ```
 
 - A `switch` takes `true` or `false`. A `value` takes a string or a number. `null` leaves an option at its default.

@@ -128,22 +128,23 @@
     /// which reproduces SF2 hold without needing a fifth envelope stage.
 
 [19] src/bank.rs:293
-    /// bit 0: run the filter. Bits 16..32 are `modLfoToVolume` as an `i16`,
-    /// in centibels.
+    /// bit 0: run the filter (`RP_FILTER`); bit 1, `RP_MOD_ENV`; bit 2,
+    /// `RP_SHORT_RELEASE`. Bits 16..32 are `modLfoToVolume` as an `i16`, in
+    /// centibels.
     ///
     /// Packed rather than given a word of its own because this struct is read
     /// scattered, once per voice, and 16 words is 64 bytes -- one cache line.
     /// Seventeen would be two, and on a pool of a million voices that is a
     /// measured 5% whether or not the bank uses an LFO at all.
 
-[20] src/bank.rs:302
+[20] src/bank.rs:303
     // ---- LFOs, precomputed per frame ------------------------------------
     //
     // Phase increments are u32 fractions of a full turn, so the accumulator
     // wraps for free and a voice's phase is `(age - delay) * inc` with no
     // conditional. Delays are in frames. See `lfo_tri` for the waveform.
 
-[21] src/bank.rs:315
+[21] src/bank.rs:316
 /// SF2's LFO waveform: a triangle starting at zero, in `[-1, 1]`.
 ///
 /// Rises to +1 a quarter of the way through, back through zero at half, to -1
@@ -151,13 +152,13 @@
 /// wrap free and keeps both backends on identical integer arithmetic up to the
 /// final divide.
 
-[22] src/bank.rs:323
+[22] src/bank.rs:324
     // A quarter turn on, the triangle is one minus the distance from the middle
     // of the turn. Branch-free to match the shader, which evaluates it for
     // every voice and pays more for a branch on a voice's phase than for the
     // arithmetic; the quarter turn is an integer add, so it wraps for free.
 
-[23] src/bank.rs:331
+[23] src/bank.rs:332
 /// Per-(region, key, velocity, variant) constants for the modulation envelope,
 /// in a table parallel to `Bank::params` and read with the same index.
 ///
@@ -168,17 +169,17 @@
 /// single dummy entry unless the bank actually uses a modulation envelope, and
 /// only voices whose region sets `RP_MOD_ENV` ever read it.
 
-[24] src/bank.rs:356
+[24] src/bank.rs:357
     /// The unmodulated cutoff this entry was built for, in absolute cents.
     /// The modulation is added to it and the biquad rebuilt per tile.
 
-[25] src/bank.rs:359
+[25] src/bank.rs:360
     /// The two resonance-dependent terms of `biquad_lowpass`, precomputed so
     /// the per-tile rebuild needs only a sine and a cosine. Keeping `powf` and
     /// `sqrt` on the host also keeps two more transcendentals out of the
     /// CPU-against-GPU comparison.
 
-[26] src/bank.rs:387
+[26] src/bank.rs:388
 /// How far into its attack the modulation envelope is, given a linear ramp.
 ///
 /// **The attack is not linear**, and this is the one place the modulation
@@ -198,13 +199,13 @@
 ///
 /// Shared by both backends so the curve cannot drift between them.
 
-[27] src/bank.rs:418
+[27] src/bank.rs:419
 /// `log2(1 + i / 1024)` for `i` in `0..=1024`, in 0.30 fixed point.
 ///
 /// Uploaded so both backends read the same numbers rather than each calling
 /// their own `log2`; see `log2_exact`.
 
-[28] src/bank.rs:432
+[28] src/bank.rs:433
 /// `log2` computed identically on the host and on the device.
 ///
 /// **Not a micro-optimisation, and the reason is worth stating.** A GPU's
@@ -230,11 +231,11 @@
 /// sides and amounts to 2e-5 of a cent at the largest pitch depth the format
 /// allows.
 
-[29] src/bank.rs:472
+[29] src/bank.rs:473
 /// `(20 / 48) * log10(2)`, the slope of the attack curve against `log2(u)`.
 /// Mirrored as a literal in `render.wgsl`.
 
-[30] src/bank.rs:476
+[30] src/bank.rs:477
 /// Steps per cent in the modulation envelope's pitch-factor table.
 ///
 /// The table exists for the same reason `log2_exact` does, and that function
@@ -252,20 +253,20 @@
 /// The grid does not have to protect against the two backends disagreeing:
 /// everything upstream of the index is exact on both. See `log2_exact`.
 
-[31] src/bank.rs:494
+[31] src/bank.rs:495
 /// Index into `Bank::menv_factors` for a pitch offset in cents.
 ///
 /// Shared by both backends, and deliberately built out of `floor` and a clamp
 /// rather than a cast: those are exactly specified everywhere, so the same
 /// cents give the same index and therefore the same factor, bit for bit.
 
-[32] src/bank.rs:501
+[32] src/bank.rs:502
     // `round` rather than `floor(x + 0.5)`: the addition would sit next to the
     // multiply and a compiler is free to contract the pair into a fused
     // multiply-add, which one backend does and the other does not. Ties go to
     // even on both sides -- WGSL's `round` and Rust's `round_ties_even`.
 
-[33] src/bank.rs:510
+[33] src/bank.rs:511
 /// Round to a multiple of 2^-22, through an integer.
 ///
 /// The point is not the precision -- it is a hundred times finer than the
@@ -283,11 +284,11 @@
 /// languages, including the truncation toward zero that `as i32` and WGSL's
 /// `i32()` share.
 
-[34] src/bank.rs:533
+[34] src/bank.rs:534
 /// A release age no voice can reach, meaning "this voice has not released".
 /// Mirrors `NO_RELEASE` in `shaders/common.wgsl`.
 
-[35] src/bank.rs:537
+[35] src/bank.rs:538
 /// The modulation envelope's level at a given age, in [0, 1].
 ///
 /// Closed form in the age rather than integrated frame by frame, which is the
@@ -300,16 +301,16 @@
 /// Every segment is linear in time except the attack; see
 /// `mod_env_attack_level`.
 
-[36] src/bank.rs:550
+[36] src/bank.rs:551
     // The level the release starts from is the pre-release curve sampled at
     // the moment of release, so a note let go during its decay falls from
     // wherever the decay had reached.
 
-[37] src/bank.rs:557
+[37] src/bank.rs:558
     // The quoted release time is a full-scale fall, so from half scale it
     // takes half as long. Measured: `--modenv-sweep` case 5.
 
-[38] src/bank.rs:579
+[38] src/bank.rs:580
 /// `biquad_lowpass` with the resonance-dependent terms already computed.
 ///
 /// Split out because the modulation envelope rebuilds the filter once per
@@ -320,11 +321,19 @@
 ///
 /// Mirrored statement for statement in `render.wgsl`.
 
-[39] src/bank.rs:604
+[39] src/bank.rs:605
 /// This region drives a modulation envelope with at least one live
 /// destination, so its voices read the parallel `menv` table.
 
-[40] src/bank.rs:632
+[40] src/bank.rs:608
+/// This region's release would finish inside one step of the envelope grid, so
+/// it is played as BASSMIDI plays it: one straight fade to silence over the
+/// whole step, from wherever the level is when the release starts. With the
+/// SF2 default release, which is every note of a font that does not set one,
+/// the curve would otherwise be gone in a frame. See
+/// `Config::env_step_frames`.
+
+[41] src/bank.rs:640
 /// What a channel's sound controllers do to a region's DSP constants.
 ///
 /// CC71 through CC75 all modify things that live in `RegionParams` -- filter
@@ -340,11 +349,11 @@
 /// already loads one `RegionParams` per voice, and now loads it from a
 /// different place.
 
-[41] src/bank.rs:650
+[42] src/bank.rs:658
     /// CC71 resonance, as an offset in centibels of Q. Never negative: see
     /// `from_controllers`.
 
-[42] src/bank.rs:659
+[43] src/bank.rs:667
 /// What a sound controller does to one envelope time.
 ///
 /// Not a multiplier, which is what this used to be and what made CC73 do
@@ -353,12 +362,12 @@
 /// neutral position `add` is zero, above it `scale` is one, so one pair covers
 /// the whole range exactly.
 
-[43] src/bank.rs:681
+[44] src/bank.rs:689
     /// One controller's contribution, 64 being neutral.
     ///
     /// See `CC_*` above for where the constants come from.
 
-[44] src/bank.rs:712
+[45] src/bank.rs:720
 // ---------------------------------------------------------------------------
 // Sound controller constants
 //
@@ -370,7 +379,7 @@
 // adds to it. Every constant below carries the number it was fitted to.
 // ---------------------------------------------------------------------------
 
-[45] src/bank.rs:723
+[46] src/bank.rs:731
 /// Cents of cutoff offset per CC74 step.
 ///
 /// Measured 74.92 cents/step, the same on a 1000 Hz region and a 4000 Hz one to
@@ -379,7 +388,7 @@
 /// carries about 0.2% of slope error of its own; 75 is inside that, and is the
 /// obvious design constant -- an octave every 16 steps, four octaves either way.
 
-[46] src/bank.rs:732
+[47] src/bank.rs:740
 /// Centibels of resonance per CC71 step **above 64**. Below 64 BASSMIDI does
 /// nothing at all, which is the half that was wrong here.
 ///
@@ -387,7 +396,7 @@
 /// 3.711, so the corrected figure is 3.77 and the existing 240 cB across the
 /// upper half is inside the error. The depth was never the problem.
 
-[47] src/bank.rs:740
+[48] src/bank.rs:748
 /// Controller steps per octave of envelope time below 64. The time halves every
 /// eight steps, so 0 is 1/256 of the region's own time.
 ///
@@ -395,7 +404,7 @@
 /// across both base times: `dec_long` lands on 0.03129, 0.06250, 0.12501,
 /// 0.25000, 0.50000 of its base at CC 24, 32, 40, 48, 56.
 
-[48] src/bank.rs:748
+[49] src/bank.rs:756
 /// Seconds of envelope time *added* per cubed step above 64.
 ///
 /// This is the finding the whole exercise was for. Above the neutral position
@@ -407,7 +416,7 @@
 /// `0.06 ms * (v-64)^3` to the second decimal: 30.72, 245.76, 829.44, 1966.08 ms
 /// at CC 72, 80, 88, 96. Release, decay and attack all share it.
 
-[49] src/bank.rs:760
+[50] src/bank.rs:768
 /// The shortest fade BASSMIDI performs, in seconds.
 ///
 /// At the bottom of the range the scaling stops mattering and every release
@@ -415,61 +424,61 @@
 /// straight amplitude line to 1.06 dB where an exponential needs 3.55. Both the
 /// 50 ms and the 1000 ms font land on the same 4.0 ms fade.
 
-[50] src/bank.rs:773
+[51] src/bank.rs:781
     /// Build from the raw controller values, 64 being the neutral position for
     /// each. BASSMIDI powers all five up at 64, so this agrees with it about
     /// where "does nothing" is.
 
-[51] src/bank.rs:779
+[52] src/bank.rs:787
             // One-sided on purpose. BASSMIDI's resonance is identical to five
             // decimal places for every value from 0 to 64 and only climbs above
             // it; the old symmetric curve thinned the tone on the whole lower
             // half of a controller that should have been doing nothing there.
 
-[52] src/bank.rs:826
+[53] src/bank.rs:834
     /// Rate every pool sample is stored at, or 0 when the pool is mixed-rate
     /// and the ratio has to be folded into the phase step per sample.
 
-[53] src/bank.rs:832
+[54] src/bank.rs:840
     /// Modulation-envelope constants, parallel to `params` and read with the
     /// same index. One dummy entry when the bank drives none.
 
-[54] src/bank.rs:835
+[55] src/bank.rs:843
     /// Phase-step factors in 8.24 fixed point for the modulation envelope's
     /// pitch destination, indexed by `mod_env_pitch_index`. Spans
     /// `+/- menv_factor_half` sixteenths of a cent around unity. See
     /// `MOD_ENV_CENTS_STEPS` for why this is a table and not an `exp2`.
 
-[55] src/bank.rs:841
+[56] src/bank.rs:849
     /// Shared `log2` mantissa table; see `log2_exact`. Empty when the bank
     /// drives no modulation envelope.
 
-[56] src/bank.rs:848
+[57] src/bank.rs:856
     /// True when any region drives an LFO anywhere.
     ///
     /// The LFO evaluation is per voice per reduce tile, so a library that does
     /// not use them should not pay for the branch at all. Set by `finish`.
 
-[57] src/bank.rs:853
+[58] src/bank.rs:861
     /// Whether any region drives the tremolo, and whether any drives pitch
     /// from either LFO. The render pass compiles out a destination no region
     /// uses; both are false whenever `uses_lfo` is.
 
-[58] src/bank.rs:858
+[59] src/bank.rs:866
     /// True when any region narrows `lorand`/`hirand`.
     ///
     /// Region matching runs once per note-on in a file that can hold billions
     /// of them, so the random test is skipped outright rather than evaluated
     /// against a range that cannot reject anything. Set by `finish`.
 
-[59] src/bank.rs:864
+[60] src/bank.rs:872
     /// True when any region drives a modulation envelope destination.
     ///
     /// Gates the whole feature: the parallel `menv` table is not built, the
     /// voice pool does not carry the release age, and neither backend
     /// evaluates the envelope. Set by `finish`.
 
-[60] src/bank.rs:871
+[61] src/bank.rs:879
     // ---- admission preview tables, built by `finish` --------------------
     //
     // Admission has to rank a note-on before anything is built for it, and
@@ -481,40 +490,40 @@
     /// produce. Bit-exact, not an approximation: the arithmetic below is the
     /// same sequence of f32 operations on the same inputs.
 
-[61] src/bank.rs:882
+[62] src/bank.rs:890
     /// `build_voice`'s `delay_frames` per region. A region constant, and the
     /// preview needs it to route delayed voices away from admission.
 
-[62] src/bank.rs:885
+[63] src/bank.rs:893
     /// Bitset over `region * 128 + key`, set when `build_voice` would return
     /// `Some` for that pair. Everything that can make it return `None` --
     /// a missing or empty sample, a pitch ratio that is not finite and
     /// positive -- is a function of the region and the key alone.
 
-[63] src/bank.rs:892
+[64] src/bank.rs:900
 /// One layer a note-on would produce, as far as admission needs to know it.
 /// Produced by `preview_note_on`, which costs two table lookups per layer
 /// against `build_voice`'s pitch math and address arithmetic.
 
-[64] src/bank.rs:900
+[65] src/bank.rs:908
     /// `VoiceSpawn::delay_frames`. Admission never sees a delayed voice -- it
     /// goes on the deferred queue and is ranked in the block it lands in -- so
     /// the preview has to answer this before ranking, not after.
 
-[65] src/bank.rs:940
+[66] src/bank.rs:948
 /// Where a channel's volume (CC7) sits before a file sends one: 100, General
 /// MIDI's power-on value and BASSMIDI's. Kestrel used to power on at 127, so a
 /// file that sets 100 after its first notes -- a Domino file writes its part
 /// setup a beat and a half in -- dropped 4.15 dB where BASSMIDI heard nothing.
 /// Measured against BASSMIDI on a held sine, 2026-09-17.
 
-[66] src/bank.rs:947
+[67] src/bank.rs:955
 /// The amplitude power-on channel volume stands for, `(100/127)^2`. It is part
 /// of every voice's own gain rather than of the channel rows, which carry CC7
 /// relative to power-on instead: a channel that never sends CC7, or sends 100,
 /// is then exactly unity and keeps the render pass's no-controller fast path.
 
-[67] src/bank.rs:959
+[68] src/bank.rs:967
 /// The random draw for one note-on, in `[0, 1)`.
 ///
 /// SFZ says "pick a random number per note-on and keep the regions whose
@@ -531,7 +540,7 @@
 /// adjacent seeds land far apart, which matters because the seeds here are
 /// consecutive integers.
 
-[68] src/bank.rs:984
+[69] src/bank.rs:992
 /// Linear gain from SFZ velocity crossfade, in `[0, 1]`.
 ///
 /// Without this a library that crossfades its velocity layers gets hard
@@ -545,11 +554,11 @@
 /// does not yet distinguish them; `xf_velcurve` is reported as unimplemented
 /// rather than silently taken as `gain`.
 
-[69] src/bank.rs:998
+[70] src/bank.rs:1006
     // Fade in: silent below `lo`, open at and above `hi`. The default 0..0
     // opens at every velocity, so the unset case needs no branch of its own.
 
-[70] src/bank.rs:1018
+[71] src/bank.rs:1026
 /// Velocity to attenuation, in centibels, scaled by SFZ `amp_veltrack`.
 ///
 /// At the default `veltrack` of 100 the amplitude tracks (vel/127)^2, which is
@@ -571,13 +580,13 @@
 /// Negative values invert instead of reflecting, because reflecting would push
 /// the gain above unity and no library means that by `amp_veltrack=-100`.
 
-[71] src/bank.rs:1043
+[72] src/bank.rs:1051
         // Full tracking is the SF2 path and the SFZ default, so it keeps the
         // original expression rather than the equivalent one below. They agree
         // mathematically but not to the last bit of an f32, and every render
         // made before `amp_veltrack` existed went through this line.
 
-[72] src/bank.rs:1061
+[73] src/bank.rs:1069
     /// Layer `other` on top of this bank.
     ///
     /// Presets from `other` replace anything this bank has at the same
@@ -591,28 +600,28 @@
     /// admission tables -- is rebuilt from scratch, so this only has to fix the
     /// ones that point *between* the merged halves.
 
-[73] src/bank.rs:1078
+[74] src/bank.rs:1086
         // A `SampleInfo` always carries its own rate and resample ratio, so a
         // mixed pool is correct whatever the two halves were built at; it just
         // costs a multiply per voice that a uniform pool does not. Only fall
         // back to mixed when they actually disagree.
 
-[74] src/bank.rs:1093
+[75] src/bank.rs:1101
             // `u32::MAX` is how the SF2 loader marks a region whose sample went
             // missing. It has to stay out of range rather than wrap into one.
 
-[75] src/bank.rs:1114
+[76] src/bank.rs:1122
     /// Move this bank's single preset onto the given programs of bank 0.
     ///
     /// For layering a one-preset soundfont -- an SFZ piano -- onto more than
     /// the one program it declares. The regions are shared, not copied, so
     /// putting a 757 MiB piano on eight programs costs eight preset headers.
 
-[76] src/bank.rs:1151
+[77] src/bank.rs:1159
         // A modulation envelope with no destination is inert however elaborate
         // its times are, so the destinations are what decide this.
 
-[77] src/bank.rs:1166
+[78] src/bank.rs:1174
     /// Resolve a (bank, program) pair, falling back the way hardware does:
     /// same program in bank 0, then anything at all.
     ///
@@ -624,11 +633,11 @@
     /// is not a near miss -- the notes are drum keys, so the whole part plays
     /// as a chromatic run on the wrong instrument.
 
-[78] src/bank.rs:1188
+[79] src/bank.rs:1196
             // No drum bank at all. Nothing here is right; a melodic preset at
             // least makes the part audible rather than silent.
 
-[79] src/bank.rs:1197
+[80] src/bank.rs:1205
     /// Build the voices for one note-on. Pushes into `out` rather than
     /// allocating, because this runs once per note in a billion-note file.
     // Eight arguments, one over clippy's threshold. Grouping them into a
@@ -638,48 +647,48 @@
     // primitives with distinct types, which is the case the lint is least
     // useful for.
 
-[80] src/bank.rs:1223
+[81] src/bank.rs:1231
         // Must match `preview_note_on` exactly: admission ranks the preview and
         // then builds from it, so a region the two disagree about is either
         // ranked and never built or built having never been ranked.
 
-[81] src/bank.rs:1246
+[82] src/bank.rs:1254
     /// Build the one layer `preview_note_on` named, by its region index.
     ///
     /// The preview has already decided this layer exists, so this is the other
     /// half of the split: admission ranks on the preview, and only the notes it
     /// admits ever reach here.
 
-[82] src/bank.rs:1291
+[83] src/bank.rs:1299
         // When the pool was not rebuilt at a single rate, the per-sample rate
         // ratio rides along in the phase step. Lossless, just less uniform.
 
-[83] src/bank.rs:1303
+[84] src/bank.rs:1311
         // Same sequence of f32 operations as `build_admission_tables`, in the
         // same order, so the preview's gain is bit-identical to this one and
         // not merely close. Admission ranks on the preview and renders this.
 
-[84] src/bank.rs:1313
+[85] src/bank.rs:1321
         // Address offsets are quoted in source frames; scale them if the pool
         // was rebuilt at a different rate.
 
-[85] src/bank.rs:1323
+[86] src/bank.rs:1331
         // A region's params block is a (velocity, key) grid, either dimension
         // collapsed to one entry when nothing varies along it.
 
-[86] src/bank.rs:1359
+[87] src/bank.rs:1367
         // Lay out the table first: where each region's block starts, and how
         // far it runs along key and velocity. Every variant repeats this exact
         // layout, which is what lets a voice's stored index stay valid no
         // matter which copy its channel is reading.
 
-[87] src/bank.rs:1366
+[88] src/bank.rs:1374
             // Only regions that actually track velocity are expanded along it,
             // and only across their own velocity range. A library that already
             // splits by velocity, as sampled pianos do, gets one entry per
             // region.
 
-[88] src/bank.rs:1386
+[89] src/bank.rs:1394
     /// Precompute what admission needs to rank a note-on without building it.
     ///
     /// The whole point of culling is that a block may contain a hundred times
@@ -689,17 +698,17 @@
     /// `note_on` would -- which is what lets admission move earlier without
     /// changing which notes are admitted.
 
-[89] src/bank.rs:1405
+[90] src/bank.rs:1413
             // Gain: the same arithmetic as `build_voice`, in the same order, so
             // the f32 results are bit-identical rather than merely close.
 
-[90] src/bank.rs:1416
+[91] src/bank.rs:1424
             // Existence: `build_voice` gives up on a missing or empty sample and
             // on a pitch ratio that is not finite and positive. The sample is
             // fixed per region and the ratio depends on the key but never on
             // the velocity, so one bit per (region, key) covers every case.
 
-[91] src/bank.rs:1457
+[92] src/bank.rs:1465
     /// The layers `note_on` would produce, and each one's opening gain, without
     /// building any of them.
     ///
@@ -708,30 +717,30 @@
     /// corresponds to the `i`-th voice, which is what lets note ids be handed
     /// out here and honoured later.
 
-[92] src/bank.rs:1480
+[93] src/bank.rs:1488
         // One draw per note-on, shared by every region tested for it. Drawing
         // per region would make the slices independent coin flips instead of a
         // partition, so a note could take two alternatives or none.
 
-[93] src/bank.rs:1510
+[94] src/bank.rs:1518
     /// Build one copy of the params table with a channel's sound controllers
     /// applied. Identical in layout to variant zero, so the channel only has
     /// to supply which copy to read. See `ParamMod`.
     ///
     /// Call only after `build_params` has assigned the region offsets.
 
-[94] src/bank.rs:1534
+[95] src/bank.rs:1542
     /// The modulation-envelope table for one controller state, laid out to the
     /// same index as `build_variant`.
     ///
     /// A single default entry when the bank uses no modulation envelope, so the
     /// device binding is still valid and nothing reads it.
 
-[95] src/bank.rs:1540
+[96] src/bank.rs:1548
         // Tested against the regions rather than `uses_mod_env`, because
         // `build_params` runs before `finish` sets that flag.
 
-[96] src/bank.rs:1563
+[97] src/bank.rs:1571
     /// Build the pitch-factor table, sized to this bank's own largest
     /// `modEnvToPitch`.
     ///
@@ -739,23 +748,23 @@
     /// the fixed-point format allows; what matters downstream is only that both
     /// backends read the same entry.
 
-[97] src/bank.rs:1644
+[98] src/bank.rs:1652
     // A controller may not fade faster than `CC_MIN_FADE_SECS`, but it may
     // never lengthen a region that already asked for less than that either --
     // so the floor is the smaller of the two. Attack has no such floor:
     // BASSMIDI takes a scaled-down attack all the way to instant.
 
-[98] src/bank.rs:1661
+[99] src/bank.rs:1669
     // Both curves are defined by the SF2 convention that the quoted time is
     // how long a full-scale envelope takes to fall to -100 dB.
 
-[99] src/bank.rs:1680
+[100] src/bank.rs:1688
     // Velocity opens the cutoff linearly in the normalised velocity, which is
     // the SFZ 1.0 reading of `fil_veltrack`. Implementations differ here --
     // some square the velocity first -- and the difference is audible, so it
     // is worth saying which one this is.
 
-[100] src/bank.rs:1688
+[101] src/bank.rs:1696
     // 13500 cents is the SF2 default and means "this preset did not ask for a
     // filter". Running a biquad there would colour every voice for nothing and
     // cost a multiply-add per voice per frame on the device. A veltracked
@@ -767,38 +776,38 @@
     // and one that opens it must not switch it off: the test is over the whole
     // range the envelope can reach, not over its resting point.
 
-[101] src/bank.rs:1709
+[102] src/bank.rs:1717
     // LFOs. The phase increment is a u32 fraction of a turn per frame, so a
     // rate of `hz` is `hz / sample_rate` of a turn each frame.
 
-[102] src/bank.rs:1751
+[103] src/bank.rs:1764
 /// The modulation-envelope entry matching one `make_params` entry.
 ///
 /// Deliberately a separate function reading the same inputs rather than a
 /// second return value, because the two tables are allocated separately: this
 /// one is not built at all unless the bank uses the feature.
 
-[103] src/bank.rs:1757
+[104] src/bank.rs:1770
     // The rate of a segment is one full scale divided by its length, so a
     // decay to a sustain of 0.5 takes half the quoted decay time. Measured:
     // `--modenv-sweep` case 2 quotes 0.5 s and settles at 0.25 s.
 
-[104] src/bank.rs:1769
+[105] src/bank.rs:1782
     // CC71 and CC74 move the cutoff and resonance this envelope modulates
     // around, exactly as they do for the static coefficients in `make_params`.
     // The envelope times themselves are not touched by any controller:
     // CC72/73/75 are defined against the volume envelope.
 
-[105] src/bank.rs:1776
+[106] src/bank.rs:1789
     // The resonance-dependent half of `biquad_lowpass`, hoisted out so the
     // per-tile rebuild needs only a sine and a cosine.
 
-[106] src/bank.rs:1784
+[107] src/bank.rs:1797
         // Below a frame is instant, and instant is the default: the generator
         // default of -12000 timecents is one hundredth of a second at best and
         // zero as written.
 
-[107] src/bank.rs:1808
+[108] src/bank.rs:1821
 /// RBJ low-pass, normalised so resonance does not raise the passband level.
 /// `b2 == b0`, so it is not returned.
 ///
@@ -807,10 +816,10 @@
 /// normalising against the default Q instead keeps an unresonant filter at
 /// unity, so enabling the filter never shifts the mix level on its own.
 
-[108] src/bank.rs:1862
+[109] src/bank.rs:1875
         // Negative inverts: loud notes are the quiet ones, and nothing is
         // ever amplified above unity.
 
-[109] src/bank.rs:1874
+[110] src/bank.rs:1887
         // Resonance must not raise the passband: at +12 dB of Q the DC gain
         // should come down, not up.

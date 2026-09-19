@@ -18,7 +18,16 @@ fn parse_backends(name: &str) -> Option<wgpu::Backends> {
     }
 }
 
-/// Discrete first, then integrated. Within a tier, prefer Vulkan over DX12 \[1\]
+/// Which compiler turns the shaders into DX12 bytecode: DXC, statically linked \[1\]
+fn dx12_compiler() -> wgpu::Dx12Compiler {
+    if cfg!(all(windows, not(target_arch = "aarch64"))) {
+        wgpu::Dx12Compiler::StaticDxc
+    } else {
+        wgpu::Dx12Compiler::Fxc
+    }
+}
+
+/// Discrete first, then integrated. Within a tier, prefer Vulkan over DX12 \[2\]
 fn rank(i: &wgpu::AdapterInfo) -> (u8, u8) {
     let t = match i.device_type {
         wgpu::DeviceType::DiscreteGpu => 0,
@@ -35,7 +44,7 @@ fn rank(i: &wgpu::AdapterInfo) -> (u8, u8) {
     (t, b)
 }
 
-/// Pick an adapter and open a device. \[2\]
+/// Pick an adapter and open a device. \[3\]
 pub fn create(
     cfg: &Config,
 ) -> Result<(wgpu::Device, wgpu::Queue, wgpu::AdapterInfo, wgpu::Limits, bool)> {
@@ -47,6 +56,13 @@ pub fn create(
 
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends,
+        backend_options: wgpu::BackendOptions {
+            dx12: wgpu::Dx12BackendOptions {
+                shader_compiler: dx12_compiler(),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
         ..Default::default()
     });
 
@@ -93,7 +109,7 @@ pub fn create(
         experimental_features: wgpu::ExperimentalFeatures::disabled(),
     }))?;
 
-    // [3]
+    // [4]
     device.on_uncaptured_error(std::sync::Arc::new(|e| {
         log::error!("wgpu device error: {e}");
         panic!("wgpu device error: {e}");
@@ -102,7 +118,7 @@ pub fn create(
     Ok((device, queue, info, adapter_limits, has_timestamps))
 }
 
-/// Compute-only bind group layout. `read_only[i]` says whether binding i is a \[4\]
+/// Compute-only bind group layout. `read_only[i]` says whether binding i is a \[5\]
 pub fn bind_layout(
     device: &wgpu::Device,
     label: &str,
@@ -157,7 +173,7 @@ pub fn bind(
     })
 }
 
-/// List every adapter wgpu can reach, for working out which device a render \[5\]
+/// List every adapter wgpu can reach, for working out which device a render \[6\]
 pub fn print_adapters() -> Result<()> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
     for a in instance.enumerate_adapters(wgpu::Backends::all()) {
@@ -175,7 +191,7 @@ pub fn print_adapters() -> Result<()> {
             l.max_compute_invocations_per_workgroup,
             l.max_compute_workgroups_per_dimension
         );
-        // [6]
+        // [7]
         let steal = Config::default().max_steal_percent;
         let binding = (l.max_storage_buffer_binding_size as u64).min(l.max_buffer_size);
         println!(
@@ -200,9 +216,9 @@ pub struct AdapterSummary {
     pub name: String,
     pub backend: wgpu::Backend,
     pub device_type: wgpu::DeviceType,
-    /// The most of one buffer the adapter will bind to a shader, which is \[7\]
+    /// The most of one buffer the adapter will bind to a shader, which is \[8\]
     pub binding_bytes: u64,
-    /// The largest `--max-voices` that binding takes at the configured \[8\]
+    /// The largest `--max-voices` that binding takes at the configured \[9\]
     pub max_voices: u32,
 }
 
@@ -213,7 +229,7 @@ impl AdapterSummary {
     }
 }
 
-/// Every adapter wgpu can reach, best first, and the index of the one \[9\]
+/// Every adapter wgpu can reach, best first, and the index of the one \[10\]
 pub fn survey(cfg: &Config) -> Result<(Vec<AdapterSummary>, Option<usize>)> {
     let backends = match &cfg.gpu_backend {
         Some(b) => parse_backends(b)

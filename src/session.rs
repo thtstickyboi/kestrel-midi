@@ -273,6 +273,8 @@ pub struct Summary {
     pub audio_secs: f64,
     pub wall_secs: f64,
     pub notes: u64,
+    /// Note-ons `--min-velocity` skipped. Not in `notes`.
+    pub notes_skipped: u64,
     pub voices_spawned: u64,
     pub peak_voices: u64,
     pub stolen: u64,
@@ -567,6 +569,14 @@ pub fn run(
         driver.stats.dropped,
         driver.stats.peak
     );
+    if cfg.min_velocity > 1 {
+        log::info!(
+            target: TARGET,
+            "{} note-ons below velocity {} skipped, with their note-offs",
+            driver.stats.notes_skipped,
+            cfg.min_velocity
+        );
+    }
     if cfg.profile {
         let d = &driver.stats;
         let pct = |v: u64| {
@@ -620,6 +630,7 @@ pub fn run(
         audio_secs: secs,
         wall_secs: wall,
         notes: driver.stats.notes,
+        notes_skipped: driver.stats.notes_skipped,
         voices_spawned: driver.stats.voices_spawned,
         peak_voices,
         stolen: st.stolen,
@@ -1023,6 +1034,7 @@ mod tests {
             audio_secs: 2.0,
             wall_secs: 1.0,
             notes: 3,
+            notes_skipped: 0,
             voices_spawned: 4,
             peak_voices: 5,
             stolen: 0,

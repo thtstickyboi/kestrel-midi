@@ -182,6 +182,8 @@ pub fn run() -> Result<()> {
         "type": "ready",
         "api": API,
         "version": env!("CARGO_PKG_VERSION"),
+        // [12]
+        "build": crate::BUILD,
         "commands": COMMANDS,
     }));
 
@@ -191,7 +193,7 @@ pub fn run() -> Result<()> {
         interval_ms: 250,
     }));
     let mut worker: Option<JoinHandle<()>> = None;
-    // [12]
+    // [13]
     let mut quick: Vec<JoinHandle<()>> = Vec::new();
 
     for line in std::io::stdin().lock().lines() {
@@ -235,7 +237,7 @@ pub fn run() -> Result<()> {
                 let was = lock(&state).loaded.take().is_some();
                 respond_ok(&id, json!({"unloaded": was}));
             }
-            // [13]
+            // [14]
             "adapters" | "ffmpeg" | "options" | "inspect_midi" | "check_update" => {
                 let (cmd, id, req) = (cmd.to_string(), id.clone(), req.clone());
                 quick.retain(|h| !h.is_finished());
@@ -260,12 +262,12 @@ pub fn run() -> Result<()> {
         }
     }
 
-    // [14]
+    // [15]
     stop(&state, &mut worker, &mut quick);
     Ok(())
 }
 
-/// Cancel whatever is running, and wait for it and every quick request to \[15\]
+/// Cancel whatever is running, and wait for it and every quick request to \[16\]
 fn stop(state: &Shared, worker: &mut Option<JoinHandle<()>>, quick: &mut Vec<JoinHandle<()>>) {
     if let Some(r) = &lock(state).running {
         r.cancel.store(true, Ordering::Relaxed);
@@ -328,7 +330,7 @@ fn start_long(
         let _ = handle.join();
     }
 
-    // [16]
+    // [17]
     let (cmd, prepared): (&'static str, Result<Long>) = match cmd {
         "load_soundfonts" => (
             "load_soundfonts",
@@ -388,7 +390,7 @@ fn start_long(
                     .unwrap_or("no message")
             ))
         });
-        // [17]
+        // [18]
         lock(&state).running = None;
         set_log_id(None);
         match outcome {
@@ -725,7 +727,7 @@ fn adapters() -> Result<Value> {
     Ok(json!({"adapters": adapters}))
 }
 
-/// The guided renderer's update check, on the person's update ring from \[18\]
+/// The guided renderer's update check, on the person's update ring from \[19\]
 fn check_update() -> Result<Value> {
     if crate::update::opted_out() {
         bail!("update checks are turned off by {}", crate::update::OPT_OUT);
@@ -785,7 +787,7 @@ fn inspect_midi(req: &Map<String, Value>) -> Result<Value> {
             "format": m.format,
             "tracks": m.tracks,
             "division": division_value(m.division),
-            // [19]
+            // [20]
             "warnings": m.notes,
         }),
         Verdict::Invalid { path, reason } => json!({
@@ -816,7 +818,7 @@ struct OptionSpec {
     help: String,
 }
 
-/// Every option `render` takes that a request passes in `options`, read off \[20\]
+/// Every option `render` takes that a request passes in `options`, read off \[21\]
 fn option_specs() -> Vec<OptionSpec> {
     let cli = Cli::command();
     let render = cli
@@ -886,7 +888,7 @@ fn options() -> Value {
 
 // ---- Options to arguments -------------------------------------------------
 
-/// Turn `options` into the arguments the command line would have been given. \[21\]
+/// Turn `options` into the arguments the command line would have been given. \[22\]
 fn option_flags(options: Option<&Value>) -> Result<Vec<String>> {
     let map = match options {
         None | Some(Value::Null) => return Ok(Vec::new()),
@@ -919,7 +921,7 @@ fn option_flags(options: Option<&Value>) -> Result<Vec<String>> {
             Value::Null => continue,
             Value::String(s) => s.clone(),
             Value::Bool(b) => b.to_string(),
-            // [22]
+            // [23]
             Value::Number(n) => match n.as_f64() {
                 Some(f) if !n.is_i64() && !n.is_u64() && f.fract() == 0.0 && f.abs() < 9.0e15 => {
                     format!("{}", f as i64)
@@ -998,7 +1000,7 @@ fn parse_render(argv: Vec<OsString>) -> Result<RenderArgs> {
             _ => unreachable!("the argument list names the render subcommand"),
         },
         Err(e) => {
-            // [23]
+            // [24]
             let text = e.render().to_string();
             let kept: Vec<&str> = text
                 .lines()
@@ -1078,16 +1080,18 @@ mod tests {
     fn every_render_option_but_the_named_ones_is_offered() {
         let specs = option_specs();
         let names: Vec<&str> = specs.iter().map(|s| s.long.as_str()).collect();
-        for expected in ["max-voices", "volume", "limiter", "no-lfo", "ffmpeg", "seconds"] {
+        for expected in ["max-voices", "volume", "limiter", "note-grid", "ffmpeg", "seconds"] {
             assert!(names.contains(&expected), "{expected} missing from {names:?}");
         }
+        // A developer option is offered exactly when the command line takes it.
+        assert_eq!(names.contains(&"no-lfo"), cfg!(feature = "dev"), "{names:?}");
         for excluded in NOT_OPTIONS {
             assert!(!names.contains(excluded), "{excluded} offered");
         }
         let voices = specs.iter().find(|s| s.long == "max-voices").unwrap();
         assert_eq!(voices.default.as_deref(), Some("1048576"));
         assert!(!voices.switch);
-        assert!(specs.iter().find(|s| s.long == "no-lfo").unwrap().switch);
+        assert!(specs.iter().find(|s| s.long == "note-grid").unwrap().switch);
         let backend = specs.iter().find(|s| s.long == "backend").unwrap();
         assert_eq!(backend.values, ["cpu", "gpu"]);
     }
@@ -1097,8 +1101,8 @@ mod tests {
         let flags = option_flags(Some(&json!({
             "max_voices": 4194304,
             "--ceiling-db": -1.5,
-            "no-lfo": true,
-            "no_filter": false,
+            "note-grid": true,
+            "nan_guard": false,
             "limiter": "omni",
             "volume": 80.0,
             "seconds": null,
@@ -1112,7 +1116,7 @@ mod tests {
                 "--ceiling-db=-1.5",
                 "--limiter=omni",
                 "--max-voices=4194304",
-                "--no-lfo",
+                "--note-grid",
                 "--volume=80",
             ]
         );
@@ -1127,14 +1131,14 @@ mod tests {
         assert_eq!(args.max_voices, 4194304);
         assert_eq!(args.midi, PathBuf::from("-dash.mid"));
         assert_eq!(args.ceiling_db, Some(-1.5));
-        assert!(args.no_lfo && !args.no_filter);
+        assert!(args.note_grid && !args.nan_guard);
     }
 
     #[test]
     fn a_bad_option_is_refused_with_a_reason() {
         for (options, says) in [
             (json!({"max_voice": 1}), "unknown option"),
-            (json!({"no_lfo": "yes"}), "switch"),
+            (json!({"note_grid": "yes"}), "switch"),
             (json!({"out": "x.wav"}), "not an option here"),
             (json!({"limiter": [1]}), "string or a number"),
             (json!([1, 2]), "object"),
@@ -1158,7 +1162,7 @@ mod tests {
 
     #[test]
     fn only_options_a_loader_reads_decide_a_reload() {
-        let flags: Vec<String> = ["--steal=oldest", "--volume=50", "--max-voices=10", "--rate=44100"]
+        let flags: Vec<String> = ["--steal-percent=50", "--volume=50", "--max-voices=10", "--rate=44100"]
             .into_iter()
             .map(String::from)
             .collect();

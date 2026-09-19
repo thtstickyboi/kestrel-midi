@@ -51,6 +51,8 @@ pub enum Pick {
     Midi,
     Soundfont,
     Inspect,
+    /// Only the null test picks WAVs, and it is in dev builds only.
+    #[cfg_attr(not(feature = "dev"), allow(dead_code))]
     Wav,
     Folder,
 }

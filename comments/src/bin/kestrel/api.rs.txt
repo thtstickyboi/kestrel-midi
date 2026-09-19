@@ -70,45 +70,49 @@
     // A panic while holding this is caught and reported where it happened;
     // the state it leaves is still the best there is.
 
-[12] src/bin/kestrel/api.rs:225
+[12] src/bin/kestrel/api.rs:216
+        // `release` for the downloadable zips, `dev` for a build with the
+        // developer options; `options` lists what this one takes.
+
+[13] src/bin/kestrel/api.rs:228
     // Quick requests still answering. Every request gets its response, so the
     // session waits for these before it ends.
 
-[13] src/bin/kestrel/api.rs:270
+[14] src/bin/kestrel/api.rs:273
             // Quick, and free to run beside a render: each on a thread of its
             // own, so none of them holds up a cancel behind it.
 
-[14] src/bin/kestrel/api.rs:296
+[15] src/bin/kestrel/api.rs:299
     // Stdin closed: the program driving this has gone, so nothing it started
     // should go on using the GPU without it.
 
-[15] src/bin/kestrel/api.rs:302
+[16] src/bin/kestrel/api.rs:305
 /// Cancel whatever is running, and wait for it and every quick request to
 /// send its response.
 
-[16] src/bin/kestrel/api.rs:366
+[17] src/bin/kestrel/api.rs:369
     // Everything that can be refused is refused here, before anything starts,
     // so a bad request gets its answer at once.
 
-[17] src/bin/kestrel/api.rs:427
+[18] src/bin/kestrel/api.rs:430
         // Free before answering, so a request sent the moment the response
         // arrives is not told the session is busy.
 
-[18] src/bin/kestrel/api.rs:765
+[19] src/bin/kestrel/api.rs:768
 /// The guided renderer's update check, on the person's update ring from
 /// `ktrl.ini`. `KESTREL_NO_UPDATE_CHECK` is honoured, so a machine with checks
 /// turned off is not contacted through a GUI either.
 
-[19] src/bin/kestrel/api.rs:827
+[20] src/bin/kestrel/api.rs:830
             // Called `notes` in the guided renderer, which is ambiguous in a
             // response a GUI puts beside a note count.
 
-[20] src/bin/kestrel/api.rs:859
+[21] src/bin/kestrel/api.rs:862
 /// Every option `render` takes that a request passes in `options`, read off
 /// the command line's own definition, so a GUI built from this list cannot
 /// drift from the command line.
 
-[21] src/bin/kestrel/api.rs:931
+[22] src/bin/kestrel/api.rs:934
 /// Turn `options` into the arguments the command line would have been given.
 ///
 /// Keys are option names with or without the dashes, in either `max_voices`
@@ -116,10 +120,10 @@
 /// a string or a number, and null leaves the option at its default. Values are
 /// joined with `=`, so a negative number is never read as another flag.
 
-[22] src/bin/kestrel/api.rs:969
+[23] src/bin/kestrel/api.rs:972
             // A whole number sent as a float -- which is how many languages
             // serialise one -- is written as the integer the option parses.
 
-[23] src/bin/kestrel/api.rs:1049
+[24] src/bin/kestrel/api.rs:1052
             // clap's message without its usage block, which describes the
             // command line rather than this request.

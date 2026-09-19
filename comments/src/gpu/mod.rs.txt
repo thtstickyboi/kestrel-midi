@@ -29,7 +29,11 @@
     /// Half-width of the modulation envelope's pitch-factor table, in
     /// steps of `bank::MOD_ENV_CENTS_STEPS` per cent.
 
-[4] src/gpu/mod.rs:73
+[4] src/gpu/mod.rs:70
+    /// Frame 0 of this block's position on the envelope grid. See
+    /// `Config::env_step_frames`.
+
+[5] src/gpu/mod.rs:75
 /// How the voice pool's sort key is packed into 32 bits.
 ///
 /// Region in the high bits so a warp shares a sample, envelope stage next so
@@ -38,27 +42,27 @@
 /// The phase field is the part that actually moves the needle: see the header
 /// comment in `shaders/sort.wgsl`.
 
-[5] src/gpu/mod.rs:96
+[6] src/gpu/mod.rs:98
         // Enough phase resolution that a warp's worth of voices in the same
         // sample land in a handful of cache lines, but no finer than the
         // longest sample needs, and never more bits than the key has left.
 
-[6] src/gpu/mod.rs:122
+[7] src/gpu/mod.rs:124
 /// Slots in the device state buffer. Mirrors the `S_*` constants in
 /// `shaders/common.wgsl`.
 
-[7] src/gpu/mod.rs:129
+[8] src/gpu/mod.rs:131
 /// Largest grid one dispatch dimension may take. This is the D3D12 ceiling and
 /// the wgpu downlevel default, so every adapter reports at least this much. It
 /// bounds the *grid*, not the pool: every per-voice entry point grid-strides,
 /// so a pool with more blocks than this is walked by a grid of this size rather
 /// than rejected.
 
-[8] src/gpu/mod.rs:136
+[9] src/gpu/mod.rs:138
 /// u32 words the voice pool stores per slot. Mirrors `VOICE_FIELDS` in
 /// `shaders/common.wgsl`; the two have to agree or the SoA stride is wrong.
 
-[9] src/gpu/mod.rs:140
+[10] src/gpu/mod.rs:142
 /// Words actually allocated per slot for this configuration.
 ///
 /// The last two fields are optional and are allocated from the end. The age is
@@ -72,7 +76,7 @@
 /// The modulation envelope needs the age as well as its own field, so it
 /// allocates both even where no LFO asks for the age.
 
-[10] src/gpu/mod.rs:162
+[11] src/gpu/mod.rs:164
 /// The largest `max_voices` an adapter can take, given how much of one buffer
 /// it will bind to a shader.
 ///
@@ -84,13 +88,13 @@
 /// drifting apart is exactly how the error message once came to recommend a
 /// value that then failed as well.
 
-[11] src/gpu/mod.rs:187
+[12] src/gpu/mod.rs:189
         // Per destination as well: a tremolo-only bank should not carry the
         // pitch path, nor a vibrato-only one the tremolo. Taken from the bank
         // here rather than from `Config`, so a caller that never downgrades
         // the config still gets exactly the paths its bank drives.
 
-[12] src/gpu/mod.rs:207
+[13] src/gpu/mod.rs:211
 /// Write `bytes` into `buf` from `offset`, 64 MiB at a time, letting the device
 /// take each piece before the next one is staged.
 ///
@@ -99,60 +103,65 @@
 /// table keeps a full second copy of it in RAM for the moment of the upload.
 /// The sample pool upload in `GpuSynth::new` is where that cost 1.5 GB.
 
-[13] src/gpu/mod.rs:240
+[14] src/gpu/mod.rs:244
 /// The render pass with or without the channel controller path and the glide
 /// path, each a compile-time constant so that a build without one carries none
 /// of its registers.
 
-[14] src/gpu/mod.rs:264
+[15] src/gpu/mod.rs:268
         // Drops naga's per-access clamps and its loop-bounding counters. Every
         // index in these shaders is derived from a count the host wrote, so
         // the clamps never fire in practice, but if one ever would, the result
         // here is a wild read instead of a clamped one. Opt-in only, and never
         // the default: see Config::unchecked_shaders.
 
-[15] src/gpu/mod.rs:299
+[16] src/gpu/mod.rs:303
     /// The same pass compiled with the channel controller path in it. Selected
     /// per block, so a file that sends no controllers never pays for them.
 
-[16] src/gpu/mod.rs:337
+[17] src/gpu/mod.rs:341
     /// Indexed by which of the two (key, index) buffers currently holds the
     /// live pairs.
 
-[17] src/gpu/mod.rs:373
+[18] src/gpu/mod.rs:377
     /// Note-off runs the gates buffer can hold behind its meta header, two
     /// words each.
 
-[18] src/gpu/mod.rs:376
+[19] src/gpu/mod.rs:380
     /// The most of one buffer the adapter binds to a shader, which is as far
     /// as the gates buffer may grow.
 
-[19] src/gpu/mod.rs:383
+[20] src/gpu/mod.rs:387
     // Held rather than dropped after construction because the gates buffer can
     // grow mid-render, and every render bind group has to be rebuilt when it
     // does. A binding missing from that rebuild is a validation error hours
     // into a long render and nothing at all in a short one.
 
-[20] src/gpu/mod.rs:394
+[21] src/gpu/mod.rs:398
     /// The render pass with the glide path in it, plain and with the
     /// controller path, compiled the first time a block needs one. A file that
     /// never glides never compiles them.
 
-[21] src/gpu/mod.rs:406
+[22] src/gpu/mod.rs:410
     /// Host mirror of the device live count, exact because every change to it
     /// is either host-decided or read back at the end of the block. May exceed
     /// `max_voices` between the spawn and the end-of-block compaction, while
     /// stolen voices are still fading out alongside their replacements.
 
-[22] src/gpu/mod.rs:414
+[23] src/gpu/mod.rs:417
+    /// The next block's position on the envelope grid: frames rendered so
+    /// far, modulo `Config::env_step_frames`. Every block is `block_frames`
+    /// long, so the backend keeps it without being told where it is.
+
+[24] src/gpu/mod.rs:422
     /// Reused buffer for the thinned spawn list, so a saturated block does not
     /// allocate a few megabytes every time.
 
-[23] src/gpu/mod.rs:446
+[25] src/gpu/mod.rs:454
         // Workgroup storage: sh holds WG * (TILE * 2) floats, one per voice per
         // channel lane, plus sh2's WG floats for the second reduction level.
 
-[24] src/gpu/mod.rs:458
+[26] src/gpu/mod.rs:466
         // Sizes `block_sums`: one entry per WG-sized block of the pool, counted
         // from the allocated slots rather than from `max_voices`, because the
         // pool runs over the voice ceiling between the spawn and the end-of-
@@ -161,7 +170,7 @@
         // dispatch grid -- the scans grid-stride, so it may exceed
         // `MAX_WORKGROUPS_PER_DIM` and every block still needs its entry.
 
-[25] src/gpu/mod.rs:467
+[27] src/gpu/mod.rs:475
         // What bounds the pool is not the dispatch grid but how much of one
         // buffer the adapter will bind to a shader at once. The voice pool is a
         // single storage buffer of `pool_slots * VOICE_FIELDS` words and is the
@@ -171,12 +180,12 @@
         // under it -- naming the slot ceiling itself would send the caller
         // straight back into this same error one flag later.
 
-[26] src/gpu/mod.rs:504
+[28] src/gpu/mod.rs:512
         // Slots, not the voice ceiling: a stolen voice keeps sounding until its
         // own stop frame, so the pool briefly holds the outgoing voices and
         // their replacements together. This is the SoA stride everywhere.
 
-[27] src/gpu/mod.rs:511
+[29] src/gpu/mod.rs:519
         // ---- static data ----
         // The sample pool goes up straight from the bank, a piece at a time.
         // It used to be cloned, to pad it to an even length, and handed whole
@@ -185,22 +194,22 @@
         // against 1.1 GB for the whole render after it (measured 2026-09-17).
         // A new buffer is zeroed, so the padding needs no writing.
 
-[28] src/gpu/mod.rs:532
+[30] src/gpu/mod.rs:540
         // Borrowed and uploaded in pieces, for the pool's reason: a
         // velocity-tracked library's table runs to hundreds of megabytes.
 
-[29] src/gpu/mod.rs:557
+[31] src/gpu/mod.rs:565
         // Room for every params variant CC71-CC75 may ask for, allocated up
         // front because the buffer is in a bind group that is built once. Only
         // variant zero is written now; the rest arrive if a file uses them.
 
-[30] src/gpu/mod.rs:570
+[32] src/gpu/mod.rs:578
         // Modulation-envelope table, laid out variant by variant beside
         // `params_buf` and read with the same index. A bank that drives no
         // modulation envelope gets a one-entry buffer that nothing reads: the
         // binding still has to exist, because the bind group is built once.
 
-[31] src/gpu/mod.rs:588
+[33] src/gpu/mod.rs:596
         // The pitch-factor table. Read-only, built once, and the reason the
         // two backends can agree exactly on a modulator whose offset persists;
         // see `bank::MOD_ENV_CENTS_STEPS`.
@@ -208,11 +217,11 @@
         // the shared `log2` mantissa table after them -- so the render pass
         // needs one binding rather than two.
 
-[32] src/gpu/mod.rs:605
+[34] src/gpu/mod.rs:613
         // Portamento's speeds and exponent table after them, always: 77 KB,
         // and which files glide is not known until the stream says so.
 
-[33] src/gpu/mod.rs:629
+[35] src/gpu/mod.rs:637
         // One buffer holds both halves of the note-off table: the per-slot
         // `[base, run]` meta header, then the runs of exact frames. Packing
         // them keeps this to a single binding.
@@ -222,7 +231,7 @@
         // typical block uses kilobytes of it, so this starts modest and grows
         // on demand, the same way the spawn command buffer does.
 
-[34] src/gpu/mod.rs:1078
+[36] src/gpu/mod.rs:1087
     /// Workgroups the render pass will be dispatched with this block, given
     /// the voice count it has to cover.
     ///
@@ -239,23 +248,23 @@
     /// buffer, so a grid wider than the stride makes the high workgroups
     /// clear and accumulate into slots belonging to other output samples.
 
-[35] src/gpu/mod.rs:1105
+[37] src/gpu/mod.rs:1114
             // `tiles` above is the reduce tile count the render loop walks;
             // the gate table is indexed separately by GATE_TILE.
 
-[36] src/gpu/mod.rs:1169
+[38] src/gpu/mod.rs:1178
     /// Grow the gates buffer so it can carry `runs` note-off runs.
     ///
     /// Runs in a block are bounded by `GATE_SLOTS * block_frames`, far more
     /// than a typical block uses, so this grows on demand like the spawn
     /// command buffer rather than allocating the bound up front.
 
-[37] src/gpu/mod.rs:1211
+[39] src/gpu/mod.rs:1220
     /// Workgroups to dispatch for `items` voices. Every entry point this feeds
     /// grid-strides, so clamping here shortens the grid rather than dropping
     /// the tail: a pool of any size is walked by whatever grid comes out.
 
-[38] src/gpu/mod.rs:1219
+[40] src/gpu/mod.rs:1228
     /// Read several readback buffers back with **one** device wait.
     ///
     /// `map_async` only queues the request; `poll(wait_indefinitely())` is the
@@ -274,7 +283,7 @@
     /// are stolen. That is a real pipelining opportunity and it is not free --
     /// see the development notes.
 
-[39] src/gpu/mod.rs:1261
+[41] src/gpu/mod.rs:1270
 /// How many note-off runs the gates buffer should hold to carry `runs`, or
 /// `None` when `current` already does. Doubles, never past what one binding
 /// can take, and refuses past that with the sizes named.
@@ -282,31 +291,31 @@
 /// All `u64`. The `u32` sizing this replaced wrapped to zero past 2^31
 /// entries, and the write then failed validation an hour into a render.
 
-[40] src/gpu/mod.rs:1310
+[42] src/gpu/mod.rs:1319
         // The modulation-envelope table travels with it, because CC71 and CC74
         // move the cutoff and resonance it modulates around. A bank that drives
         // no modulation envelope hands over one default entry, and writing it
         // is cheaper than testing for it.
 
-[41] src/gpu/mod.rs:1328
+[43] src/gpu/mod.rs:1337
         // Uploaded even when both flags are false: they only gate the
         // arithmetic, and a block that returns to unity partway through still
         // needs the earlier tiles' real values on the device.
 
-[42] src/gpu/mod.rs:1384
+[44] src/gpu/mod.rs:1393
     /// Queue the whole block: spawn, render, reduce, compact, and the copies
     /// into the readback buffers. Nothing here waits on the device.
 
-[43] src/gpu/mod.rs:1389
+[45] src/gpu/mod.rs:1398
         // More note-ons in one block than the pool can hold is a pathological
         // but legal input. Keep the first `cap` in event order, on both
         // backends, so the CPU reference and the device agree.
 
-[44] src/gpu/mod.rs:1401
+[46] src/gpu/mod.rs:1410
                 // Bounded so a block cannot replace the whole pool. See
                 // `Config::max_steal_percent`.
 
-[45] src/gpu/mod.rs:1422
+[47] src/gpu/mod.rs:1431
                 // Under `AdmitRule::Loudest` the driver has already sorted the
                 // block by rank, so a prefix is the highest-ranked `take`.
                 // Under `Even` it is thinned across the block instead of
@@ -314,21 +323,21 @@
                 // being heard at its start and silent at its end. See
                 // `spawn_pick`.
 
-[46] src/gpu/mod.rs:1445
+[48] src/gpu/mod.rs:1454
         // Voices only die inside the render pass, so this is an exact upper
         // bound on what the pass has to cover: the stolen voices are still in
         // the pool and still sounding until their stop frame. `self.live`
         // moves as the passes are recorded, which is why the count is taken
         // here and then carried rather than recomputed at the dispatch.
 
-[47] src/gpu/mod.rs:1476
+[49] src/gpu/mod.rs:1487
         // ---- 1. steal ----
         // The pass is always begun, even with nothing to do. Every timestamp
         // in the range handed to resolve_query_set has to have been written or
         // the resolve reads an unwritten query, which is undefined and shows
         // up as a lost device rather than as a validation error.
 
-[48] src/gpu/mod.rs:1503
+[50] src/gpu/mod.rs:1514
         // No compaction here, and so no parity flip and no change to `live`.
         // `mark_stolen` only schedules each victim's stop frame; the voices go
         // on sounding until they reach it, fade out there, and are removed by
@@ -336,52 +345,52 @@
         // what keeps the steal off the block boundary -- and it drops a whole
         // pool copy from the middle of the block as a side effect.
 
-[49] src/gpu/mod.rs:1527
+[51] src/gpu/mod.rs:1538
             // The controller path is compiled out of the plain pipeline, so
             // a block with nothing bent and nothing faded does not carry the
             // registers for it.
 
-[50] src/gpu/mod.rs:1531
+[52] src/gpu/mod.rs:1542
             // And the glide path only for a block where a voice may glide.
             // `set_glide` compiled these the first time it said so.
 
-[51] src/gpu/mod.rs:1540
+[53] src/gpu/mod.rs:1551
             // Exactly `u.render_workgroups`, which is what the reduce pass
             // uses as its stride. Every workgroup in the grid clears its own
             // partial slice before accumulating, so the reduce never folds in
             // stale audio; workgroups outside the grid are never read.
 
-[52] src/gpu/mod.rs:1557
+[54] src/gpu/mod.rs:1568
             // One grid for both halves. `dispatch_count` clamps to the grid
             // ceiling and every entry point below grid-strides, so a pool with
             // more blocks than the grid is walked, not truncated.
 
-[53] src/gpu/mod.rs:1563
+[55] src/gpu/mod.rs:1574
             // The counting half of the compaction runs either way: it is what
             // produces the live count.
 
-[54] src/gpu/mod.rs:1572
+[56] src/gpu/mod.rs:1583
                 // A least-significant-bit-first binary radix sort. Dead voices
                 // carry a region one past the last real one, so they end up
                 // past the live count and the gather never reaches them:
                 // compaction and reordering come out of one copy of the pool.
 
-[55] src/gpu/mod.rs:1627
+[57] src/gpu/mod.rs:1638
     /// Wait for the queued block and take its audio and counters back.
     ///
     /// This is the only blocking call on the path, and everything the driver
     /// can get done between `submit` and here is device time it would
     /// otherwise have spent idle.
 
-[56] src/gpu/mod.rs:1633
+[58] src/gpu/mod.rs:1644
         // One wait for everything the submit produced, rather than one per
         // buffer. See `map_read_many`.
 
-[57] src/gpu/mod.rs:1648
+[59] src/gpu/mod.rs:1659
         // The shader's own drop counter should stay at zero: the host never
         // asks it to spawn more than there is room for. If it ever moves,
         // something upstream miscounted, so say so rather than hide it.
 
-[58] src/gpu/mod.rs:1728
+[60] src/gpu/mod.rs:1739
     /// The count from the crash on 2026-09-13, as entries. It used to wrap the
     /// size to zero and fail a validation check; it now fails with a message.

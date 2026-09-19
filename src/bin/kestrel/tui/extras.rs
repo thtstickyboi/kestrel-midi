@@ -4,7 +4,9 @@
 
 //! Extras: the diagnostic commands, and what `ktrl.ini` keeps, in a window of \[1\]
 
-use super::style::{self, b, c, s, AMBER, DIM, ERR, OK, WARN};
+use super::style::{self, b, c, s, AMBER, DIM, OK, WARN};
+#[cfg(feature = "dev")]
+use super::style::ERR;
 use super::{prompt, Io, Native, Pick};
 use crate::settings::{self, Ring};
 use crate::update;
@@ -89,7 +91,7 @@ fn spawn(exe: &Path) -> std::io::Result<()> {
 pub fn run() -> anyhow::Result<()> {
     style::init();
     // [5]
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(crate::LOG_FILTER))
         .format_timestamp(None)
         .try_init();
     if crossterm::tty::IsTty::is_tty(&std::io::stdout()) {
@@ -103,46 +105,94 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// One entry of the Extras menu.
+#[derive(Clone, Copy)]
+enum Item {
+    GpuInfo,
+    FileInfo,
+    /// A dev-build entry, like the `null` command it runs.
+    #[cfg(feature = "dev")]
+    NullTest,
+    FlagHelp,
+    UpdateRing,
+    Folders,
+}
+
+/// What the Extras menu offers, in the order shown and numbered from 1. Built \[6\]
+fn items() -> Vec<Item> {
+    let mut v = vec![Item::GpuInfo, Item::FileInfo];
+    #[cfg(feature = "dev")]
+    v.push(Item::NullTest);
+    v.extend([Item::FlagHelp, Item::UpdateRing, Item::Folders]);
+    v
+}
+
 /// The Extras menu, until it is closed.
 pub fn menu(io: &mut dyn Io) {
+    let items = items();
+    let close = items.len() + 1;
     loop {
         super::clear_screen();
         style::print_banner();
         style::heading("Extras", "diagnostics and settings");
-        super::option("1", "GPU info", "every adapter wgpu can see, and its limits");
-        super::option("2", "File info", "what the loader makes of a soundfont or MIDI");
-        super::option("3", "Null test", "compare two WAV renders");
-        super::option("4", "Flag help", "every flag, what it does, and how to use it");
-        super::option(
-            "5",
-            "Update ring",
-            &format!("which releases Kestrel tells you about; now {}", ring_label(settings::load().0.ring)),
-        );
-        super::option("6", "Remembered folders", "where the MIDI, soundfont and destination pickers open");
-        super::option("7", "Close", "");
-        let choice = loop {
+        for (i, item) in items.iter().enumerate() {
+            let n = (i + 1).to_string();
+            match item {
+                Item::GpuInfo => {
+                    super::option(&n, "GPU info", "every adapter wgpu can see, and its limits")
+                }
+                Item::FileInfo => {
+                    super::option(&n, "File info", "what the loader makes of a soundfont or MIDI")
+                }
+                #[cfg(feature = "dev")]
+                Item::NullTest => super::option(&n, "Null test", "compare two WAV renders"),
+                Item::FlagHelp => {
+                    super::option(&n, "Flag help", "every flag, what it does, and how to use it")
+                }
+                Item::UpdateRing => super::option(
+                    &n,
+                    "Update ring",
+                    &format!(
+                        "which releases Kestrel tells you about; now {}",
+                        ring_label(settings::load().0.ring)
+                    ),
+                ),
+                Item::Folders => super::option(
+                    &n,
+                    "Remembered folders",
+                    "where the MIDI, soundfont and destination pickers open",
+                ),
+            }
+        }
+        super::option(&close.to_string(), "Close", "");
+        let item = loop {
             prompt();
-            match io.line() {
-                None => return,
-                Some(l) => match l.trim() {
-                    "1" | "2" | "3" | "4" | "5" | "6" => break l.trim().to_string(),
-                    "7" | "0" | "q" | "Q" => return,
-                    _ => style::error("Type a number from 1 to 7."),
-                },
+            let Some(l) = io.line() else {
+                return;
+            };
+            let l = l.trim();
+            if matches!(l, "0" | "q" | "Q") {
+                return;
+            }
+            match l.parse::<usize>() {
+                Ok(n) if n == close => return,
+                Ok(n) if (1..close).contains(&n) => break items[n - 1],
+                _ => style::error(format!("Type a number from 1 to {close}.")),
             }
         };
         style::blank();
-        match choice.as_str() {
-            "1" => gpu_info(),
-            "2" => file_info(io),
-            "3" => null_test(io),
-            "4" => flag_help(),
-            "5" => {
+        match item {
+            Item::GpuInfo => gpu_info(),
+            Item::FileInfo => file_info(io),
+            #[cfg(feature = "dev")]
+            Item::NullTest => null_test(io),
+            Item::FlagHelp => flag_help(),
+            Item::UpdateRing => {
                 if !update_ring(io) {
                     return;
                 }
             }
-            _ => folders(),
+            Item::Folders => folders(),
         }
         style::blank();
         style::say(vec![c("Press Enter to go back to Extras.", DIM)]);
@@ -248,6 +298,7 @@ fn file_info(io: &mut dyn Io) {
     }
 }
 
+#[cfg(feature = "dev")]
 fn null_test(io: &mut dyn Io) {
     style::heading("Null test", "how far apart two renders are");
     style::say(vec![c("Choose the reference first, then the render to compare with it.", DIM)]);
@@ -273,7 +324,7 @@ fn null_test(io: &mut dyn Io) {
     }
 }
 
-/// Every public subcommand's flags, straight from the clap definitions that \[6\]
+/// Every public subcommand's flags, straight from the clap definitions that \[7\]
 pub fn flag_help() {
     let mut cmd = crate::Cli::command();
     cmd.build();

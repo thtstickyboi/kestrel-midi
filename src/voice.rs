@@ -378,23 +378,45 @@ pub fn off_frame(meta: &[u32], runs: &[u32], slot: usize, ordinal: u32) -> Optio
     Some(runs[lo as usize * 2 + 1])
 }
 
+/// Where a voice's position on the envelope grid sits in its gate slot word: \[33\]
+pub const GRID_SHIFT: u32 = 11;
+pub const GRID_MASK: u32 = 0x1FFF;
+
+/// A voice's position on its envelope grid at block frame `f`: frames since its \[34\]
+#[inline]
+pub fn grid_pos(env_phase: u32, slot_word: u32, f: u32, step: u32) -> u32 {
+    (env_phase + f + step - ((slot_word >> GRID_SHIFT) & GRID_MASK)) % step
+}
+
+/// The frame a release starts falling on, for a note-off at block frame `off`: \[35\]
+#[inline]
+pub fn release_start(env_phase: u32, slot_word: u32, off: u32, step: u32) -> u32 {
+    off + (step - grid_pos(env_phase, slot_word, off, step)) % step + 1
+}
+
+/// Frames of fall left from block frame `f` for a voice already releasing, \[36\]
+#[inline]
+pub fn fall_left(env_phase: u32, slot_word: u32, f: u32, step: u32) -> u32 {
+    step - (grid_pos(env_phase, slot_word, f, step) + step - 1) % step
+}
+
 pub const BEND_CHANNELS: usize = 16;
-/// Words per channel in a `ChannelTable` row: bend factor, left gain, right \[33\]
+/// Words per channel in a `ChannelTable` row: bend factor, left gain, right \[37\]
 pub const CHAN_FIELDS: usize = 8;
 pub const CHAN_BEND: usize = 0;
 pub const CHAN_GAIN_L: usize = 1;
 pub const CHAN_GAIN_R: usize = 2;
 /// Which copy of the params table this channel's voices read, see `ParamMod`.
 pub const CHAN_VARIANT: usize = 3;
-/// Frame within the block at which CC120 silenced this channel, plus one. \[34\]
+/// Frame within the block at which CC120 silenced this channel, plus one. \[38\]
 pub const CHAN_CUT: usize = 4;
-/// The note id that cut applies *below*, low and high words. \[35\]
+/// The note id that cut applies *below*, low and high words. \[39\]
 pub const CHAN_CUT_ID_LO: usize = 5;
 pub const CHAN_CUT_ID_HI: usize = 6;
 
-/// Per-channel controller state, published the same way the note-off gate is: \[36\]
+/// Per-channel controller state, published the same way the note-off gate is: \[40\]
 pub struct ChannelTable {
-    /// `tiles * BEND_CHANNELS * CHAN_FIELDS` entries, tile-major. Gains are \[37\]
+    /// `tiles * BEND_CHANNELS * CHAN_FIELDS` entries, tile-major. Gains are \[41\]
     pub rows: Vec<u32>,
     pub tiles: usize,
     /// Current state per channel, carried across blocks.
@@ -417,7 +439,7 @@ impl ChannelTable {
             now[c * CHAN_FIELDS + CHAN_GAIN_R] = 1.0f32.to_bits();
             now[c * CHAN_FIELDS + CHAN_VARIANT] = 0;
         }
-        // [38]
+        // [42]
         let mut rows = vec![0u32; (tiles + 1) * BEND_CHANNELS * CHAN_FIELDS];
         for t in 0..tiles {
             let base = t * BEND_CHANNELS * CHAN_FIELDS;
@@ -457,12 +479,12 @@ impl ChannelTable {
         if self.now[i] == factor {
             return;
         }
-        // [39]
+        // [43]
         self.advance_to(frame);
         self.now[i] = factor;
     }
 
-    /// CC120, All Sound Off: silence this channel *now*, ignoring release. \[40\]
+    /// CC120, All Sound Off: silence this channel *now*, ignoring release. \[44\]
     pub fn set_sound_off(&mut self, ch: u8, frame: u32, note_id: u64) {
         self.advance_to(frame);
         let tile = (frame / self.tile_frames) as usize;
@@ -475,14 +497,14 @@ impl ChannelTable {
         self.cut_active = true;
     }
 
-    /// Set a channel's output gains from this frame on. These multiply the \[41\]
+    /// Set a channel's output gains from this frame on. These multiply the \[45\]
     pub fn set_gain(&mut self, ch: u8, l: f32, r: f32, frame: u32) {
         let base = (ch as usize & 15) * CHAN_FIELDS;
         let (lb, rb) = (l.to_bits(), r.to_bits());
         if self.now[base + CHAN_GAIN_L] == lb && self.now[base + CHAN_GAIN_R] == rb {
             return;
         }
-        // [42]
+        // [46]
         self.advance_to(frame);
         self.now[base + CHAN_GAIN_L] = lb;
         self.now[base + CHAN_GAIN_R] = rb;
@@ -494,15 +516,15 @@ impl ChannelTable {
         if self.now[i] == variant {
             return;
         }
-        // [43]
+        // [47]
         self.advance_to(frame);
         self.now[i] = variant;
     }
 
-    /// Fill any tiles no event reached. Call before `modulate` and \[44\]
+    /// Fill any tiles no event reached. Call before `modulate` and \[48\]
     pub fn end_block(&mut self) {
         let w = BEND_CHANNELS * CHAN_FIELDS;
-        // [45]
+        // [49]
         while self.cursor <= self.tiles {
             let base = self.cursor * w;
             self.rows[base..base + w].copy_from_slice(&self.now);
@@ -510,7 +532,7 @@ impl ChannelTable {
         }
     }
 
-    /// Which row a note struck at `frame` should take its opening bend and gain \[46\]
+    /// Which row a note struck at `frame` should take its opening bend and gain \[50\]
     pub fn row_bias(&self, ch: u8, frame: u32) -> u32 {
         let tile = (frame / self.tile_frames) as usize;
         if tile >= self.tiles || self.cursor <= tile {
@@ -526,7 +548,7 @@ impl ChannelTable {
         0
     }
 
-    /// Multiply a tile's already-published bend factor, for an LFO the host \[47\]
+    /// Multiply a tile's already-published bend factor, for an LFO the host \[51\]
     pub fn modulate_bend(&mut self, ch: u8, tile: usize, factor: u32) {
         let i = (tile * BEND_CHANNELS + (ch as usize & 15)) * CHAN_FIELDS + CHAN_BEND;
         let scaled = ((self.rows[i] as u64 * factor as u64) >> 24) as u32;
@@ -564,7 +586,7 @@ impl ChannelTable {
         }
     }
 
-    /// False when every channel read the untouched params table, which lets \[48\]
+    /// False when every channel read the untouched params table, which lets \[52\]
     #[inline]
     pub fn variant_active(&self) -> bool {
         self.variant_active
@@ -582,13 +604,13 @@ impl ChannelTable {
         self.cut_active
     }
 
-    /// False when nothing in this block is bent, which lets both backends skip \[49\]
+    /// False when nothing in this block is bent, which lets both backends skip \[53\]
     #[inline]
     pub fn bend_active(&self) -> bool {
         self.bend_active
     }
 
-    /// False when every channel sat at unity gain, which lets both backends \[50\]
+    /// False when every channel sat at unity gain, which lets both backends \[54\]
     #[inline]
     pub fn gain_active(&self) -> bool {
         self.gain_active
@@ -600,7 +622,7 @@ impl ChannelTable {
         &self.rows[tile * w..tile * w + w]
     }
 
-    /// The channel a voice belongs to, recovered from its gate slot. Voices \[51\]
+    /// The channel a voice belongs to, recovered from its gate slot. Voices \[55\]
     #[inline]
     pub fn channel_of(gate_slot: u32) -> usize {
         (gate_slot >> 7) as usize & 15
@@ -621,7 +643,7 @@ mod tests {
     }
 
     impl GateTable {
-        /// One frame per note-off, the layout the runs replaced, so these \[52\]
+        /// One frame per note-off, the layout the runs replaced, so these \[56\]
         fn off_frames_for(&self, slot: usize) -> Vec<u32> {
             let mut out = Vec::new();
             let mut done = 0u32;
@@ -633,7 +655,7 @@ mod tests {
         }
     }
 
-    /// A pedal lift or an all-notes-off publishes any number of note-offs on \[53\]
+    /// A pedal lift or an all-notes-off publishes any number of note-offs on \[57\]
     #[test]
     fn a_flood_of_note_offs_on_one_frame_is_one_run() {
         let mut g = GateTable::new(&cfg());
@@ -654,7 +676,7 @@ mod tests {
         assert_eq!(off_frame(&g.off_meta, &g.off_runs, s, 100_001), None);
     }
 
-    /// The binary search reads exactly the frame an index into one entry per \[54\]
+    /// The binary search reads exactly the frame an index into one entry per \[58\]
     #[test]
     fn the_run_search_reads_what_one_entry_per_note_off_would() {
         let mut g = GateTable::new(&Config {
@@ -710,7 +732,7 @@ mod tests {
         }
     }
 
-    /// A note-off is published at the frame it happened on, not at the start \[55\]
+    /// A note-off is published at the frame it happened on, not at the start \[59\]
     #[test]
     fn a_note_off_carries_its_exact_frame() {
         let mut g = GateTable::new(&cfg());
@@ -725,7 +747,7 @@ mod tests {
         assert_eq!(g.off_frames_for(s), &[40], "frame 40, not tile 2's start");
     }
 
-    /// Several note-offs in one gate tile stay distinct, which is the case the \[56\]
+    /// Several note-offs in one gate tile stay distinct, which is the case the \[60\]
     #[test]
     fn note_offs_inside_one_tile_keep_their_own_frames() {
         let mut g = GateTable::new(&cfg());
@@ -761,12 +783,12 @@ mod tests {
         g.begin_block();
         g.set_sustain(0, false, 16);
         g.end_block();
-        // [57]
+        // [61]
         assert_eq!(g.off_frames_for(s), &[16]);
         assert_eq!(g.sounding(), 0);
     }
 
-    /// Restriking a key while the pedal is down leaves two notes sounding and \[58\]
+    /// Restriking a key while the pedal is down leaves two notes sounding and \[62\]
     #[test]
     fn a_restrike_under_the_pedal_releases_only_what_was_lifted() {
         let mut g = GateTable::new(&cfg());
@@ -778,7 +800,7 @@ mod tests {
         g.note_on(0, 60, 16);
         // A second off with only one note left un-lifted is still legal.
         g.note_off(0, 60, 16);
-        // [59]
+        // [63]
         g.note_off(0, 60, 16);
         g.end_block();
         assert_eq!(g.sounding(), 2, "both strikes are held by the pedal");
@@ -819,7 +841,7 @@ mod tests {
         g.end_block();
         assert_eq!((a, b), (1, 2));
         let s = GateTable::slot(0, 60);
-        // [60]
+        // [64]
         assert_eq!(g.off_base(s), 0);
         assert_eq!(g.off_frames_for(s), &[16]);
     }

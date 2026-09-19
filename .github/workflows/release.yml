@@ -65,15 +65,15 @@ jobs:
         shell: bash
         run: |
           if [ "${{ matrix.name }}" = macos-universal ]; then
-            cargo build --release --locked --target aarch64-apple-darwin
-            cargo build --release --locked --target x86_64-apple-darwin
+            cargo build --release --locked --no-default-features --target aarch64-apple-darwin
+            cargo build --release --locked --no-default-features --target x86_64-apple-darwin
             mkdir -p target/release
             lipo -create -output target/release/kestrel \
               target/aarch64-apple-darwin/release/kestrel \
               target/x86_64-apple-darwin/release/kestrel
             lipo -info target/release/kestrel
           else
-            cargo build --release --locked
+            cargo build --release --locked --no-default-features
           fi
 
       - name: Smoke test
@@ -82,6 +82,10 @@ jobs:
           exe=target/release/kestrel
           [ -f "$exe.exe" ] && exe="$exe.exe"
           "$exe" --version
+          # The zips are release builds: no developer options.
+          if "$exe" --version | grep -q "(dev)"; then
+            echo "::error::the build is in dev mode"; exit 1
+          fi
           "$exe" --force-cli render --help > /dev/null
 
       - name: Package

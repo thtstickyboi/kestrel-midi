@@ -56,7 +56,15 @@ git clone https://github.com/thtstickyboi/kestrel-midi.git
 cd kestrel-midi && cargo build --release
 ```
 
-Build in **release mode**. The debug build is not merely slower, it is unusable for real files. The binary lands at `target/release/kestrel` and is self-contained: no system libraries, and the shaders are compiled into it.
+Build in **release mode**. The debug build is not merely slower, it is unusable for real files. The binary lands at `target/release/kestrel` and is self-contained: no system libraries, and the shaders are compiled into it. On Windows the build downloads Microsoft's DXC shader compiler once and links it in, for the DX12 backend.
+
+That is the same build as the downloads. **Dev mode** adds the options for measuring and debugging the engine -- tuning the GPU passes, switching back to older behaviour for comparison, per-block diagnostics -- and the `null` command:
+
+```bash
+cargo build --release --features dev
+```
+
+A dev build says `(dev)` after its version and lists those options under *Developer options* in `render --help`. At the same settings it renders exactly what the release build does.
 
 ## Requirements
 
@@ -164,21 +172,19 @@ kestrel --force-cli get-ffmpeg        # download one into ffmpeg/ beside Kestrel
 | `--volume P` | `100` | Volume as a percentage, 0 to 200, applied before the limiter. See below. |
 | `--limiter` | `brickwall` | `brickwall`, `omni` or `off`. See *Limiting*. |
 | `--ceiling-db` | `0`, or `-1` for lossy | The brickwall's ceiling in dBFS. |
-| `--steal` | `quietest` | `quietest`, `oldest` or `drop-new`. |
-| `--admit` | `loudest` | `loudest` or `even`. Which note-ons survive when a block oversubscribes the pool. |
 | `--steal-percent` | `25` | How much of the pool one block may replace. |
+| `--min-velocity N` | `0` | Skip every note quieter than velocity N, as if the file did not contain it. On black MIDI full of ghost notes this can make a render many times faster. |
+| `--note-grid` | off | Hold notes to BASSMIDI's 4 ms envelope grid, so notes shorter than 4 ms still sound. Only for files that rely on it; see *Matching BASSMIDI*. |
 | `--format` | `float32` | `float32` or `pcm16`, for WAV. |
 | `--ffmpeg PATH` | found automatically | Use this ffmpeg for encoded output. |
-| `--no-lfo`, `--no-mod-env` | off | Skip the LFOs or the SF2 modulation envelope. |
-| `--nan-guard` | off | Check every block for NaN and Inf. **Off in release builds**, so a clean exit is not by itself proof the WAV is finite. |
+| `--nan-guard` | off | Check every block for NaN and Inf. **Off by default**, so a clean exit is not by itself proof the WAV is finite. |
 | `--profile` | off | Per-pass GPU timings and the host/device split, once per wall-clock second. |
-| `--block-csv` | off | One CSV row per block: voices alive at admission, layers queued and admitted, stolen, dropped, output RMS and peak. Read these rather than the waveform when level moves at the block rate. |
 | `--progress json` | off | Machine-readable progress for one render; see *Building a GUI on Kestrel*. |
 | `--gpu-backend`, `--gpu-adapter` | off | Force a specific API or card on multi-GPU machines. |
 
 **`--volume` is a percentage** on the same linear scale as OmniConverter's: `100` changes nothing, `50` is half (-6 dB), `0` is silent, `200` the most. Before 1.1.0 it was a plain gain, so `--volume 0.5` in an old script now means half a percent -- values above 0 and up to 2 render with a warning for that reason. A dense mix sits far above full scale and the limiter holds it at the ceiling, so lowering the volume eases the limiting more than it quietens the file; `--ceiling-db` is what sets how loud the file can get.
 
-`kestrel --force-cli render --help` lists everything, including tuning knobs (`--workgroup`, `--reduce-tile`, `--gate-frames`, `--pool-budget`) best left alone unless you are measuring.
+`kestrel --force-cli render --help` lists everything. The engine's tuning and debugging options are in dev builds only; see *Building from source*.
 
 ### The other commands
 
@@ -187,7 +193,6 @@ kestrel --force-cli api                   # a session another program drives; se
 kestrel --force-cli gpu-info              # adapters, limits, and each one's --max-voices ceiling
 kestrel --force-cli info file.sf2         # what the loader made of a soundfont
 kestrel --force-cli info file.mid         # ...or of a MIDI: note counts, CC usage, tempo, density
-kestrel --force-cli null a.wav b.wav      # peak difference between two renders, in dB
 kestrel --force-cli ffmpeg-info           # the ffmpeg encoded output would use
 kestrel --force-cli get-ffmpeg            # fetch one; see Output formats
 kestrel --force-cli check-update          # is a newer Kestrel out? downloads nothing
@@ -260,14 +265,15 @@ Where Kestrel and BASSMIDI disagree, BASSMIDI is taken as the reference, and the
 
 - **Tempo changes.** BASSMIDI advances a whole output sample at a time, fires an event -- a tempo change included -- on the first sample whose tick position has reached it, and carries the ticks that ran past a tempo change into the new tempo. Kestrel does the same, and agrees with it to 0.000 ms across 57 sections of back-to-back tempo changes. At ordinary tempos a sample is a fraction of a tick and nothing can be heard; in bursts of changes in the thousands of bpm it adds up to tens of milliseconds.
 - **Channel volume** powers on at 100, not 127.
-- **LFOs.** SFZ's amplitude and pitch LFOs were measured against BASSMIDI's: a triangle starting at zero, delayed from the note's own start, at the depth, rate and direction it plays them. SF2's run on the same oscillator. Every LFO and modulation envelope counts from its note's own start -- before 1.1.0 they could run up to a block early. They update once per `--gate-frames` (32 frames).
+- **LFOs.** SFZ's amplitude and pitch LFOs were measured against BASSMIDI's: a triangle starting at zero, delayed from the note's own start, at the depth, rate and direction it plays them. SF2's run on the same oscillator. Every LFO and modulation envelope counts from its note's own start -- before 1.1.0 they could run up to a block early. They update every 32 frames.
+- **Short notes, with `--note-grid`.** BASSMIDI moves each note's envelope in 4 ms steps counted from its note-on, so a note-off only takes effect at the next step, and a release shorter than a step becomes a 4 ms fade. A note one sample long still sounds for 4 ms. With `--note-grid` Kestrel does the same, matched to the sample; without it a note ends on its own note-off, as before. It is off by default because almost no file notices and it costs about 12% of a render, but a file that encodes audio as one-sample notes renders silent without it.
 - **Portamento.** CC65 turns it on, CC5 sets the speed and CC84 names the next note's starting key, as in BASSMIDI: a note glides in a straight line in pitch from the channel's last note, and CC5 = 0, the power-on value, means no glide. Kestrel's glides match BASSMIDI's speed to within 0.03%. Mono mode (CC126) is not implemented, so a note struck over a held one glides but does not cut it.
 
 ## Limiting
 
 Black MIDI mixes clip constantly -- a saturated section can peak at hundreds of times full scale -- so what happens at the ceiling matters more than usual.
 
-**`brickwall`** (default) is a lookahead true-peak limiter. It sees peaks before they arrive and cannot exceed its ceiling, so nothing downstream ever has to hard-clip. `--ceiling-db`, `--lookahead-ms` and `--limiter-release-ms` control it. The lookahead is also the render latency, which for an offline renderer costs nothing.
+**`brickwall`** (default) is a lookahead true-peak limiter. It sees peaks before they arrive and cannot exceed its ceiling, so nothing downstream ever has to hard-clip. `--ceiling-db` sets the ceiling. Its 2 ms lookahead is also the render latency, which for an offline renderer costs nothing.
 
 **`omni`** is a port of the realtime limiter OmniConverter ships, originally from Kiva. It is a feedback follower: it sees a peak only once the peak has passed, which is why it needs a third of a second of release, and that release audibly drags the level down after every loud moment. It does not bound its own output, so since 1.1.0 the brickwall runs behind it as a safety stage at the render's ceiling: wherever omni stays under the ceiling the output is omni's, delayed by the lookahead, and nothing clips. **Keep it only for level-matching a render against BASS or XSynth.**
 
@@ -287,9 +293,9 @@ How much of that you face is a function of pool size, and the pool can be far la
 
 At its busiest the file has 5,338,314 voices sounding at once. With 13,421,568 slots every note sounds, none refused and none cut short, for 4.3 GiB of device buffers. Admission stops mattering well before stealing does, and past what the file needs a bigger pool costs memory rather than time: 16,519,104 voices renders in the same 148 s.
 
-**`--admit loudest`** (default) ranks an oversubscribed block by opening amplitude and keeps the loudest; **`even`** thins the block evenly. At small pools `loudest` measurably wins -- at 32,767 voices, -10.065 dB RMS against `even`'s -11.225 at an identical peak, which is what "the long loud notes survived" looks like as a number -- and the gap narrows as the pool grows, to within 0.01 dB at the default. There is no duration term: ranking is purely by opening amplitude, so a loud note cut short and a loud note held look the same.
+**Admission** ranks an oversubscribed block by opening amplitude and keeps the loudest. Thinning the block evenly instead, which a dev build offers as `--admit even` for comparison, measurably loses at small pools -- at 32,767 voices, -10.065 dB RMS against `even`'s -11.225 at an identical peak, which is what "the long loud notes survived" looks like as a number -- and the gap narrows as the pool grows, to within 0.01 dB at the default. There is no duration term: ranking is purely by opening amplitude, so a loud note cut short and a loud note held look the same.
 
-**`--steal quietest`** (default) kills the voices with the lowest envelope level, ties broken by note id. **`oldest`** kills the earliest-started, which sounds backwards under saturation and is: the oldest voices are the mature, sounding ones. **`drop-new`** refuses the incoming note instead.
+**Stealing** kills the voices with the lowest envelope level, ties broken by note id. Killing the earliest-started instead sounds backwards under saturation and is: the oldest voices are the mature, sounding ones. (A dev build keeps `--steal oldest` and `drop-new`, which refuses the incoming note, for comparison.)
 
 **`--steal-percent`** (25) caps how much of the pool one block may replace. Unbounded, a block whose note-ons outnumber the pool replaces *every* voice, so no voice outlives the block it was born in and a saturated passage renders as a stream of 85 ms attack fragments instead of notes.
 
@@ -315,7 +321,7 @@ One command buffer per audio block, five compute passes: **steal**, **spawn**, *
 - **SFZ support is almost complete.** The common opcodes work, including `#include`, `#define`, velocity layers, `lorand`/`hirand`, velocity crossfade, `fil_veltrack`, `amp_veltrack`, `key`, `loopstart`/`loopend`, `pitch_keytrack`, `off_by`, and the amplitude and pitch LFOs (`amplfo_*`, `pitchlfo_*`). Not applied: `fillfo_depth`, the LFO `*_fade` opcodes (BASSMIDI ramps the depth in over them; Kestrel applies it at once), LFOs driven by a controller, SFZ v2's `lfoN_*`, `note_selfmask`, and the per-stage envelope velocity-tracking opcodes. Kestrel warns about every opcode it does not apply, so you will not hit this silently.
 - **The SF2 modulation LFO's filter destination** (`modLfoToFilterFc`) is not implemented. Its pitch and volume destinations are.
 - **VRAM figures** in the progress screen and the JSON feed are Windows only.
-- **NaN checking is off in release builds** unless you pass `--nan-guard`.
+- **NaN checking is off** unless you pass `--nan-guard`.
 
 ## Planned
 

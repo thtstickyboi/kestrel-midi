@@ -41,7 +41,11 @@
 // envelope needs: everything else about it is a function of the age. Carried
 // only by banks that drive one; see `voice_fields`.
 
-[7] shaders/common.wgsl:76
+[7] shaders/common.wgsl:69
+// The release fits inside one step of the envelope grid, so it is one straight
+// fade over the whole step. Mirrors `bank::RP_SHORT_RELEASE`.
+
+[8] shaders/common.wgsl:79
 // ---------------------------------------------------------------------------
 // device-side state
 // ---------------------------------------------------------------------------
@@ -49,33 +53,46 @@
 // whole block of passes can be recorded into one command buffer without the
 // host having to rewrite a uniform between dispatches.
 
-[8] shaders/common.wgsl:106
+[9] shaders/common.wgsl:109
 // Ramp channel gain across a gate tile rather than stepping it at the
 // boundary. See `Config::gain_ramp`.
 
-[9] shaders/common.wgsl:116
+[10] shaders/common.wgsl:117
+// Frames in one step of the envelope grid, 4 ms. A note-off takes effect at
+// the first grid point at or after it, counted from the voice's note-on. See
+// `Config::env_step_frames`.
+
+[11] shaders/common.wgsl:121
+// Whether note-offs follow that grid at all: `--note-grid`. A constant, so a
+// render without it runs exactly the code it ran before the grid existed.
+
+[12] shaders/common.wgsl:124
+// A voice's position on that grid, in its gate slot word. Mirrors
+// `voice::GRID_SHIFT`.
+
+[13] shaders/common.wgsl:130
 // Which of the two LFO destinations the bank drives, so a destination it never
 // touches compiles away. Both are false whenever `USE_LFO` is.
 
-[10] shaders/common.wgsl:120
+[14] shaders/common.wgsl:134
 // Whether this build evaluates the SF2 modulation envelope. See
 // `Config::mod_env_enabled`.
 
-[11] shaders/common.wgsl:123
+[15] shaders/common.wgsl:137
 // Output rate, as a literal rather than a uniform: it never changes inside a
 // render and the biquad rebuild wants it as an f32.
 
-[12] shaders/common.wgsl:126
+[16] shaders/common.wgsl:140
 // (20 / 48) * log10(2). Mirrors `bank::MOD_ENV_ATTACK_SCALE`; see
 // `mod_env_attack_level` for where the number comes from and how it was
 // measured.
 
-[13] shaders/common.wgsl:144
+[17] shaders/common.wgsl:158
     // bit 0 runs the filter; bits 16..32 are `modLfoToVolume` as an i16 in
     // centibels. Packed to hold this struct at 16 words -- one 64-byte cache
     // line -- because it is read scattered, once per voice.
 
-[14] shaders/common.wgsl:156
+[18] shaders/common.wgsl:170
 // Modulation-envelope constants, in a table parallel to `params` and read with
 // the same index. Mirrors `bank::ModEnvParams`; keep the two in step.
 //
@@ -84,36 +101,40 @@
 // whole render last time. This one is a single dummy entry unless the bank
 // uses the feature.
 
-[15] shaders/common.wgsl:195
+[19] shaders/common.wgsl:209
 /// SF2's LFO waveform: a triangle starting at zero and rising, in [-1, 1].
 /// Branch-free, because the render pass evaluates it for every voice and a
 /// branch on a voice's phase costs more than the arithmetic does; see the LFO
 /// block in `render.wgsl`. A quarter turn on, the triangle is one minus the
 /// distance from the middle of the turn. Mirrors `bank::lfo_tri`.
 
-[16] shaders/common.wgsl:232
+[20] shaders/common.wgsl:246
     /// Half-width of the modulation envelope's pitch-factor table, in
     /// sixteenths of a cent.
 
-[17] shaders/common.wgsl:237
+[21] shaders/common.wgsl:251
     /// Where portamento's speeds, and then its exponent table, start in
     /// `menv_factors`. See `porta::tables`.
 
-[18] shaders/common.wgsl:249
+[22] shaders/common.wgsl:254
+    /// Frame 0 of this block's position on the envelope grid: the frames
+    /// rendered so far, modulo `ENV_STEP`.
+
+[23] shaders/common.wgsl:265
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 
-[19] shaders/common.wgsl:255
+[24] shaders/common.wgsl:271
 // Words per channel: bend, left gain, right gain, variant, the CC120 cut,
 // and spares to keep the stride a power of two. Mirrors `voice::CHAN_FIELDS`.
 
-[20] shaders/common.wgsl:263
+[25] shaders/common.wgsl:279
 // The note id that cut applies below. See `voice::CHAN_CUT_ID_LO`: a CC120
 // silences by event order, not by frame, and a file that uses it as a choke
 // puts the cut and the restrike on the same frame.
 
-[21] shaders/common.wgsl:271
+[26] shaders/common.wgsl:287
 // The 64-bit key voice stealing selects the k smallest of, as (hi, lo). The
 // caller loads the words; this only decides how they are combined, so that the
 // selection and the marking cannot disagree about the ordering.
@@ -127,7 +148,7 @@
 // exactly 0.0. A note id needs 48 bits to stay unique for any file this will
 // see -- 2.8e14 against the 5.5e9 of the largest known.
 
-[22] shaders/common.wgsl:292
+[27] shaders/common.wgsl:308
 // 32.32 fixed point, held as two u32 lanes because WGSL has no portable u64.
 // `mul32` / `scale64` / `add64` / `less64` below are that arithmetic.
 //
@@ -135,7 +156,7 @@
 // version in 16-bit limbs, with the middle carry handled explicitly because
 // `p01 + p10` overflows 32 bits.
 
-[23] shaders/common.wgsl:314
+[28] shaders/common.wgsl:330
 // Scale a 32.32 value by an 8.24 fixed-point factor, truncating, saturating
 // rather than wrapping. Returns (hi, lo) like `add64`.
 //
@@ -143,11 +164,11 @@
 // bent voice gets its step, and a step that differs in its low bits does not
 // null as an error, it nulls as two renders drifting apart over a block.
 
-[24] shaders/common.wgsl:351
+[29] shaders/common.wgsl:367
 // The index `off` frames away from `idx`, honouring the loop. Mirrors
 // `CpuSynth::advance_index` statement for statement.
 
-[25] shaders/common.wgsl:366
+[30] shaders/common.wgsl:382
 // ---------------------------------------------------------------------------
 // modulation envelope
 // ---------------------------------------------------------------------------
@@ -155,30 +176,30 @@
 // binds the tables it reads. What is here is what the other passes can also
 // see, and the constants both sides have to agree on.
 
-[26] shaders/common.wgsl:373
+[31] shaders/common.wgsl:389
 // Entries in the shared `log2` mantissa table, and the bits used to
 // interpolate between two of them. Mirror `bank::MOD_ENV_LOG2_BITS`.
 
-[27] shaders/common.wgsl:378
+[32] shaders/common.wgsl:394
 // `biquad_lowpass` with the resonance-dependent terms already computed on the
 // host. Mirrors `bank::biquad_lowpass_pre`; only the sine and the cosine are
 // left for the two backends to agree on.
 
-[28] shaders/common.wgsl:395
+[33] shaders/common.wgsl:411
 // Steps per cent in the modulation envelope's pitch-factor table. Mirrors
 // `bank::MOD_ENV_CENTS_STEPS`, where the reason for the table is written down.
 
-[29] shaders/common.wgsl:399
+[34] shaders/common.wgsl:415
 // Index into the pitch-factor table. Mirrors `bank::mod_env_pitch_index`, and
 // built out of `floor` and a clamp rather than a cast because those are
 // exactly specified everywhere -- which is the whole point of the table.
 
-[30] shaders/common.wgsl:403
+[35] shaders/common.wgsl:419
     // `round` rather than `floor(x + 0.5)`: the addition would sit next to the
     // multiply and be contracted into a fused multiply-add here but not on the
     // host. Ties go to even on both sides.
 
-[31] shaders/common.wgsl:411
+[36] shaders/common.wgsl:427
 // Round to a multiple of 2^-22, through an integer. Mirrors
 // `bank::quantise_level`, where what this is for is written down: the integer
 // conversion forces the multiply feeding it to be rounded, so a compiler cannot

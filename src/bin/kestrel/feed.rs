@@ -371,6 +371,7 @@ mod tests {
             audio_secs: 1.0,
             wall_secs: 0.5,
             notes: 5,
+            notes_skipped: 0,
             voices_spawned: 5,
             peak_voices: 5,
             stolen: 0,

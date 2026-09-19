@@ -423,6 +423,7 @@ pub(crate) const LOAD_NEUTRAL: &[&str] = &[
     "--limiter-sustain-ms",
     "--lookahead-ms",
     "--max-voices",
+    "--min-velocity",
     "--nan-guard",
     "--no-limiter",
     "--no-sort",

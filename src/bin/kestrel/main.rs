@@ -21,12 +21,31 @@ use kestrel::limiter::LimiterMode;
 use kestrel::config::{
     AdmitRule, BackendKind, Config, EnvelopeCurve, Interpolation, StealRule,
 };
-use kestrel::{gpu, load_bank, testkit, wav};
+use kestrel::{gpu, load_bank};
+#[cfg(feature = "dev")]
+use kestrel::{testkit, wav};
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+/// The version `--version` prints, marked when this is a dev build so a bug
+/// report says which option set it came from. See the `dev` feature.
+#[cfg(feature = "dev")]
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (dev)");
+#[cfg(not(feature = "dev"))]
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// What the command line logs unless `RUST_LOG` says otherwise: Kestrel's own
+/// information, and only warnings from the GPU stack. wgpu's DX12 backend logs
+/// every shader it generates at info, which opened every DX12 render with
+/// pages of HLSL.
+pub(crate) const LOG_FILTER: &str = "info,wgpu_core=warn,wgpu_hal=warn,naga=warn";
+
+/// Which option set this build has: `dev` with the developer options and
+/// commands, `release` without them, as the downloadable zips are built.
+pub(crate) const BUILD: &str = if cfg!(feature = "dev") { "dev" } else { "release" };
+
 #[derive(Parser)]
-#[command(name = "kestrel", version, about = "GPU-accelerated SoundFont/SFZ renderer for black MIDI")]
+#[command(name = "kestrel", version = VERSION, about = "GPU-accelerated SoundFont/SFZ renderer for black MIDI")]
 struct Cli {
     /// Run from the command line. Given any other arguments without this,
     /// Kestrel points at the guided renderer instead of running them; with no
@@ -79,6 +98,7 @@ enum Cmd {
         soundfont: Option<PathBuf>,
     },
     /// Compare two WAV files and report the null-test difference.
+    #[cfg(feature = "dev")]
     Null {
         /// The reference render.
         a: PathBuf,
@@ -140,7 +160,8 @@ enum Cmd {
     /// material you can reproduce exactly.
     ///
     /// A development command: hidden from help and from the guided renderer,
-    /// and still here for the tests and the benchmarks.
+    /// and only in a dev build, for the tests and the benchmarks.
+    #[cfg(feature = "dev")]
     #[command(hide = true)]
     GenAssets {
         dir: PathBuf,
@@ -195,50 +216,35 @@ struct RenderArgs {
     /// block, so this is also their granularity.
     #[arg(long, default_value_t = 4096)]
     block: u32,
-    /// Frames per workgroup reduction round, and the note-off gate resolution.
-    #[arg(long = "reduce-tile", default_value_t = 4)]
-    reduce_tile: u32,
-    /// Frames between note-off gate checks, and the rate at which channel
-    /// controllers and per-voice LFOs update. A multiple of --reduce-tile.
-    #[arg(long = "gate-frames", default_value_t = 32)]
-    gate_frames: u32,
-    /// Invocations per render workgroup.
-    #[arg(long = "workgroup", default_value_t = 256)]
-    workgroup: u32,
-    /// Upper bound on render workgroups; sizes the partial buffer.
-    #[arg(long = "render-workgroups", default_value_t = 2048)]
-    render_workgroups: u32,
     /// Most voices sounding at once. `gpu-info` prints the largest each
     /// adapter takes.
     #[arg(long = "max-voices", default_value_t = 1 << 20)]
     max_voices: u32,
-    /// Most voices one note-on may spawn. Caps runaway presets; a stereo
-    /// sample is two.
-    #[arg(long, default_value_t = 16)]
-    layers: u32,
     /// Sample interpolation: nearest, linear or cubic. Cubic reads twice as
     /// many samples a voice.
     #[arg(long, default_value = "linear")]
     interp: String,
-    /// Shape of the envelope's decay stage: exponential or linear.
-    #[arg(long = "decay-curve", default_value = "exponential")]
-    decay_curve: String,
-    /// Shape of the envelope's release stage: exponential or linear.
-    #[arg(long = "release-curve", default_value = "exponential")]
-    release_curve: String,
-    /// Which voice goes when the pool is full: quietest, oldest, or drop-new,
-    /// which refuses the new note instead.
-    #[arg(long, default_value = "quietest")]
-    steal: String,
-    /// Which note-ons survive when one block has more of them than the pool
-    /// has room for: loudest ranks by whether the note outlives the block and
-    /// then by opening amplitude; even thins by position, ignoring both.
-    #[arg(long = "admit", default_value = "loudest")]
-    admit: String,
     /// Ceiling on how much of the voice pool one block may steal, in percent.
     /// 100 lets a saturated block replace the entire pool, which pumps.
     #[arg(long = "steal-percent", default_value_t = 25)]
     steal_percent: u32,
+    /// Skip every note-on quieter than this velocity, as if the file did not
+    /// contain it: 10 skips velocities 1-9. Skipped notes are dropped on the
+    /// host with their note-offs, before anything is built for them, so they
+    /// cost next to nothing. 0 keeps every note.
+    #[arg(
+        long = "min-velocity",
+        default_value_t = 0,
+        value_parser = clap::value_parser!(u8).range(0..=127)
+    )]
+    min_velocity: u8,
+    /// Hold every note to BASSMIDI's 4 ms envelope grid: a note-off takes
+    /// effect at the next 4 ms step counted from its note-on, and a release
+    /// shorter than that fades over one step. For MIDIs that rely on BASSMIDI
+    /// sounding notes shorter than 4 ms, such as audio encoded as one-sample
+    /// notes, which render silent without it. Costs about 12% of the render.
+    #[arg(long = "note-grid")]
+    note_grid: bool,
     /// WAV sample format. Encoded containers take float and refuse anything
     /// else.
     #[arg(long, default_value = "float32", value_parser = ["float32", "pcm16"])]
@@ -256,9 +262,6 @@ struct RenderArgs {
         allow_negative_numbers = true
     )]
     volume: f32,
-    /// Turn the soft limiter off.
-    #[arg(long = "no-limiter")]
-    no_limiter: bool,
     /// Which limiter: brickwall (lookahead true-peak, the default), off, or
     /// omni (the OmniConverter port, deprecated for rendering).
     #[arg(long, default_value = "brickwall", value_parser = ["brickwall", "omni", "off"])]
@@ -268,6 +271,97 @@ struct RenderArgs {
     /// their decoders overshoot what was encoded. An explicit value always wins.
     #[arg(long = "ceiling-db", value_name = "DB", allow_negative_numbers = true)]
     ceiling_db: Option<f64>,
+    /// Keep the sample pool at its source rates instead of converting it.
+    #[arg(long = "no-resample-pool")]
+    no_resample_pool: bool,
+    /// Sample pool budget in MiB before automatic downsampling kicks in.
+    #[arg(long = "pool-budget", default_value_t = 2048)]
+    pool_budget: u64,
+    /// Log per-pass timings.
+    #[arg(long)]
+    profile: bool,
+    /// Stop after this many seconds of output.
+    #[arg(long)]
+    seconds: Option<f64>,
+    /// Force a wgpu backend: vulkan, dx12, metal, gl.
+    #[arg(long = "gpu-backend")]
+    gpu_backend: Option<String>,
+    /// Substring match against the adapter name.
+    #[arg(long = "gpu-adapter")]
+    gpu_adapter: Option<String>,
+    /// Check every block for NaN and Inf even in release builds.
+    #[arg(long = "nan-guard")]
+    nan_guard: bool,
+
+    /// Report the render to another program instead of the terminal. `json`
+    /// writes one JSON object per line on stdout -- the phases, the device,
+    /// progress snapshots, and the result last -- and reads control messages
+    /// from stdin: {"interval_ms": N}, {"snapshot": true}, {"cancel": true}.
+    /// Log lines stay on stderr.
+    #[arg(long = "progress", value_name = "FORMAT", value_parser = ["json"])]
+    progress: Option<String>,
+    /// Milliseconds between progress snapshots under --progress, held to
+    /// 10..=60000. 0 sends them only when the reading program asks, and the
+    /// reading program can change it while the render runs.
+    #[arg(
+        long = "progress-interval",
+        value_name = "MS",
+        default_value_t = 250,
+        requires = "progress"
+    )]
+    progress_interval: u64,
+
+    /// The developer options, on the command line only in a dev build. A
+    /// release build renders with their defaults; see `dev_args`.
+    #[cfg(feature = "dev")]
+    #[command(flatten)]
+    dev: DevArgs,
+}
+
+/// Options for measuring and debugging the engine rather than for rendering
+/// with it: tuning the device passes, switching back to old behaviour for an
+/// A/B comparison, the pumping diagnostics. On the command line only in a dev
+/// build (`--features dev`); the downloadable zips leave them out, decided
+/// 2026-09-19, and render with the defaults below, which is what the same
+/// command renders in a dev build.
+#[derive(Args, Clone)]
+#[command(next_help_heading = "Developer options")]
+struct DevArgs {
+    /// Frames per workgroup reduction round, and the note-off gate resolution.
+    #[arg(long = "reduce-tile", default_value_t = 4)]
+    reduce_tile: u32,
+    /// Frames between note-off gate checks, and the rate at which channel
+    /// controllers and per-voice LFOs update. A multiple of --reduce-tile.
+    #[arg(long = "gate-frames", default_value_t = 32)]
+    gate_frames: u32,
+    /// Invocations per render workgroup.
+    #[arg(long = "workgroup", default_value_t = 256)]
+    workgroup: u32,
+    /// Upper bound on render workgroups; sizes the partial buffer.
+    #[arg(long = "render-workgroups", default_value_t = 2048)]
+    render_workgroups: u32,
+    /// Most voices one note-on may spawn. Caps runaway presets; a stereo
+    /// sample is two.
+    #[arg(long, default_value_t = 16)]
+    layers: u32,
+    /// Shape of the envelope's decay stage: exponential or linear.
+    #[arg(long = "decay-curve", default_value = "exponential")]
+    decay_curve: String,
+    /// Shape of the envelope's release stage: exponential or linear.
+    #[arg(long = "release-curve", default_value = "exponential")]
+    release_curve: String,
+    /// Which voice goes when the pool is full: quietest, oldest, or drop-new,
+    /// which refuses the new note instead.
+    #[arg(long, default_value = "quietest")]
+    steal: String,
+    /// Which note-ons survive when one block has more of them than the pool
+    /// has room for: loudest ranks by whether the note outlives the block and
+    /// then by opening amplitude; even thins by position, ignoring both.
+    #[arg(long = "admit", default_value = "loudest")]
+    admit: String,
+    /// Turn the soft limiter off. The same as --limiter off.
+    #[arg(long = "no-limiter")]
+    no_limiter: bool,
     /// Brickwall lookahead in ms. Also the render latency.
     #[arg(long = "lookahead-ms", default_value_t = 2.0)]
     lookahead_ms: f64,
@@ -307,28 +401,6 @@ struct RenderArgs {
     /// voice counts; only useful for measuring what the sort buys.
     #[arg(long = "no-sort")]
     no_sort: bool,
-    /// Keep the sample pool at its source rates instead of converting it.
-    #[arg(long = "no-resample-pool")]
-    no_resample_pool: bool,
-    /// Sample pool budget in MiB before automatic downsampling kicks in.
-    #[arg(long = "pool-budget", default_value_t = 2048)]
-    pool_budget: u64,
-    /// Log per-pass timings.
-    #[arg(long)]
-    profile: bool,
-    /// Stop after this many seconds of output.
-    #[arg(long)]
-    seconds: Option<f64>,
-    /// Force a wgpu backend: vulkan, dx12, metal, gl.
-    #[arg(long = "gpu-backend")]
-    gpu_backend: Option<String>,
-    /// Substring match against the adapter name.
-    #[arg(long = "gpu-adapter")]
-    gpu_adapter: Option<String>,
-    /// Check every block for NaN and Inf even in release builds.
-    #[arg(long = "nan-guard")]
-    nan_guard: bool,
-
     /// Write one CSV row per block: the admission decision and the level it
     /// produced. This is the diagnostic for block-rate pumping -- the audio is
     /// downstream of these numbers, so read them rather than the waveform.
@@ -338,24 +410,19 @@ struct RenderArgs {
     /// anything upstream miscounts.
     #[arg(long = "unchecked-shaders")]
     unchecked_shaders: bool,
+}
 
-    /// Report the render to another program instead of the terminal. `json`
-    /// writes one JSON object per line on stdout -- the phases, the device,
-    /// progress snapshots, and the result last -- and reads control messages
-    /// from stdin: {"interval_ms": N}, {"snapshot": true}, {"cancel": true}.
-    /// Log lines stay on stderr.
-    #[arg(long = "progress", value_name = "FORMAT", value_parser = ["json"])]
-    progress: Option<String>,
-    /// Milliseconds between progress snapshots under --progress, held to
-    /// 10..=60000. 0 sends them only when the reading program asks, and the
-    /// reading program can change it while the render runs.
-    #[arg(
-        long = "progress-interval",
-        value_name = "MS",
-        default_value_t = 250,
-        requires = "progress"
-    )]
-    progress_interval: u64,
+impl DevArgs {
+    /// Every developer option at its default, read by parsing an empty command
+    /// line against the definition above rather than written out a second
+    /// time, so a release build cannot drift from what a dev build renders.
+    #[cfg_attr(all(feature = "dev", not(test)), allow(dead_code))]
+    fn defaults() -> Self {
+        use clap::FromArgMatches;
+        let cmd = DevArgs::augment_args(clap::Command::new("dev"));
+        DevArgs::from_arg_matches(&cmd.get_matches_from(["dev"]))
+            .expect("every developer option has a default")
+    }
 }
 
 /// `--volume`: a percentage from 0 to 200, with or without a trailing `%`.
@@ -386,32 +453,44 @@ fn parse_volume(s: &str) -> std::result::Result<f32, String> {
 }
 
 impl RenderArgs {
+    /// The developer options: as typed in a dev build, their defaults in a
+    /// release build, which does not take them.
+    fn dev_args(&self) -> DevArgs {
+        #[cfg(feature = "dev")]
+        return self.dev.clone();
+        #[cfg(not(feature = "dev"))]
+        return DevArgs::defaults();
+    }
+
     fn to_config(&self) -> Result<(Config, BackendKind)> {
+        let dev = self.dev_args();
         let mut cfg = Config {
             sample_rate: self.rate,
             block_frames: self.block,
-            reduce_tile: self.reduce_tile,
-            gate_frames: self.gate_frames,
-            workgroup_size: self.workgroup,
-            max_render_workgroups: self.render_workgroups,
+            reduce_tile: dev.reduce_tile,
+            gate_frames: dev.gate_frames,
+            workgroup_size: dev.workgroup,
+            max_render_workgroups: dev.render_workgroups,
             max_voices: self.max_voices,
-            max_layers: self.layers,
+            max_layers: dev.layers,
             max_steal_percent: self.steal_percent,
+            min_velocity: self.min_velocity,
+            note_grid: self.note_grid,
             master_volume: self.volume / 100.0,
-            limiter: !self.no_limiter,
+            limiter: !dev.no_limiter,
             // `None` here means "not chosen yet". `render` fills it in from
             // the output container, which `to_config` cannot see.
             limiter_ceiling_db: self.ceiling_db.unwrap_or(0.0),
-            limiter_lookahead_ms: self.lookahead_ms,
-            limiter_release_ms: self.limiter_release_ms,
-            limiter_sustain_ms: self.limiter_sustain_ms,
-            limiter_true_peak: !self.no_true_peak,
-            filter_enabled: !self.no_filter,
-            gain_ramp: !self.no_gain_ramp,
-            filter_ramp: !self.no_filter_ramp,
-            lfo_enabled: !self.no_lfo,
-            mod_env_enabled: !self.no_mod_env,
-            sort_voices: !self.no_sort,
+            limiter_lookahead_ms: dev.lookahead_ms,
+            limiter_release_ms: dev.limiter_release_ms,
+            limiter_sustain_ms: dev.limiter_sustain_ms,
+            limiter_true_peak: !dev.no_true_peak,
+            filter_enabled: !dev.no_filter,
+            gain_ramp: !dev.no_gain_ramp,
+            filter_ramp: !dev.no_filter_ramp,
+            lfo_enabled: !dev.no_lfo,
+            mod_env_enabled: !dev.no_mod_env,
+            sort_voices: !dev.no_sort,
             resample_pool: !self.no_resample_pool,
             sample_pool_budget: self.pool_budget << 20,
             profile: self.profile,
@@ -432,16 +511,16 @@ impl RenderArgs {
         if self.nan_guard {
             cfg.nan_guard = true;
         }
-        cfg.unchecked_shaders = self.unchecked_shaders;
+        cfg.unchecked_shaders = dev.unchecked_shaders;
         cfg.interpolation = Interpolation::parse(&self.interp)
             .with_context(|| format!("unknown interpolation {:?}", self.interp))?;
-        cfg.decay_curve = EnvelopeCurve::parse(&self.decay_curve)
-            .with_context(|| format!("unknown decay curve {:?}", self.decay_curve))?;
-        cfg.release_curve = EnvelopeCurve::parse(&self.release_curve)
-            .with_context(|| format!("unknown release curve {:?}", self.release_curve))?;
+        cfg.decay_curve = EnvelopeCurve::parse(&dev.decay_curve)
+            .with_context(|| format!("unknown decay curve {:?}", dev.decay_curve))?;
+        cfg.release_curve = EnvelopeCurve::parse(&dev.release_curve)
+            .with_context(|| format!("unknown release curve {:?}", dev.release_curve))?;
         cfg.limiter_mode = LimiterMode::parse(&self.limiter)
             .with_context(|| format!("unknown limiter {:?}", self.limiter))?;
-        if self.no_limiter {
+        if dev.no_limiter {
             cfg.limiter_mode = LimiterMode::Off;
         }
         // The raw mix is only observable when nothing bounds it and the
@@ -456,10 +535,10 @@ impl RenderArgs {
         let unlimited = !cfg.limiter || cfg.limiter_mode == LimiterMode::Off;
         cfg.clamp_output = !(unlimited && self.format == "float32");
 
-        cfg.steal_rule = StealRule::parse(&self.steal)
-            .with_context(|| format!("unknown steal rule {:?}", self.steal))?;
-        cfg.admit_rule = AdmitRule::parse(&self.admit)
-            .with_context(|| format!("unknown admit rule {:?}", self.admit))?;
+        cfg.steal_rule = StealRule::parse(&dev.steal)
+            .with_context(|| format!("unknown steal rule {:?}", dev.steal))?;
+        cfg.admit_rule = AdmitRule::parse(&dev.admit)
+            .with_context(|| format!("unknown admit rule {:?}", dev.admit))?;
         cfg.validate()?;
         let kind = if self.backend == "cpu" {
             BackendKind::Cpu
@@ -521,7 +600,7 @@ fn main() -> Result<()> {
     if matches!(cli.cmd, Cmd::Api) {
         return api::run();
     }
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(LOG_FILTER))
         .format_timestamp(None)
         .init();
 
@@ -536,6 +615,7 @@ fn main() -> Result<()> {
             sf_release,
             soundfont,
         } => info(path, block, rate, sf_layers, sf_release, soundfont),
+        #[cfg(feature = "dev")]
         Cmd::Null { a, b, threshold } => null(a, b, threshold),
         Cmd::GpuInfo => gpu::print_adapters(),
         Cmd::FfmpegInfo { ffmpeg } => ffmpeg_info(ffmpeg),
@@ -546,6 +626,7 @@ fn main() -> Result<()> {
             accept_hash,
             dir,
         } => get_ffmpeg(dry_run, yes, accept_hash, dir),
+        #[cfg(feature = "dev")]
         Cmd::GenAssets {
             dir,
             big_mb,
@@ -985,6 +1066,7 @@ fn info(
     Ok(())
 }
 
+#[cfg(feature = "dev")]
 fn null(a: PathBuf, b: PathBuf, threshold: f64) -> Result<()> {
     let wa = wav::read(&a)?;
     let wb = wav::read(&b)?;
@@ -1036,6 +1118,7 @@ fn null(a: PathBuf, b: PathBuf, threshold: f64) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "dev")]
 fn gen_assets(dir: PathBuf, big_mb: Option<usize>, sustained: Option<usize>) -> Result<()> {
     std::fs::create_dir_all(&dir)?;
     testkit::simple_sf2(dir.join("simple.sf2"), 48000)?;
@@ -1060,8 +1143,54 @@ fn gen_assets(dir: PathBuf, big_mb: Option<usize>, sustained: Option<usize>) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{route, Route};
+    use super::{route, Cli, DevArgs, Route};
+    use clap::Parser;
     use std::ffi::OsString;
+
+    /// Only a dev build takes the developer options and commands; a release
+    /// build, the downloadable zips, refuses them as unknown.
+    #[test]
+    fn developer_options_exist_only_in_a_dev_build() {
+        let dev = cfg!(feature = "dev");
+        for flag in [
+            &["--no-sort"][..],
+            &["--block-csv", "b.csv"],
+            &["--gate-frames", "64"],
+            &["--steal", "oldest"],
+            &["--layers", "4"],
+            &["--no-limiter"],
+        ] {
+            assert_eq!(render_args(flag).is_ok(), dev, "{flag:?}");
+        }
+        for kept in [&["--steal-percent", "50"][..], &["--note-grid"], &["--limiter", "off"]] {
+            assert!(render_args(kept).is_ok(), "{kept:?}");
+        }
+        for cmd in [&["null", "a.wav", "b.wav"][..], &["gen-assets", "dir"]] {
+            let argv = [&["kestrel", "--force-cli"][..], cmd].concat();
+            assert_eq!(Cli::try_parse_from(argv).is_ok(), dev, "{cmd:?}");
+        }
+    }
+
+    /// A release build renders with what a dev build's command line defaults
+    /// to, so the same command writes the same file in either.
+    #[test]
+    fn a_release_build_renders_with_the_dev_defaults() {
+        let args = render_args(&[]).unwrap();
+        let (typed, _) = args.to_config().unwrap();
+        let d = DevArgs::defaults();
+        let (dt, ht) = (d.reduce_tile, d.gate_frames);
+        assert_eq!((typed.reduce_tile, typed.gate_frames), (dt, ht));
+        assert_eq!(typed.max_layers, d.layers);
+        assert_eq!(typed.workgroup_size, d.workgroup);
+        assert_eq!(typed.max_render_workgroups, d.render_workgroups);
+        assert_eq!(typed.limiter_release_ms, d.limiter_release_ms);
+        assert_eq!(typed.limiter_lookahead_ms, d.lookahead_ms);
+        assert!(typed.lfo_enabled && typed.mod_env_enabled && typed.sort_voices);
+        assert!(typed.filter_enabled && typed.gain_ramp && typed.filter_ramp);
+        assert!(typed.limiter && typed.limiter_true_peak && !typed.unchecked_shaders);
+        assert_eq!(format!("{:?}", typed.steal_rule), "Quietest");
+        assert_eq!(format!("{:?}", typed.admit_rule), "Loudest");
+    }
 
     fn r(args: &[&str]) -> Route {
         route(&args.iter().map(OsString::from).collect::<Vec<_>>())

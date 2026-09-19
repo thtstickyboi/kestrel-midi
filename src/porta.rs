@@ -48,21 +48,21 @@ pub const FLAG_BITS: u32 = 0x7;
 /// Where the remaining glide starts in the flags word: frames until the glide \[4\]
 pub const REM_SHIFT: u32 = 3;
 pub const REM_MAX: u32 = u32::MAX >> REM_SHIFT;
-/// The part of a gate slot word that is the slot.
-pub const SLOT_MASK: u32 = 0xFFFF;
+/// The part of a gate slot word that is the slot. Bits 11-23 are the voice's \[5\]
+pub const SLOT_MASK: u32 = 0x7FF;
 /// Where CC5 sits in a gate slot word, seven bits of it.
 pub const RATE_SHIFT: u32 = 24;
-/// Set in a gate slot word when the note glides down onto its own pitch, from \[5\]
+/// Set in a gate slot word when the note glides down onto its own pitch, from \[6\]
 pub const UP_BIT: u32 = 1 << 31;
 
-/// The exponent is evaluated as `2^(m / OCTAVE - MID_OCTAVES)`, with `m` kept \[6\]
+/// The exponent is evaluated as `2^(m / OCTAVE - MID_OCTAVES)`, with `m` kept \[7\]
 const MID_OCTAVES: u32 = 11;
 const MID: u32 = MID_OCTAVES * OCTAVE;
-/// Largest offsets either way, as guards: `spawn` already keeps a glide inside \[7\]
+/// Largest offsets either way, as guards: `spawn` already keeps a glide inside \[8\]
 const UP_MAX_OFF: u32 = 8 * OCTAVE - 1;
 const DOWN_MAX_OFF: u32 = MID;
 
-/// The table both backends read: `RATES` per-frame speeds for this sample \[8\]
+/// The table both backends read: `RATES` per-frame speeds for this sample \[9\]
 pub fn tables(sample_rate: u32) -> Vec<u32> {
     let mut t = Vec::with_capacity(RATES + OCTAVE as usize);
     for r in RATE {
@@ -79,7 +79,7 @@ pub fn tables(sample_rate: u32) -> Vec<u32> {
 /// What the driver needs to start glides: the tables and the lead in frames.
 pub struct Glide {
     pub tables: Vec<u32>,
-    /// `LEAD_SECONDS` plus half a gate tile, because the factor is evaluated \[9\]
+    /// `LEAD_SECONDS` plus half a gate tile, because the factor is evaluated \[10\]
     pub lead: u32,
 }
 
@@ -101,7 +101,7 @@ impl Glide {
         ((d * SEMITONE) << RATE_FRAC_BITS) / rq
     }
 
-    /// The glide a voice starts with, as the bits to OR into its flags and its \[10\]
+    /// The glide a voice starts with, as the bits to OR into its flags and its \[11\]
     pub fn spawn(&self, semitones: i32, cc5: u8, start_rel: u32) -> (u32, u32) {
         let t = self.frames(semitones, cc5);
         if t <= self.lead as u64 {
@@ -113,7 +113,7 @@ impl Glide {
     }
 }
 
-/// The 8.24 pitch factor a gliding voice holds for the gate tile evaluated at \[11\]
+/// The 8.24 pitch factor a gliding voice holds for the gate tile evaluated at \[12\]
 #[inline]
 pub fn factor(flags: u32, slot: u32, f: u32, tab: &[u32]) -> u32 {
     let rem = (flags >> REM_SHIFT).saturating_sub(f);
@@ -131,7 +131,7 @@ pub fn factor(flags: u32, slot: u32, f: u32, tab: &[u32]) -> u32 {
     }
 }
 
-/// The flags word after a block: the glide a block shorter, or gone once it \[12\]
+/// The flags word after a block: the glide a block shorter, or gone once it \[13\]
 #[inline]
 pub fn advance(flags: u32, block_frames: u32) -> u32 {
     if flags >> REM_SHIFT > block_frames {
@@ -172,11 +172,11 @@ mod tests {
         for (d, cc5) in [(13, 15u8), (-12, 64), (24, 64), (-5, 100), (4, 127)] {
             let start = 1000;
             let (fl, sl) = g.spawn(d, cc5, start);
-            // [13]
+            // [14]
             let rate = RATE[cc5 as usize];
             let want = d as f64 * 100.0 - d.signum() as f64 * rate * 100.0 * g.lead as f64 / sr as f64;
             let got = cents(factor(fl, sl, start, &g.tables));
-            // [14]
+            // [15]
             let frame = rate * 100.0 / sr as f64;
             assert!(
                 (got - want).abs() < frame + 0.1,
@@ -198,7 +198,7 @@ mod tests {
         let (fl, sl) = g.spawn(-12, 64, 300);
         let one = advance(fl | 1, 4096);
         assert_eq!(one & FLAG_BITS, 1, "the loop flag must survive");
-        // [15]
+        // [16]
         for f in [0, 32, 1000, 4000] {
             assert_eq!(factor(one, sl, f, &g.tables), factor(fl, sl, f + 4096, &g.tables));
         }
@@ -228,7 +228,7 @@ mod tests {
                 let lead = RATE[cc5 as usize] * 100.0 * g.lead as f64 / sr as f64;
                 let want = d as f64 * 100.0 - d.signum() as f64 * lead;
                 let frame = RATE[cc5 as usize] * 100.0 / sr as f64;
-                // [16]
+                // [17]
                 let lsb = (1.0 + 1.0 / f as f64).log2() * 1200.0;
                 assert!(
                     (cents(f) - want).abs() < frame + lsb + 0.1,

@@ -85,14 +85,14 @@
     // The last line is the summary or the error. Give a reader that has
     // stopped reading a moment to take it, then exit regardless.
 
-[17] src/bin/kestrel/feed.rs:423
+[17] src/bin/kestrel/feed.rs:424
     /// With periodic progress off, a reader gets the events in order, one
     /// final snapshot, and the summary last, with nothing after it.
 
-[18] src/bin/kestrel/feed.rs:443
+[18] src/bin/kestrel/feed.rs:444
     /// A control message is answered before the progress it changes, and a
     /// refused one is reported rather than ignored.
 
-[19] src/bin/kestrel/feed.rs:462
+[19] src/bin/kestrel/feed.rs:463
     /// The control reader stops at the end of its input and applies cancel
     /// itself, without waiting for the emitter.

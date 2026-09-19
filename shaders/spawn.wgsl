@@ -63,15 +63,20 @@ fn main(
             voices[F_FILT_Z2 * c + dst] = bitcast<u32>(0.0);
             voices[F_PARAMS * c + dst] = s.params;
             voices[F_REGION * c + dst] = s.region;
-            voices[F_GATE_SLOT * c + dst] = s.gate_slot;
+            // [2]
+            var slot_word = s.gate_slot;
+            if (NOTE_GRID) {
+                slot_word = slot_word | (((u.env_phase + s.start_rel) % ENV_STEP) << GRID_SHIFT);
+            }
+            voices[F_GATE_SLOT * c + dst] = slot_word;
             voices[F_ORDINAL * c + dst] = s.ordinal;
             voices[F_START_REL * c + dst] = s.start_rel;
             voices[F_NOTE_LO * c + dst] = s.note_id_lo;
             voices[F_NOTE_HI * c + dst] = s.note_id_hi;
-            // [2]
+            // [3]
             voices[F_BORN_VARIANT * c + dst] = (s.variant + 1u) | (s.row_bias << 16u);
             voices[F_STOP_REL * c + dst] = 0u;
-            // [3]
+            // [4]
             voices[F_AGE * c + dst] = 0u - s.start_rel;
             if (USE_MOD_ENV) { voices[F_REL_AGE * c + dst] = NO_RELEASE; }
         }
@@ -79,7 +84,7 @@ fn main(
     }
 }
 
-// [4]
+// [5]
 @compute @workgroup_size(1)
 fn commit() {
     let live = state[S_LIVE];

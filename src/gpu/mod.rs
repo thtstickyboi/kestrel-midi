@@ -53,10 +53,11 @@ struct Uniforms {
     menv_log2_base: u32,
     /// Where portamento's tables start in the same buffer.
     glide_base: u32,
-    _pad: u32,
+    /// Frame 0 of this block's position on the envelope grid. See \[4\]
+    env_phase: u32,
 }
 
-/// How the voice pool's sort key is packed into 32 bits. \[4\]
+/// How the voice pool's sort key is packed into 32 bits. \[5\]
 #[derive(Debug, Clone, Copy)]
 struct SortKeyLayout {
     bits: u32,
@@ -73,7 +74,7 @@ impl SortKeyLayout {
         let region_bits = 32 - dead_region.leading_zeros();
         let stage_bits = 3u32;
 
-        // [5]
+        // [6]
         let max_len = bank.samples.iter().map(|s| s.len).max().unwrap_or(1).max(1);
         let len_bits = 32 - max_len.leading_zeros();
         let phase_bits = 32u32
@@ -97,19 +98,19 @@ impl SortKeyLayout {
     }
 }
 
-/// Slots in the device state buffer. Mirrors the `S_*` constants in \[6\]
+/// Slots in the device state buffer. Mirrors the `S_*` constants in \[7\]
 const S_LIVE: usize = 0;
 const S_STOLEN: usize = 8;
 const S_DROPPED: usize = 9;
 const STATE_SLOTS: usize = 16;
 
-/// Largest grid one dispatch dimension may take. This is the D3D12 ceiling and \[7\]
+/// Largest grid one dispatch dimension may take. This is the D3D12 ceiling and \[8\]
 const MAX_WORKGROUPS_PER_DIM: u32 = 65535;
 
-/// u32 words the voice pool stores per slot. Mirrors `VOICE_FIELDS` in \[8\]
+/// u32 words the voice pool stores per slot. Mirrors `VOICE_FIELDS` in \[9\]
 const VOICE_FIELDS: u64 = 26;
 
-/// Words actually allocated per slot for this configuration. \[9\]
+/// Words actually allocated per slot for this configuration. \[10\]
 fn voice_fields(cfg: &Config) -> u64 {
     if cfg.mod_env_enabled {
         VOICE_FIELDS
@@ -120,7 +121,7 @@ fn voice_fields(cfg: &Config) -> u64 {
     }
 }
 
-/// The largest `max_voices` an adapter can take, given how much of one buffer \[10\]
+/// The largest `max_voices` an adapter can take, given how much of one buffer \[11\]
 pub fn max_voices_for_binding(binding_bytes: u64, steal_percent: u32) -> u32 {
     let slots = binding_bytes / (VOICE_FIELDS * 4);
     let v = slots * 100 / (100 + steal_percent.clamp(1, 100) as u64);
@@ -136,7 +137,7 @@ fn substitute(src: &str, cfg: &Config, bank: &Bank) -> String {
         .replace("{{GAIN_RAMP}}", if cfg.gain_ramp { "true" } else { "false" })
         .replace("{{FILTER_RAMP}}", if cfg.filter_ramp { "true" } else { "false" })
         .replace("{{USE_LFO}}", if cfg.lfo_enabled { "true" } else { "false" })
-        // [11]
+        // [12]
         .replace(
             "{{USE_LFO_VOLUME}}",
             if cfg.lfo_enabled && bank.uses_lfo_volume { "true" } else { "false" },
@@ -150,10 +151,12 @@ fn substitute(src: &str, cfg: &Config, bank: &Bank) -> String {
             if cfg.mod_env_enabled { "true" } else { "false" },
         )
         .replace("{{SAMPLE_RATE}}", &cfg.sample_rate.to_string())
+        .replace("{{ENV_STEP}}", &cfg.env_step_frames().to_string())
+        .replace("{{NOTE_GRID}}", if cfg.note_grid { "true" } else { "false" })
         .replace("{{VOICE_FIELDS}}", &voice_fields(cfg).to_string())
 }
 
-/// Write `bytes` into `buf` from `offset`, 64 MiB at a time, letting the device \[12\]
+/// Write `bytes` into `buf` from `offset`, 64 MiB at a time, letting the device \[13\]
 fn upload_in_pieces(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -180,7 +183,7 @@ fn shader_source(body: &str, cfg: &Config, bank: &Bank) -> String {
     s
 }
 
-/// The render pass with or without the channel controller path and the glide \[13\]
+/// The render pass with or without the channel controller path and the glide \[14\]
 fn render_source(cfg: &Config, bank: &Bank, chan: bool, glide: bool) -> String {
     let body = include_str!("../../shaders/render.wgsl")
         .replace("{{CHAN}}", if chan { "true" } else { "false" })
@@ -202,7 +205,7 @@ fn compile(
         source: wgpu::ShaderSource::Wgsl(src.into()),
     };
     let module = if cfg.unchecked_shaders {
-        // [14]
+        // [15]
         unsafe {
             device.create_shader_module_trusted(desc, wgpu::ShaderRuntimeChecks::unchecked())
         }
@@ -233,7 +236,7 @@ struct Pipelines {
     spawn: wgpu::ComputePipeline,
     spawn_commit: wgpu::ComputePipeline,
     render: wgpu::ComputePipeline,
-    /// The same pass compiled with the channel controller path in it. Selected \[15\]
+    /// The same pass compiled with the channel controller path in it. Selected \[16\]
     render_chan: wgpu::ComputePipeline,
     reduce: wgpu::ComputePipeline,
     scan_local: wgpu::ComputePipeline,
@@ -270,7 +273,7 @@ struct Groups {
     render: wgpu::BindGroup,
     compact: wgpu::BindGroup,
     select: wgpu::BindGroup,
-    /// Indexed by which of the two (key, index) buffers currently holds the \[16\]
+    /// Indexed by which of the two (key, index) buffers currently holds the \[17\]
     sort: [wgpu::BindGroup; 2],
 }
 
@@ -305,15 +308,15 @@ pub struct GpuSynth {
     sort_key: SortKeyLayout,
     cmds_buf: wgpu::Buffer,
     cmds_capacity: u32,
-    /// Note-off runs the gates buffer can hold behind its meta header, two \[17\]
+    /// Note-off runs the gates buffer can hold behind its meta header, two \[18\]
     off_runs_capacity: u64,
-    /// The most of one buffer the adapter binds to a shader, which is as far \[18\]
+    /// The most of one buffer the adapter binds to a shader, which is as far \[19\]
     binding_cap: u64,
     pool_buf: wgpu::Buffer,
     params_buf: wgpu::Buffer,
     params_per_variant: u32,
     menv_buf: wgpu::Buffer,
-    // [19]
+    // [20]
     menv_factor_buf: wgpu::Buffer,
     menv_per_variant: u32,
     menv_factor_half: u32,
@@ -321,7 +324,7 @@ pub struct GpuSynth {
     glide_base: u32,
     /// Whether the driver says a voice may glide during the next block.
     glide_active: bool,
-    /// The render pass with the glide path in it, plain and with the \[20\]
+    /// The render pass with the glide path in it, plain and with the \[21\]
     render_glide: Option<[wgpu::ComputePipeline; 2]>,
     /// Their sources, fully substituted, kept so the compile can happen then.
     glide_sources: [String; 2],
@@ -331,12 +334,14 @@ pub struct GpuSynth {
 
     /// Which of `voices` currently holds the live pool.
     parity: usize,
-    /// Host mirror of the device live count, exact because every change to it \[21\]
+    /// Host mirror of the device live count, exact because every change to it \[22\]
     live: u32,
     /// Allocated voice slots, `Config::pool_slots()`. The SoA stride.
     slots: u32,
+    /// The next block's position on the envelope grid: frames rendered so \[23\]
+    env_phase: u32,
     pending_spawns: Vec<SpawnCmd>,
-    /// Reused buffer for the thinned spawn list, so a saturated block does not \[22\]
+    /// Reused buffer for the thinned spawn list, so a saturated block does not \[24\]
     spawn_scratch: Vec<SpawnCmd>,
     stolen: u64,
     dropped: u64,
@@ -367,7 +372,7 @@ impl GpuSynth {
         let (device, queue, adapter_info, limits, has_timestamps) = device::create(cfg)?;
         let adapter_name = format!("{} ({:?})", adapter_info.name, adapter_info.backend);
 
-        // [23]
+        // [25]
         let need_shared = cfg.workgroup_size * (cfg.reduce_tile * 2 + 1) * 4;
         if need_shared > limits.max_compute_workgroup_storage_size {
             bail!(
@@ -378,10 +383,10 @@ impl GpuSynth {
                 limits.max_compute_workgroup_storage_size
             );
         }
-        // [24]
+        // [26]
         let scan_workgroups = cfg.pool_slots().div_ceil(cfg.workgroup_size);
 
-        // [25]
+        // [27]
         let voice_pool_bytes = cfg.pool_slots() as u64 * voice_fields(cfg) * 4;
         let binding_cap =
             (limits.max_storage_buffer_binding_size as u64).min(limits.max_buffer_size);
@@ -411,12 +416,12 @@ impl GpuSynth {
             );
         }
 
-        // [26]
+        // [28]
         let capacity = cfg.pool_slots();
         let tiles = cfg.block_frames / cfg.gate_frames;
         let nwg = cfg.max_render_workgroups.clamp(1, MAX_WORKGROUPS_PER_DIM);
 
-        // [27]
+        // [29]
         let pool = &bank.pool;
         let even = pool.len() / 2 * 2;
         let pool_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -431,7 +436,7 @@ impl GpuSynth {
             queue.write_buffer(&pool_buf, even as u64 * 2, bytemuck::cast_slice(&[pool[even], 0]));
         }
 
-        // [28]
+        // [30]
         let fallback;
         let params: &[RegionParams] = if bank.params.is_empty() {
             fallback = [RegionParams {
@@ -455,7 +460,7 @@ impl GpuSynth {
         } else {
             &bank.params
         };
-        // [29]
+        // [31]
         let params_per_variant = params.len() as u32;
         let variants = cfg.max_param_variants.max(1);
         let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -466,7 +471,7 @@ impl GpuSynth {
         });
         upload_in_pieces(&device, &queue, &params_buf, 0, bytemuck::cast_slice(params))?;
 
-        // [30]
+        // [32]
         let menv: Vec<ModEnvParams> = if bank.menv.is_empty() {
             vec![ModEnvParams::default()]
         } else {
@@ -481,7 +486,7 @@ impl GpuSynth {
         });
         queue.write_buffer(&menv_buf, 0, bytemuck::cast_slice(&menv));
 
-        // [31]
+        // [33]
         let mut menv_tables: Vec<u32> = if bank.menv_factors.is_empty() {
             vec![1 << 24]
         } else {
@@ -493,7 +498,7 @@ impl GpuSynth {
         } else {
             menv_tables.extend_from_slice(&bank.menv_log2);
         }
-        // [32]
+        // [34]
         let glide_base = menv_tables.len() as u32;
         menv_tables.extend_from_slice(&crate::porta::tables(cfg.sample_rate));
         let menv_factor_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -516,7 +521,7 @@ impl GpuSynth {
         let voice_bytes = capacity as u64 * voice_fields(cfg) * 4;
         let partial_bytes = cfg.block_frames as u64 * 2 * nwg as u64 * 4;
         let out_bytes = cfg.block_frames as u64 * 2 * 4;
-        // [33]
+        // [35]
         let off_meta_words = (GATE_SLOTS as u64 + 1) * 2;
         let off_runs_capacity = 32768u64;
         let gates_bytes = (off_meta_words + off_runs_capacity * 2) * 4;
@@ -846,6 +851,7 @@ impl GpuSynth {
             readback_state,
             parity: 0,
             live: 0,
+            env_phase: 0,
             pending_spawns: Vec::new(),
             spawn_scratch: Vec::new(),
             stolen: 0,
@@ -958,7 +964,7 @@ impl GpuSynth {
         })
     }
 
-    /// Workgroups the render pass will be dispatched with this block, given \[34\]
+    /// Workgroups the render pass will be dispatched with this block, given \[36\]
     fn render_workgroups(&self, voices: u32) -> u32 {
         let cap = self
             .cfg
@@ -971,7 +977,7 @@ impl GpuSynth {
         let u = Uniforms {
             block_frames: self.cfg.block_frames,
             tiles: self.cfg.block_frames / self.cfg.reduce_tile,
-            // [35]
+            // [37]
             capacity: self.slots,
             spawn_count,
             render_workgroups: nwg,
@@ -996,7 +1002,7 @@ impl GpuSynth {
             menv_factor_half: self.menv_factor_half,
             menv_log2_base: self.menv_log2_base,
             glide_base: self.glide_base,
-            _pad: 0,
+            env_phase: self.env_phase,
         };
         self.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
@@ -1034,7 +1040,7 @@ impl GpuSynth {
         log::debug!("grew the spawn command buffer to {new_cap} entries");
     }
 
-    /// Grow the gates buffer so it can carry `runs` note-off runs. \[36\]
+    /// Grow the gates buffer so it can carry `runs` note-off runs. \[38\]
     fn grow_gates(&mut self, runs: usize) -> Result<()> {
         let Some(new_cap) =
             gates_capacity(runs as u64, self.off_runs_capacity, self.binding_cap)?
@@ -1072,13 +1078,13 @@ impl GpuSynth {
         Ok(())
     }
 
-    /// Workgroups to dispatch for `items` voices. Every entry point this feeds \[37\]
+    /// Workgroups to dispatch for `items` voices. Every entry point this feeds \[39\]
     fn dispatch_count(&self, items: u32) -> u32 {
         let ceiling = self.cfg.max_pool_workgroups.clamp(1, MAX_WORKGROUPS_PER_DIM);
         items.div_ceil(self.cfg.workgroup_size).clamp(1, ceiling)
     }
 
-    /// Read several readback buffers back with **one** device wait. \[38\]
+    /// Read several readback buffers back with **one** device wait. \[40\]
     fn map_read_many(&self, bufs: &[&wgpu::Buffer]) -> Result<Vec<Vec<u8>>> {
         let mut rxs = Vec::with_capacity(bufs.len());
         for buf in bufs {
@@ -1104,7 +1110,7 @@ impl GpuSynth {
     }
 }
 
-/// How many note-off runs the gates buffer should hold to carry `runs`, or \[39\]
+/// How many note-off runs the gates buffer should hold to carry `runs`, or \[41\]
 fn gates_capacity(runs: u64, current: u64, binding_cap: u64) -> Result<Option<u64>> {
     if runs <= current {
         return Ok(None);
@@ -1148,7 +1154,7 @@ impl Backend for GpuSynth {
         self.queue
             .write_buffer(&self.params_buf, off, bytemuck::cast_slice(data));
 
-        // [40]
+        // [42]
         let mper = self.menv_per_variant as usize;
         if menv.len() != mper {
             bail!(
@@ -1163,7 +1169,7 @@ impl Backend for GpuSynth {
     }
 
     fn set_channels(&mut self, rows: &[u32], bend: bool, gain: bool, variant: bool, cut: bool) -> Result<()> {
-        // [41]
+        // [43]
         self.queue
             .write_buffer(&self.chan_buf, 0, bytemuck::cast_slice(rows));
         self.bend_active = bend;
@@ -1217,11 +1223,11 @@ impl Backend for GpuSynth {
         Ok(())
     }
 
-    /// Queue the whole block: spawn, render, reduce, compact, and the copies \[42\]
+    /// Queue the whole block: spawn, render, reduce, compact, and the copies \[44\]
     fn submit(&mut self) -> Result<()> {
         let cap = self.cfg.max_voices;
 
-        // [43]
+        // [45]
         let want = self.pending_spawns.len() as u32;
         let want = want.min(cap);
         if want < self.pending_spawns.len() as u32 {
@@ -1231,7 +1237,7 @@ impl Backend for GpuSynth {
         let mut steal_k = 0u32;
         if self.live + want > cap {
             match self.cfg.steal_rule {
-                // [44]
+                // [46]
                 StealRule::Oldest | StealRule::Quietest => {
                     steal_k = (self.live + want - cap)
                         .min(self.live)
@@ -1251,7 +1257,7 @@ impl Backend for GpuSynth {
                 self.queue
                     .write_buffer(&self.cmds_buf, 0, bytemuck::cast_slice(&self.pending_spawns));
             } else {
-                // [45]
+                // [47]
                 self.spawn_scratch.clear();
                 self.spawn_scratch.reserve(take);
                 match self.cfg.admit_rule {
@@ -1269,9 +1275,11 @@ impl Backend for GpuSynth {
                     .write_buffer(&self.cmds_buf, 0, bytemuck::cast_slice(&self.spawn_scratch));
             }
         }
-        // [46]
+        // [48]
         let nwg = self.render_workgroups(self.live + spawn_count);
         self.write_uniforms(spawn_count, steal_k, nwg);
+        // Written, so the next block's position can be taken now.
+        self.env_phase = (self.env_phase + self.cfg.block_frames) % self.cfg.env_step_frames();
 
         let mut enc = self
             .device
@@ -1296,7 +1304,7 @@ impl Backend for GpuSynth {
             }};
         }
 
-        // [47]
+        // [49]
         {
             let live_wgs = self.dispatch_count(self.live);
             let mut p = begin!(enc, "steal");
@@ -1319,7 +1327,7 @@ impl Backend for GpuSynth {
                 p.dispatch_workgroups(1, 1, 1);
             }
         }
-        // [48]
+        // [50]
 
         // ---- 2. spawn ----
         {
@@ -1338,9 +1346,9 @@ impl Backend for GpuSynth {
         {
             let mut p = begin!(enc, "render");
             p.set_bind_group(0, &self.groups[self.parity].render, &[]);
-            // [49]
+            // [51]
             let chan = self.bend_active || self.gain_active || self.variant_active;
-            // [50]
+            // [52]
             let glide = self.render_glide.as_ref().filter(|_| self.glide_active);
             p.set_pipeline(match (glide, chan) {
                 (Some(g), false) => &g[0],
@@ -1348,7 +1356,7 @@ impl Backend for GpuSynth {
                 (None, true) => &self.pipelines.render_chan,
                 (None, false) => &self.pipelines.render,
             });
-            // [51]
+            // [53]
             p.dispatch_workgroups(nwg, 1, 1);
         }
 
@@ -1362,11 +1370,11 @@ impl Backend for GpuSynth {
 
         // ---- 5. compact, and re-sort in the same pass ----
         {
-            // [52]
+            // [54]
             let live_wgs = self.dispatch_count(self.live);
             let mut p = begin!(enc, "compact");
 
-            // [53]
+            // [55]
             p.set_bind_group(0, &self.groups[self.parity].compact, &[]);
             p.set_pipeline(&self.pipelines.scan_local);
             p.dispatch_workgroups(live_wgs, 1, 1);
@@ -1374,7 +1382,7 @@ impl Backend for GpuSynth {
             p.dispatch_workgroups(1, 1, 1);
 
             if self.cfg.sort_voices {
-                // [54]
+                // [56]
                 let mut pair_parity = 0usize;
                 p.set_bind_group(0, &self.groups[self.parity].sort[pair_parity], &[]);
                 p.set_pipeline(&self.pipelines.sort_init);
@@ -1426,9 +1434,9 @@ impl Backend for GpuSynth {
         Ok(())
     }
 
-    /// Wait for the queued block and take its audio and counters back. \[55\]
+    /// Wait for the queued block and take its audio and counters back. \[57\]
     fn finish(&mut self, out: &mut [f32]) -> Result<()> {
-        // [56]
+        // [58]
         let mut bufs: Vec<&wgpu::Buffer> = vec![&self.readback_out, &self.readback_state];
         let period_ns = self.timing.as_ref().map(|t| {
             bufs.push(&t.readback);
@@ -1442,7 +1450,7 @@ impl Backend for GpuSynth {
         let state: &[u32] = bytemuck::cast_slice(&reads[1]);
         self.live = state[S_LIVE].min(self.cfg.max_voices);
         self.stolen = state[S_STOLEN] as u64;
-        // [57]
+        // [59]
         if state[S_DROPPED] != 0 {
             log::error!(
                 "the spawn pass dropped {} voices it should never have been handed",
@@ -1520,7 +1528,7 @@ mod tests {
         assert!((10_000_000..16_777_216).contains(&clamped), "{clamped}");
     }
 
-    /// The count from the crash on 2026-09-13, as entries. It used to wrap the \[58\]
+    /// The count from the crash on 2026-09-13, as entries. It used to wrap the \[60\]
     #[test]
     fn too_many_runs_for_one_binding_is_an_error_that_names_the_sizes() {
         let e = gates_capacity(2_452_415_145, 32768, 2 * GIB).unwrap_err().to_string();

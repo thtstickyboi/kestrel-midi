@@ -49,6 +49,8 @@ const VF_LOOP_UNTIL_RELEASE: u32 = 2u;
 
 const RP_FILTER: u32 = 1u;
 const RP_MOD_ENV: u32 = 2u;
+// [7]
+const RP_SHORT_RELEASE: u32 = 4u;
 
 const GATE_SLOTS: u32 = 2048u;
 
@@ -56,7 +58,7 @@ const INTERP_NEAREST: u32 = 0u;
 const INTERP_LINEAR: u32 = 1u;
 const INTERP_CUBIC: u32 = 2u;
 
-// [7]
+// [8]
 
 const S_LIVE: u32       = 0u;
 const S_LIVE_NEW: u32   = 1u;
@@ -81,23 +83,30 @@ const TILE: u32 = {{TILE}}u;
 // Frames between note-off gate checks. A multiple of TILE.
 const GATE_TILE: u32 = {{GATE_TILE}}u;
 const TILES_PER_GATE: u32 = GATE_TILE / TILE;
-// [8]
+// [9]
 const GAIN_RAMP: bool = {{GAIN_RAMP}};
 const INV_GATE_TILE: f32 = 1.0 / f32(GATE_TILE);
 // Ramp biquad coefficients across a gate tile. See `Config::filter_ramp`.
 const FILTER_RAMP: bool = {{FILTER_RAMP}};
 // A release frame no voice can reach, meaning "nothing due".
 const NO_RELEASE: u32 = 0xFFFFFFFFu;
+// [10]
+const ENV_STEP: u32 = {{ENV_STEP}}u;
+// [11]
+const NOTE_GRID: bool = {{NOTE_GRID}};
+// [12]
+const GRID_SHIFT: u32 = 11u;
+const GRID_MASK: u32 = 0x1FFFu;
 // Whether this build evaluates SF2 LFOs at all. See `Config::lfo_enabled`.
 const USE_LFO: bool = {{USE_LFO}};
-// [9]
+// [13]
 const USE_LFO_VOLUME: bool = {{USE_LFO_VOLUME}};
 const USE_LFO_PITCH: bool = {{USE_LFO_PITCH}};
-// [10]
+// [14]
 const USE_MOD_ENV: bool = {{USE_MOD_ENV}};
-// [11]
+// [15]
 const SAMPLE_RATE_F: f32 = {{SAMPLE_RATE}}.0;
-// [12]
+// [16]
 const MOD_ENV_ATTACK_SCALE: f32 = 0.12542917;
 // Words of `[base, run]` meta before the note-off runs in `gates`.
 const OFF_META_WORDS: u32 = (GATE_SLOTS + 1u) * 2u;
@@ -113,7 +122,7 @@ struct RegionParams {
     b1: f32,
     a1: f32,
     a2: f32,
-    // [13]
+    // [17]
     flags: u32,
     mod_lfo_inc: u32,
     vib_lfo_inc: u32,
@@ -123,7 +132,7 @@ struct RegionParams {
     lfo_pitch: u32,
 };
 
-// [14]
+// [18]
 struct ModEnvParams {
     delay_frames: u32,
     attack_frames: u32,
@@ -156,7 +165,7 @@ fn rp_mod_volume(p: RegionParams) -> f32 {
     return f32(bitcast<i32>(p.flags) >> 16u);
 }
 
-/// SF2's LFO waveform: a triangle starting at zero and rising, in [-1, 1]. \[15\]
+/// SF2's LFO waveform: a triangle starting at zero and rising, in [-1, 1]. \[19\]
 fn lfo_tri(phase: u32) -> f32 {
     let t = f32(phase + 0x40000000u) * (1.0 / 4294967296.0);
     return 1.0 - abs(4.0 * t - 2.0);
@@ -189,13 +198,14 @@ struct Uniforms {
     /// Non-zero to steal by envelope level rather than by age.
     steal_by_level: u32,
 
-    /// Half-width of the modulation envelope's pitch-factor table, in \[16\]
+    /// Half-width of the modulation envelope's pitch-factor table, in \[20\]
     menv_factor_half: u32,
     /// Where the shared `log2` mantissa table starts in `menv_factors`.
     menv_log2_base: u32,
-    /// Where portamento's speeds, and then its exponent table, start in \[17\]
+    /// Where portamento's speeds, and then its exponent table, start in \[21\]
     glide_base: u32,
-    pad1: u32,
+    /// Frame 0 of this block's position on the envelope grid: the frames \[22\]
+    env_phase: u32,
 };
 
 // Bits of Uniforms::chan_active.
@@ -204,24 +214,24 @@ const CHAN_ACTIVE_GAIN: u32 = 2u;
 const CHAN_ACTIVE_VARIANT: u32 = 4u;
 const CHAN_ACTIVE_CUT: u32 = 8u;
 
-// [18]
+// [23]
 
 // Channels in a controller row. Sixteen, like the MIDI spec.
 const BEND_CHANNELS: u32 = 16u;
-// [19]
+// [24]
 const CHAN_FIELDS: u32 = 8u;
 const CHAN_BEND: u32 = 0u;
 const CHAN_GAIN_L: u32 = 1u;
 const CHAN_GAIN_R: u32 = 2u;
 const CHAN_VARIANT: u32 = 3u;
 const CHAN_CUT: u32 = 4u;
-// [20]
+// [25]
 const CHAN_CUT_ID_LO: u32 = 5u;
 const CHAN_CUT_ID_HI: u32 = 6u;
 // Fractional bits in a bend factor. Matches BEND_FRAC_BITS on the host.
 const BEND_SHIFT: u32 = 24u;
 
-// [21]
+// [26]
 fn steal_key(hi: u32, lo: u32, level_bits: u32) -> vec2<u32> {
     if (u.steal_by_level == 0u) {
         return vec2<u32>(hi, lo);
@@ -231,7 +241,7 @@ fn steal_key(hi: u32, lo: u32, level_bits: u32) -> vec2<u32> {
     return vec2<u32>((q << 16u) | (hi & 0xFFFFu), lo);
 }
 
-// [22]
+// [27]
 fn mul32(a: u32, b: u32) -> vec2<u32> {
     let a0 = a & 0xFFFFu;
     let a1 = a >> 16u;
@@ -248,7 +258,7 @@ fn mul32(a: u32, b: u32) -> vec2<u32> {
     return vec2<u32>(lo, hi);
 }
 
-// [23]
+// [28]
 fn scale64(hi: u32, lo: u32, factor: u32) -> vec2<u32> {
     let pl = mul32(lo, factor);   // product bits 0..63
     let ph = mul32(hi, factor);   // product bits 32..95
@@ -280,7 +290,7 @@ fn frac_of(lo: u32) -> f32 {
     return f32(lo) * (1.0 / 4294967296.0);
 }
 
-// [24]
+// [29]
 fn neighbour_index(idx: u32, off: i32, looping: bool, ls: u32, le: u32, len: u32) -> u32 {
     let raw = i32(idx) + off;
     if (looping) {
@@ -294,13 +304,13 @@ fn neighbour_index(idx: u32, off: i32, looping: bool, ls: u32, le: u32, len: u32
     return u32(clamp(raw, 0, i32(len) - 1));
 }
 
-// [25]
+// [30]
 
-// [26]
+// [31]
 const MOD_ENV_LOG2_BITS: u32 = 10u;
 const MOD_ENV_LOG2_FRAC_BITS: u32 = 8u;
 
-// [27]
+// [32]
 fn biquad_lowpass_pre(fc: f32, q_gain: f32, inv_2q: f32, sr: f32) -> vec4<f32> {
     let w0 = 6.2831855 * clamp(fc / sr, 1.0e-5, 0.49);
     let sin_w0 = sin(w0);
@@ -315,18 +325,18 @@ fn biquad_lowpass_pre(fc: f32, q_gain: f32, inv_2q: f32, sr: f32) -> vec4<f32> {
     return vec4<f32>(b0, b1, a1, a2);
 }
 
-// [28]
+// [33]
 const MOD_ENV_CENTS_STEPS: f32 = 64.0;
 
-// [29]
+// [34]
 fn mod_env_pitch_index(cents: f32, half: u32) -> u32 {
-    // [30]
+    // [35]
     let q = round(cents * MOD_ENV_CENTS_STEPS);
     let i = q + f32(half);
     return u32(clamp(i, 0.0, f32(half * 2u)));
 }
 
-// [31]
+// [36]
 fn quantise_level(x: f32) -> f32 {
     let t = i32(clamp(x, -2.0, 2.0) * 4194304.0);
     return f32(t) * (1.0 / 4194304.0);

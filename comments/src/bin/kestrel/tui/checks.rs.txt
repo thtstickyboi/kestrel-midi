@@ -76,7 +76,7 @@
 /// mode of a missing entry is a few seconds, and a flag added later can never
 /// make a guided render differ from the same command on the command line.
 
-[11] src/bin/kestrel/tui/checks.rs:477
+[11] src/bin/kestrel/tui/checks.rs:478
 /// Check typed flags against what the earlier steps already chose.
 ///
 /// Anything clap itself would reject is left for clap, which says why better
@@ -84,6 +84,6 @@
 /// step -- a second MIDI, soundfont or output -- plus `--adapter`, which only
 /// exists here.
 
-[12] src/bin/kestrel/tui/checks.rs:611
+[12] src/bin/kestrel/tui/checks.rs:612
     /// Every character the timestamp puts in a name has to be legal on
     /// Windows, which is why it is not literally `mm-dd-yyyy | hh:mm:ss`.
