@@ -180,7 +180,8 @@ kestrel --force-cli get-ffmpeg        # download one into ffmpeg/ beside Kestrel
 | `--nan-guard` | off | Check every block for NaN and Inf. **Off by default**, so a clean exit is not by itself proof the WAV is finite. |
 | `--profile` | off | Per-pass GPU timings and the host/device split, once per wall-clock second. |
 | `--progress json` | off | Machine-readable progress for one render; see *Building a GUI on Kestrel*. |
-| `--gpu-backend`, `--gpu-adapter` | off | Force a specific API or card on multi-GPU machines. |
+| `--gpu-backend NAME` | automatic | Which graphics API: `vulkan`, `dx12`, `metal` or `gl`. Left alone, Kestrel prefers Vulkan, which is also the faster one on Windows. |
+| `--gpu-adapter TEXT` | automatic | Which card, by any part of its name, ignoring case: `--gpu-adapter intel`, `--gpu-adapter 5060`. `gpu-info` lists the names. In the guided renderer, `--adapter N` picks card N from its numbered list instead. |
 
 **`--volume` is a percentage** on the same linear scale as OmniConverter's: `100` changes nothing, `50` is half (-6 dB), `0` is silent, `200` the most. Before 1.1.0 it was a plain gain, so `--volume 0.5` in an old script now means half a percent -- values above 0 and up to 2 render with a warning for that reason. A dense mix sits far above full scale and the limiter holds it at the ceiling, so lowering the volume eases the limiting more than it quietens the file; `--ceiling-db` is what sets how loud the file can get.
 
