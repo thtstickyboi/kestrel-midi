@@ -112,6 +112,10 @@ const VOICE_FIELDS: u64 = 26;
 
 /// Words actually allocated per slot for this configuration. \[10\]
 fn voice_fields(cfg: &Config) -> u64 {
+    base_voice_fields(cfg) + if cfg.phase.active() { 3 } else { 0 }
+}
+
+fn base_voice_fields(cfg: &Config) -> u64 {
     if cfg.mod_env_enabled {
         VOICE_FIELDS
     } else if cfg.lfo_enabled {
@@ -126,6 +130,12 @@ pub fn max_voices_for_binding(binding_bytes: u64, steal_percent: u32) -> u32 {
     let slots = binding_bytes / (VOICE_FIELDS * 4);
     let v = slots * 100 / (100 + steal_percent.clamp(1, 100) as u64);
     v.min(u32::MAX as u64) as u32
+}
+
+pub fn max_voices_for_config(binding_bytes: u64, cfg: &Config) -> u32 {
+    let slots = binding_bytes / (voice_fields(cfg) * 4);
+    (slots * 100 / (100 + cfg.max_steal_percent.clamp(1, 100) as u64))
+        .min(u32::MAX as u64) as u32
 }
 
 fn substitute(src: &str, cfg: &Config, bank: &Bank) -> String {
@@ -154,6 +164,9 @@ fn substitute(src: &str, cfg: &Config, bank: &Bank) -> String {
         .replace("{{ENV_STEP}}", &cfg.env_step_frames().to_string())
         .replace("{{NOTE_GRID}}", if cfg.note_grid { "true" } else { "false" })
         .replace("{{VOICE_FIELDS}}", &voice_fields(cfg).to_string())
+        .replace("{{ROTATION_BASE}}", &base_voice_fields(cfg).to_string())
+        .replace("{{ANALYTIC}}", if cfg.phase.active() { "true" } else { "false" })
+        .replace("{{PRESERVE_PHASE_ATTACK}}", if cfg.phase.preserve_attack_ms > 0.0 { "true" } else { "false" })
 }
 
 /// Write `bytes` into `buf` from `offset`, 64 MiB at a time, letting the device \[13\]
@@ -185,10 +198,32 @@ fn shader_source(body: &str, cfg: &Config, bank: &Bank) -> String {
 
 /// The render pass with or without the channel controller path and the glide \[14\]
 fn render_source(cfg: &Config, bank: &Bank, chan: bool, glide: bool) -> String {
+    let analytic = cfg.phase.active();
     let body = include_str!("../../shaders/render.wgsl")
         .replace("{{CHAN}}", if chan { "true" } else { "false" })
-        .replace("{{GLIDE}}", if glide { "true" } else { "false" });
+        .replace("{{GLIDE}}", if glide { "true" } else { "false" })
+        .replace("{{PHASE_FUNCTIONS}}", if analytic { include_str!("../../shaders/phase.wgsl") } else { "" })
+        .replace("{{PHASE_LOAD}}", if analytic {
+            "let pm = voices[F_REGION * c + v] * 4u;
+             rotation_meta = vec3<u32>(phase_data[pm], phase_data[pm + 1u], phase_data[pm + 2u]);
+             rotation = vec3<f32>(bitcast<f32>(voices[F_ROT_C * c + v]),
+                 bitcast<f32>(voices[F_ROT_S * c + v]), bitcast<f32>(voices[F_ROT_SCALE * c + v]));"
+        } else { "" })
+        .replace("{{PHASE_SAMPLE}}", if analytic {
+            "let s = interpolate_rotation(smp_base, phase_hi, frac_of(phase_lo),
+                looping, loop_start, loop_end, smp_len, rotation_meta, rotation);"
+        } else {
+            "let s = interpolate(smp_base, phase_hi, frac_of(phase_lo),
+                looping, loop_start, loop_end, smp_len);"
+        });
     shader_source(&body, cfg, bank)
+}
+
+fn bind_render(device: &wgpu::Device, layout: &wgpu::BindGroupLayout,
+    buffers: &[&wgpu::Buffer], phase: Option<&wgpu::Buffer>) -> wgpu::BindGroup {
+    let mut buffers = buffers.to_vec();
+    if let Some(phase) = phase { buffers.push(phase); }
+    device::bind(device, layout, &buffers)
 }
 
 /// Compile one fully substituted module and one pipeline per entry point.
@@ -313,6 +348,7 @@ pub struct GpuSynth {
     /// The most of one buffer the adapter binds to a shader, which is as far \[19\]
     binding_cap: u64,
     pool_buf: wgpu::Buffer,
+    phase_buf: Option<wgpu::Buffer>,
     params_buf: wgpu::Buffer,
     params_per_variant: u32,
     menv_buf: wgpu::Buffer,
@@ -368,6 +404,12 @@ const TIMESTAMP_COUNT: u32 = PASS_NAMES.len() as u32 * 2;
 
 impl GpuSynth {
     pub fn new(cfg: &Config, bank: Arc<Bank>) -> Result<Self> {
+        let phase = crate::phase::PhaseBank::prepare(&bank, &cfg.phase)?;
+        Self::new_prepared(cfg, bank, phase)
+    }
+
+    pub(crate) fn new_prepared(cfg: &Config, bank: Arc<Bank>,
+        phase: Arc<crate::phase::PhaseBank>) -> Result<Self> {
         cfg.validate()?;
         let (device, queue, adapter_info, limits, has_timestamps) = device::create(cfg)?;
         let adapter_name = format!("{} ({:?})", adapter_info.name, adapter_info.backend);
@@ -391,7 +433,7 @@ impl GpuSynth {
         let binding_cap =
             (limits.max_storage_buffer_binding_size as u64).min(limits.max_buffer_size);
         if voice_pool_bytes > binding_cap {
-            let voice_cap = max_voices_for_binding(binding_cap, cfg.max_steal_percent);
+            let voice_cap = max_voices_for_config(binding_cap, cfg);
             bail!(
                 "max_voices {} allocates {} pool slots, a {:.2} GiB voice buffer, and \
                  {} binds at most {:.2} GiB of one buffer to a shader; cap \
@@ -422,6 +464,24 @@ impl GpuSynth {
         let nwg = cfg.max_render_workgroups.clamp(1, MAX_WORKGROUPS_PER_DIM);
 
         // [29]
+        let phase_buf = if cfg.phase.active() {
+            if limits.max_storage_buffers_per_shader_stage < 10 {
+                bail!("analytic phase requires 10 compute storage buffers; this adapter supports {}",
+                    limits.max_storage_buffers_per_shader_stage);
+            }
+            let bytes = phase.cache_bytes().max(4);
+            if bytes > binding_cap {
+                bail!("analytic cache needs {:.1} MiB in one GPU binding; {} allows {:.1} MiB",
+                    bytes as f64 / 1048576.0, adapter_name, binding_cap as f64 / 1048576.0);
+            }
+            let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("analytic quadrature"), size: bytes,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            upload_in_pieces(&device, &queue, &buf, 0, bytemuck::cast_slice(&phase.words))?;
+            Some(buf)
+        } else { None };
         let pool = &bank.pool;
         let even = pool.len() / 2 * 2;
         let pool_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -583,7 +643,10 @@ impl GpuSynth {
         );
 
         let vram_bytes = pool.len() as u64 * 2
-            + params.len() as u64 * 48
+            + phase_buf.as_ref().map_or(0, |b| b.size())
+            + params_buf.size()
+            + menv_buf.size()
+            + menv_factor_buf.size()
             + voice_bytes * 2
             + partial_bytes
             + out_bytes
@@ -591,7 +654,7 @@ impl GpuSynth {
             + chan_bytes
             + capacity as u64 * 8  // scan + sort keys
             + capacity as u64 * 16 // sort pairs, double buffered
-            + cmds_capacity as u64 * 72;
+            + cmds_capacity as u64 * std::mem::size_of::<SpawnCmd>() as u64;
         log::info!(
             "gpu: {} | {:.1} MiB of device buffers ({:.1} MiB sample pool, \
              {:.1} MiB voice pool for {} voices, {:.1} MiB partials)",
@@ -604,12 +667,14 @@ impl GpuSynth {
         );
 
         // ---- layouts, pipelines, bind groups ----
+        let mut render_bindings = vec![false, true, true, true, false, false, true, true, true, true];
+        if phase_buf.is_some() { render_bindings.push(true); }
         let layouts = Layouts {
             spawn: device::bind_layout(&device, "spawn", &[false, true, false, false]),
             render: device::bind_layout(
                 &device,
                 "render",
-                &[false, true, true, true, false, false, true, true, true, true],
+                &render_bindings,
             ),
             reduce: device::bind_layout(&device, "reduce", &[false, true, false]),
             compact: device::bind_layout(
@@ -631,7 +696,7 @@ impl GpuSynth {
                     &layouts.spawn,
                     &[&uniform_buf, &cmds_buf, &voices[0], &state_buf],
                 ),
-                render: device::bind(
+                render: bind_render(
                     &device,
                     &layouts.render,
                     &[
@@ -646,6 +711,7 @@ impl GpuSynth {
                         &menv_buf,
                         &menv_factor_buf,
                     ],
+                    phase_buf.as_ref(),
                 ),
                 compact: device::bind(
                     &device,
@@ -702,7 +768,7 @@ impl GpuSynth {
                     &layouts.spawn,
                     &[&uniform_buf, &cmds_buf, &voices[1], &state_buf],
                 ),
-                render: device::bind(
+                render: bind_render(
                     &device,
                     &layouts.render,
                     &[
@@ -717,6 +783,7 @@ impl GpuSynth {
                         &menv_buf,
                         &menv_factor_buf,
                     ],
+                    phase_buf.as_ref(),
                 ),
                 compact: device::bind(
                     &device,
@@ -836,6 +903,7 @@ impl GpuSynth {
             binding_cap,
             slots: capacity,
             pool_buf,
+            phase_buf,
             params_buf,
             params_per_variant,
             menv_buf,
@@ -1057,7 +1125,7 @@ impl GpuSynth {
         self.off_runs_capacity = new_cap;
         // The render bind groups reference the old buffer, so rebuild them.
         for p in 0..2 {
-            self.groups[p].render = device::bind(
+            self.groups[p].render = bind_render(
                 &self.device,
                 &self.layouts.render,
                 &[
@@ -1072,6 +1140,7 @@ impl GpuSynth {
                     &self.menv_buf,
                     &self.menv_factor_buf,
                 ],
+                self.phase_buf.as_ref(),
             );
         }
         log::debug!("grew the gates buffer to {new_cap} note-off runs");

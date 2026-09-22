@@ -168,6 +168,7 @@ kestrel --force-cli get-ffmpeg        # download one into ffmpeg/ beside Kestrel
 | `--max-voices N` | `1048576` | Ceiling on simultaneous voices. The single biggest lever on both VRAM and speed. The maximum is whatever your card will bind; `gpu-info` prints yours. |
 | `--block N` | `4096` | Frames per render block. Also sets how many note-ons are held in host RAM at once. |
 | `--interp` | `linear` | `nearest`, `linear` or `cubic`. Cubic reads twice as many samples per voice. |
+| `--phase-mode` | `baseline` | `analytic` enables SYNCore-style phase rotation with cached coefficients. Adds quadrature memory and GPU work; see [phase controls and tests](docs/analytic-phase-rotation.md). |
 | `--seconds N` | off | Stop after N seconds of output. Use this constantly while experimenting. |
 | `--volume P` | `100` | Volume as a percentage, 0 to 200, applied before the limiter. See below. |
 | `--limiter` | `brickwall` | `brickwall`, `omni` or `off`. See *Limiting*. |

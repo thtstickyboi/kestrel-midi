@@ -25,6 +25,9 @@ struct SpawnCmd {
     gain_l: f32,
     gain_r: f32,
     row_bias: u32,
+    rotation_cosine: f32,
+    rotation_sine: f32,
+    rotation_scale: f32,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -79,6 +82,11 @@ fn main(
             // [4]
             voices[F_AGE * c + dst] = 0u - s.start_rel;
             if (USE_MOD_ENV) { voices[F_REL_AGE * c + dst] = NO_RELEASE; }
+            if (ANALYTIC) {
+                voices[F_ROT_C * c + dst] = bitcast<u32>(s.rotation_cosine);
+                voices[F_ROT_S * c + dst] = bitcast<u32>(s.rotation_sine);
+                voices[F_ROT_SCALE * c + dst] = bitcast<u32>(s.rotation_scale);
+            }
         }
         i = i + stride;
     }

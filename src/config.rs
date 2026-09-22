@@ -129,6 +129,8 @@ pub enum BackendKind {
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Optional analytic sample rotation. Baseline by default.
+    pub phase: crate::phase::PhaseSettings,
     // [12]
     pub sample_rate: u32,
     /// Output channel count. Only 2 is implemented; kept here so the constant \[13\]
@@ -235,6 +237,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
+            phase: crate::phase::PhaseSettings::default(),
             sample_rate: 48_000,
             channels: 2,
 
@@ -298,6 +301,7 @@ impl Default for Config {
 
 impl Config {
     pub fn validate(&self) -> Result<()> {
+        self.phase.validate()?;
         if self.channels != 2 {
             bail!("only stereo output is implemented (channels = {})", self.channels);
         }

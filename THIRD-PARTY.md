@@ -10,6 +10,15 @@ Kestrel is under the Mozilla Public License 2.0 (see [LICENSE](LICENSE)). Some o
 
 ## 1. Code in this repository from elsewhere
 
+### `src/phase.rs` and `shaders/phase.wgsl` -- analytic phase rotation
+
+The analytic quadrature preparation, deterministic angle assignment, loop-body
+handling, normalization, and attack protection are adapted from **SYNCore**,
+`SAFSYN/phase.cpp` and `SAFSYN/phase.h`, revision `4cd9373`.
+SYNCore releases this code under the Unlicense/public-domain dedication;
+its original [license text](third_party/SYNCore-LICENSE.txt) is included.
+The Rust/GPU integration and finite coefficient tables are Kestrel additions.
+
 ### `src/limiter.rs` -- the `omni` limiter
 
 The `Limiter` type in `src/limiter.rs` (the `--limiter omni` path) is a port of `OmniConverter/Extensions/Audio/Limiter.cs`, which is itself from **Kiva** by **Arduano**.

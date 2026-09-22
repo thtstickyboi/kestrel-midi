@@ -46,6 +46,8 @@ pub struct SpawnCmd {
     pub gain_r: f32,
     /// Which channel row this voice takes its **opening** bend and gain from, \[6\]
     pub row_bias: u32,
+    /// Fixed analytic coefficients, computed before GPU dispatch.
+    pub rotation: crate::phase::Coefficients,
 }
 
 /// Which of `want` queued spawns the `i`-th accepted one should be, when only \[7\]

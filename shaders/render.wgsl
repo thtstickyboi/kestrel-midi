@@ -217,6 +217,9 @@ fn interpolate(
 }
 
 // [24]
+{{PHASE_FUNCTIONS}}
+
+// [24]
 fn reduce_into_partials(tid: u32, wg: u32, nwg: u32, first_sample: u32) {
     let lane = tid / PER_LANE;
     let chunk = tid % PER_LANE;
@@ -326,9 +329,12 @@ fn main(
         var lfo_factor = 1u << BEND_SHIFT;
         var base_gain_l = 0.0;
         var base_gain_r = 0.0;
+        var rotation_meta = vec3<u32>(0u);
+        var rotation = vec3<f32>(1.0, 0.0, 1.0);
 
         if (is_live) {
             let c = u.capacity;
+            {{PHASE_LOAD}}
             phase_lo = voices[F_PHASE_LO * c + v];
             phase_hi = voices[F_PHASE_HI * c + v];
             // [37]
@@ -699,10 +705,7 @@ fn main(
                             }
                         }
 
-                        let s = interpolate(
-                            smp_base, phase_hi, frac_of(phase_lo),
-                            looping, loop_start, loop_end, smp_len
-                        );
+                        {{PHASE_SAMPLE}}
                         let g = min(level, 1.0);
                         let x = s * g;
 

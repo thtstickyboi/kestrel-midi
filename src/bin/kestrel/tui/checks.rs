@@ -409,6 +409,14 @@ pub struct Extra {
 
 /// Flags no loader reads: they choose the device, the voice pool, the \[10\]
 pub(crate) const LOAD_NEUTRAL: &[&str] = &[
+    "--phase-mode",
+    "--phase-strength",
+    "--phase-seed",
+    "--phase-pool",
+    "--phase-continuous",
+    "--phase-preserve-attack-ms",
+    "--phase-cache-mib",
+    "--phase-scratch-mib",
     "--adapter",
     "--admit",
     "--backend",

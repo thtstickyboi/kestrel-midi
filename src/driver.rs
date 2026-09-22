@@ -267,6 +267,9 @@ fn rank_key(gain_l: f32, gain_r: f32, index: u64) -> u64 {
 }
 
 pub struct Driver {
+    phase_bank: Arc<crate::phase::PhaseBank>,
+    note_ticks: Vec<u64>,
+    note_angles: Vec<Option<crate::phase::Angle>>,
     cfg: Config,
     bank: Arc<Bank>,
     stream: MidiStream,
@@ -376,11 +379,20 @@ pub struct Driver {
 
 impl Driver {
     pub fn open(cfg: &Config, bank: Arc<Bank>, midi: impl AsRef<Path>) -> Result<Self> {
+        let phase = crate::phase::PhaseBank::prepare(&bank, &cfg.phase)?;
+        Self::open_prepared(cfg, bank, midi, phase)
+    }
+
+    pub(crate) fn open_prepared(cfg: &Config, bank: Arc<Bank>, midi: impl AsRef<Path>,
+        phase_bank: Arc<crate::phase::PhaseBank>) -> Result<Self> {
         cfg.validate()?;
         let stream = MidiStream::open(midi)?;
         let clock = TempoClock::new(stream.division, cfg.sample_rate);
 
         let mut d = Driver {
+            phase_bank,
+            note_ticks: Vec::new(),
+            note_angles: Vec::new(),
             cfg: cfg.clone(),
             bank,
             stream,
@@ -503,6 +515,8 @@ impl Driver {
         }
         self.spawn_buf.clear();
         self.notes.clear();
+        self.note_ticks.clear();
+        self.note_angles.clear();
         self.note_ordinal.clear();
         self.cands.clear();
         self.cand_seen = 0;
@@ -571,7 +585,7 @@ impl Driver {
             let rel = frame.saturating_sub(block_start) as u32;
             let rel = rel.min(self.cfg.block_frames - 1);
             self.stats.events += 1;
-            self.handle_event(ev, rel, block_start);
+            self.handle_event(ev, tick, rel, block_start);
         }
 
         if prof {
@@ -775,6 +789,7 @@ impl Driver {
             gain_r: v.gain_r,
             // [68]
             row_bias,
+            rotation: crate::phase::Coefficients::default(),
         }
     }
 
@@ -829,6 +844,10 @@ impl Driver {
                     last = c.note;
                     self.notes[notes] = self.notes[c.note as usize];
                     self.note_ordinal[notes] = self.note_ordinal[c.note as usize];
+                    if self.cfg.phase.active() {
+                        self.note_ticks[notes] = self.note_ticks[c.note as usize];
+                        self.note_angles[notes] = self.note_angles[c.note as usize];
+                    }
                     notes += 1;
                 }
                 c.note = notes as u32 - 1;
@@ -839,6 +858,8 @@ impl Driver {
         self.cands.truncate(kept);
         self.notes.truncate(notes);
         self.note_ordinal.truncate(notes);
+        self.note_ticks.truncate(notes);
+        self.note_angles.truncate(notes);
         self.cand_stride *= 2;
     }
 
@@ -875,6 +896,12 @@ impl Driver {
                 self.block_first_id + c.id_off,
                 row_bias,
             );
+            if self.cfg.phase.active() {
+                let note = c.note as usize;
+                let angle = *self.note_angles[note].get_or_insert_with(||
+                    self.phase_bank.angle(self.note_ticks[note], ch, key));
+                cmd.rotation = self.phase_bank.coefficients(v.region, angle);
+            }
             let (semitones, cc5) = glide_unpack(glide);
             let (fl, sl) = self.glide.spawn(semitones, cc5, start_rel);
             cmd.flags |= fl;
@@ -894,7 +921,7 @@ impl Driver {
         }
     }
 
-    fn handle_event(&mut self, ev: Event, rel: u32, block_start: u64) {
+    fn handle_event(&mut self, ev: Event, tick: u64, rel: u32, block_start: u64) {
         match ev {
             Event::NoteOn { ch, key, vel } => {
                 // [78]
@@ -946,6 +973,7 @@ impl Driver {
                 }
                 let note = self.notes.len() as u32;
                 let mut recorded = false;
+                let mut deferred_angle = None;
                 for p in prev.iter() {
                     // [83]
                     let id = self.next_note_id;
@@ -959,7 +987,7 @@ impl Driver {
                                 self.bank.build_layer(p.region, key, vel, &self.cfg)
                             {
                                 // [85]
-                                let cmd = Self::make_cmd(
+                                let mut cmd = Self::make_cmd(
                                     &v,
                                     variant,
                                     GateTable::slot(ch, key) as u32,
@@ -968,6 +996,11 @@ impl Driver {
                                     id,
                                     0,
                                 );
+                                if self.cfg.phase.active() {
+                                    let angle = *deferred_angle.get_or_insert_with(||
+                                        self.phase_bank.angle(tick, ch, key));
+                                    cmd.rotation = self.phase_bank.coefficients(v.region, angle);
+                                }
                                 self.deferred.push((start, cmd, glide));
                             }
                             continue;
@@ -994,6 +1027,10 @@ impl Driver {
                             glide,
                         ));
                         self.note_ordinal.push(ordinal);
+                        if self.cfg.phase.active() {
+                            self.note_ticks.push(tick);
+                            self.note_angles.push(None);
+                        }
                         recorded = true;
                     }
                     self.cands.push(Cand {
