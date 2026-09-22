@@ -19,6 +19,7 @@ use std::sync::Arc;
 /// Structure of arrays, one Vec per field. `phase` and `step` are kept as u64 \[2\]
 #[derive(Default)]
 struct Pool {
+    rotation: Vec<crate::phase::Coefficients>,
     phase: Vec<Fixed>,
     step: Vec<Fixed>,
     smp_base: Vec<u32>,
@@ -55,6 +56,7 @@ impl Pool {
 
     /// `env_phase` is the block's position on the envelope grid, from which \[7\]
     fn push(&mut self, c: &SpawnCmd, env_phase: u32, step: u32) {
+        self.rotation.push(c.rotation);
         self.phase.push(Fixed::from_parts(c.phase_hi, c.phase_lo));
         self.step.push(Fixed::from_parts(c.step_hi, c.step_lo));
         self.smp_base.push(c.smp_base);
@@ -90,6 +92,7 @@ impl Pool {
         for (r, &alive) in keep.iter().enumerate().take(self.len()) {
             if alive {
                 if w != r {
+                    self.rotation[w] = self.rotation[r];
                     self.phase[w] = self.phase[r];
                     self.step[w] = self.step[r];
                     self.smp_base[w] = self.smp_base[r];
@@ -121,6 +124,7 @@ impl Pool {
     }
 
     fn truncate(&mut self, n: usize) {
+        self.rotation.truncate(n);
         self.phase.truncate(n);
         self.step.truncate(n);
         self.smp_base.truncate(n);
@@ -181,6 +185,7 @@ fn release_fall(p: &RegionParams, level: f32, left: u32, exp_release: bool) -> f
 }
 
 pub struct CpuSynth {
+    phase_bank: Arc<crate::phase::PhaseBank>,
     cfg: Config,
     bank: Arc<Bank>,
     pool: Pool,
@@ -209,9 +214,24 @@ pub struct CpuSynth {
 }
 
 impl CpuSynth {
+    /// Construct a synth, panicking on invalid settings or preparation failure.
+    /// Use [`Self::try_new`] to handle analytic-cache limits as ordinary errors.
     pub fn new(cfg: &Config, bank: Arc<Bank>) -> Self {
+        Self::try_new(cfg, bank).expect("CPU synth preparation failed; use try_new to handle setup errors")
+    }
+
+    /// Fallible construction, including analytic-cache budget validation.
+    pub fn try_new(cfg: &Config, bank: Arc<Bank>) -> Result<Self> {
+        cfg.validate()?;
+        let phase = crate::phase::PhaseBank::prepare(&bank, &cfg.phase)?;
+        Ok(Self::new_prepared(cfg, bank, phase))
+    }
+
+    pub(crate) fn new_prepared(cfg: &Config, bank: Arc<Bank>,
+        phase_bank: Arc<crate::phase::PhaseBank>) -> Self {
         let tiles = (cfg.block_frames / cfg.gate_frames) as usize;
         CpuSynth {
+            phase_bank,
             cfg: cfg.clone(),
             glide_tab: crate::porta::tables(cfg.sample_rate),
             bank,
@@ -324,6 +344,7 @@ impl CpuSynth {
     #[inline(always)]
     fn interpolate(
         &self,
+        voice: usize,
         base: u32,
         idx: u32,
         frac: f32,
@@ -332,22 +353,28 @@ impl CpuSynth {
         loop_end: u32,
         len: u32,
     ) -> f32 {
+        let fetch = |idx| {
+            let original = self.fetch(base, idx);
+            if self.cfg.phase.active() {
+                self.phase_bank.apply(original, self.pool.region[voice], idx, self.pool.rotation[voice])
+            } else { original }
+        };
         match self.cfg.interpolation {
-            Interpolation::Nearest => self.fetch(base, idx),
+            Interpolation::Nearest => fetch(idx),
             Interpolation::Linear => {
                 let i1 = Self::advance_index(idx, 1, looping, loop_start, loop_end, len);
-                let s0 = self.fetch(base, idx);
-                let s1 = self.fetch(base, i1);
+                let s0 = fetch(idx);
+                let s1 = fetch(i1);
                 s0 + (s1 - s0) * frac
             }
             Interpolation::Cubic => {
                 let im1 = Self::advance_index(idx, -1, looping, loop_start, loop_end, len);
                 let i1 = Self::advance_index(idx, 1, looping, loop_start, loop_end, len);
                 let i2 = Self::advance_index(idx, 2, looping, loop_start, loop_end, len);
-                let sm1 = self.fetch(base, im1);
-                let s0 = self.fetch(base, idx);
-                let s1 = self.fetch(base, i1);
-                let s2 = self.fetch(base, i2);
+                let sm1 = fetch(im1);
+                let s0 = fetch(idx);
+                let s1 = fetch(i1);
+                let s2 = fetch(i2);
                 catmull_rom(sm1, s0, s1, s2, frac)
             }
         }
@@ -834,6 +861,7 @@ impl Backend for CpuSynth {
                     }
 
                     let s = self.interpolate(
+                        v,
                         base,
                         idx,
                         phase.lo() as f32 * FRAC_SCALE_F32,

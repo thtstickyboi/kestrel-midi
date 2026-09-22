@@ -37,6 +37,10 @@ const F_AGE: u32 = 24u;
 // [6]
 const F_REL_AGE: u32 = 25u;
 const VOICE_FIELDS: u32 = {{VOICE_FIELDS}}u;
+const ANALYTIC: bool = {{ANALYTIC}};
+const F_ROT_C: u32 = {{ROTATION_BASE}}u;
+const F_ROT_S: u32 = F_ROT_C + 1u;
+const F_ROT_SCALE: u32 = F_ROT_C + 2u;
 
 const ENV_ATTACK: u32  = 0u;
 const ENV_DECAY: u32   = 1u;

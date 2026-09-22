@@ -52,6 +52,17 @@ pub struct SampleInfo {
     pub name: String,
 }
 
+/// Effective sample coordinates shared by voice spawning and phase preparation.
+pub(crate) fn sample_geometry(s: &SampleInfo, r: &Region) -> (u32, u32, u32, u32, u32) {
+    let scale = |v: i32| (v as f32 * s.resample_ratio).round() as i64;
+    let start = scale(r.addr_start).clamp(0, s.len as i64 - 1) as u32;
+    let len = (s.len as i64 + scale(r.addr_end)).clamp(1, s.len as i64) as u32;
+    let ls = (s.loop_start as i64 + scale(r.addr_loop_start)).clamp(0, len as i64 - 1) as u32;
+    let le = (s.loop_end as i64 + scale(r.addr_loop_end)).clamp(0, len as i64) as u32;
+    let flags = if le <= ls + 1 { 0 } else { r.loop_mode.flags() };
+    (start, len, ls, le, flags)
+}
+
 /// A key/velocity zone with every SF2 generator already applied.
 #[derive(Debug, Clone)]
 pub struct Region {
@@ -909,13 +920,7 @@ impl Bank {
         let gain_r = gain * theta.sin();
 
         // [85]
-        let scale = |v: i32| (v as f32 * s.resample_ratio).round() as i64;
-        let start_offset = scale(r.addr_start).clamp(0, s.len as i64 - 1) as u32;
-        let smp_len = (s.len as i64 + scale(r.addr_end)).clamp(1, s.len as i64) as u32;
-        let loop_start = (s.loop_start as i64 + scale(r.addr_loop_start))
-            .clamp(0, smp_len as i64 - 1) as u32;
-        let loop_end =
-            (s.loop_end as i64 + scale(r.addr_loop_end)).clamp(0, smp_len as i64) as u32;
+        let (start_offset, smp_len, loop_start, loop_end, flags) = sample_geometry(s, r);
 
         // [86]
         let keys = if r.params_stride != 0 { 128u32 } else { 1 };
@@ -926,12 +931,6 @@ impl Bank {
             0
         };
         let params = r.params_base + vi * keys + ki;
-
-        let mut flags = r.loop_mode.flags();
-        // A loop that does not describe at least two frames is not a loop.
-        if r.loop_mode != LoopMode::NoLoop && loop_end <= loop_start + 1 {
-            flags = 0;
-        }
 
         Some(VoiceSpawn {
             phase: Fixed::from_int(start_offset),

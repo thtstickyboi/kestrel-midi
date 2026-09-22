@@ -1168,4 +1168,17 @@ mod tests {
             .collect();
         assert_eq!(load_flags(&flags), ["--rate=44100", "--volume=50"]);
     }
+
+    #[test]
+    fn phase_controls_reuse_the_raw_bank_and_reach_render_configuration() {
+        let flags = option_flags(Some(&json!({"phase_mode": "analytic", "phase_seed": 42,
+            "phase_continuous": true, "phase_preserve_attack_ms": 5.0}))).unwrap();
+        assert!(load_flags(&flags).is_empty());
+        let argv = render_argv(PLACEHOLDER_MIDI.as_ref(), &[PathBuf::from("bank.sf2")],
+            None, PLACEHOLDER_OUT.as_ref(), &flags);
+        let (cfg, _) = parse_render(argv).unwrap().to_config().unwrap();
+        assert!(cfg.phase.active() && cfg.phase.continuous);
+        assert_eq!(cfg.phase.seed, 42);
+        assert_eq!(cfg.phase.preserve_attack_ms, 5.0);
+    }
 }

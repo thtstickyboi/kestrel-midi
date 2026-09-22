@@ -45,7 +45,7 @@ A session can list GPUs and ffmpeg, describe MIDIs and soundfonts, list every re
 | `load_soundfonts` | `soundfonts` (a list), `sf_programs` (optional), `options` (optional) | Loads and keeps them. `name`, `presets`, `regions`, `samples`, `pool_bytes`, `pool_rate`, `uses_lfo`, `general_midi`, `bank0_programs`, `drum_kits`, `preset_list` (each `bank`, `program`, `name`), `load_secs`, `reused` |
 | `unload` | | `unloaded`: frees the loaded soundfonts' memory |
 | `render` | `midi`, `out`, `soundfonts` (optional), `sf_programs` (optional), `options` (optional), `progress_interval_ms` (optional) | When the render ends: the summary (see [Telemetry](#telemetry)) plus `out` |
-| `cancel` | | Stops the running render or scan after its current block. `cancelling`: the id it stops. A soundfont load cannot be stopped part way |
+| `cancel` | | Stops the running render or scan after its current block, or analytic preparation at its next cancellation check. `cancelling`: the id it stops. A raw soundfont load cannot be stopped part way |
 | `snapshot` | | The running render's current `progress` line |
 | `set_interval` | `interval_ms` | How often a render sends `progress`: 0 for never (use `snapshot` instead), otherwise held to 10–60,000 ms. Applies to the running render and later ones. Result: the `interval_ms` applied |
 | `status` | | `running` (`id` and `cmd`, or null), `loaded` (what `load_soundfonts` returned, or null), `interval_ms` |
@@ -57,6 +57,8 @@ A session can list GPUs and ffmpeg, describe MIDIs and soundfonts, list every re
 Soundfonts in a list are layered in order: each one replaces whatever the ones before it define at the same bank and program. Put a General MIDI bank first and an instrument after it. `sf_programs` places the last soundfont on those programs of bank 0, spelled as `--sf-programs` takes it: `"0,1"` or `"0-7"`.
 
 A render with no `soundfonts` uses the loaded ones. **A loaded soundfont is reused** by every render that would load it the same way, which saves the load time on each render (seconds on a large library). A render that changes an option marked `reloads_soundfonts`, such as `volume` or `rate`, loads again, and that becomes the loaded set. A render that names different `soundfonts` does the same.
+
+Analytic phase options, such as `"phase_mode": "analytic"` and `"phase_seed": 42`, reuse the loaded soundfont. Quadrature is prepared separately for each render, with log progress during `loading_soundfont` and cancellation checks inside preparation. Cancellation there creates no output file. See [analytic phase controls](docs/analytic-phase-rotation.md).
 
 ## Render options
 
@@ -106,7 +108,7 @@ Then the `response`. Log lines are written the moment they happen and the other 
 
 Any of these can be `null` before it is known.
 
-**The summary** has `bytes`, `audio_secs`, `wall_secs`, `notes`, `voices_spawned`, `peak_voices`, `stolen`, `dropped`, `peak_level`, `clipped` and `cancelled`. A cancelled render still ends normally: the file is closed properly and holds what was rendered, and `cancelled` is `true`.
+**The summary** has `bytes`, `audio_secs`, `wall_secs`, `notes`, `voices_spawned`, `peak_voices`, `stolen`, `dropped`, `peak_level`, `clipped` and `cancelled`. A cancelled render still ends normally: an opened file is closed properly and holds what was rendered, and `cancelled` is `true`. Cancellation during analytic preparation returns zero audio/bytes without creating a file.
 
 `scan_midi` sends `scan_progress` lines instead, at the same interval, with `bytes_read`, `bytes_total`, `progress` and `notes`.
 

@@ -224,6 +224,30 @@ struct RenderArgs {
     /// many samples a voice.
     #[arg(long, default_value = "linear")]
     interp: String,
+    /// Sample phase policy. Analytic prepares a quadrature cache during loading.
+    #[arg(long = "phase-mode", default_value = "baseline", value_parser = ["baseline", "analytic"])]
+    phase_mode: String,
+    /// Analytic rotation strength, from 0 (unchanged) to 1 (full range).
+    #[arg(long = "phase-strength", default_value_t = 1.0)]
+    phase_strength: f32,
+    /// Deterministic analytic angle seed.
+    #[arg(long = "phase-seed", default_value_t = 0)]
+    phase_seed: u64,
+    /// Number of cached analytic angles, 1..64. Ignored with --phase-continuous.
+    #[arg(long = "phase-pool", default_value_t = 64)]
+    phase_pool: u32,
+    /// Assign continuous angles per MIDI tick/channel/key instead of a finite pool.
+    #[arg(long = "phase-continuous")]
+    phase_continuous: bool,
+    /// Leave this source-sample prefix unchanged, then blend over 10 ms.
+    #[arg(long = "phase-preserve-attack-ms", default_value_t = 0.0)]
+    phase_preserve_attack_ms: f32,
+    /// Maximum analytic quadrature cache in MiB; fails before allocating more.
+    #[arg(long = "phase-cache-mib", default_value_t = 2048)]
+    phase_cache_mib: u64,
+    /// Maximum temporary analytic FFT workspace in MiB.
+    #[arg(long = "phase-scratch-mib", default_value_t = 512)]
+    phase_scratch_mib: u64,
     /// Ceiling on how much of the voice pool one block may steal, in percent.
     /// 100 lets a saturated block replace the entire pool, which pumps.
     #[arg(long = "steal-percent", default_value_t = 25)]
@@ -465,6 +489,19 @@ impl RenderArgs {
     fn to_config(&self) -> Result<(Config, BackendKind)> {
         let dev = self.dev_args();
         let mut cfg = Config {
+            phase: kestrel::phase::PhaseSettings {
+                mode: if self.phase_mode == "analytic" { kestrel::phase::PhaseMode::Analytic }
+                    else { kestrel::phase::PhaseMode::Baseline },
+                strength: self.phase_strength,
+                seed: self.phase_seed,
+                pool_size: self.phase_pool,
+                continuous: self.phase_continuous,
+                preserve_attack_ms: self.phase_preserve_attack_ms,
+                cache_budget_bytes: self.phase_cache_mib.checked_mul(1 << 20)
+                    .context("phase-cache-mib is too large")?,
+                scratch_budget_bytes: self.phase_scratch_mib.checked_mul(1 << 20)
+                    .context("phase-scratch-mib is too large")?,
+            },
             sample_rate: self.rate,
             block_frames: self.block,
             reduce_tile: dev.reduce_tile,
@@ -1190,6 +1227,25 @@ mod tests {
         assert!(typed.limiter && typed.limiter_true_peak && !typed.unchecked_shaders);
         assert_eq!(format!("{:?}", typed.steal_rule), "Quietest");
         assert_eq!(format!("{:?}", typed.admit_rule), "Loudest");
+    }
+
+    #[test]
+    fn analytic_options_validate_only_applicable_controls() {
+        let (cfg, _) = render_args(&["--phase-mode", "analytic", "--phase-seed", "42",
+            "--phase-pool", "8", "--phase-preserve-attack-ms", "5"])
+            .unwrap().to_config().unwrap();
+        assert!(cfg.phase.active());
+        assert_eq!(cfg.phase.seed, 42);
+        assert_eq!(cfg.phase.pool_size, 8);
+        assert_eq!(cfg.phase.preserve_attack_ms, 5.0);
+        for flags in [
+            &["--phase-mode", "analytic", "--phase-strength", "NaN"][..],
+            &["--phase-mode", "analytic", "--phase-pool", "0"][..],
+        ] { assert!(render_args(flags).unwrap().to_config().is_err()); }
+        assert!(render_args(&["--phase-mode", "analytic", "--phase-continuous", "--phase-pool", "0"])
+            .unwrap().to_config().is_ok());
+        assert!(render_args(&["--phase-mode", "baseline", "--phase-strength", "NaN", "--phase-pool", "0"])
+            .unwrap().to_config().is_ok());
     }
 
     fn r(args: &[&str]) -> Route {

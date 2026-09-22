@@ -265,7 +265,7 @@ pub fn survey(cfg: &Config) -> Result<(Vec<AdapterSummary>, Option<usize>)> {
                 backend: i.backend,
                 device_type: i.device_type,
                 binding_bytes: binding,
-                max_voices: crate::gpu::max_voices_for_binding(binding, cfg.max_steal_percent),
+                max_voices: crate::gpu::max_voices_for_config(binding, cfg),
             }
         })
         .collect();

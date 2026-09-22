@@ -260,14 +260,15 @@ pub trait Observer {
     fn setup(&mut self, _setup: &Setup) {}
     /// Called after every block. Cheap counters only are in `Tick`; anything \[16\]
     fn block(&mut self, _tick: &Tick) {}
-    /// Polled once per block. True stops the render after the block in hand, \[17\]
+    /// Polled during analytic preparation and once per block. True stops after
+    /// the current preparation step or the block in hand, \[17\]
     fn cancelled(&self) -> bool {
         false
     }
 }
 
 /// How a render ended.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Summary {
     pub bytes: u64,
     pub audio_secs: f64,
@@ -420,8 +421,29 @@ pub fn run(
         log::info!(target: TARGET, "loaded {} in {:.2?}", bank.describe(), t0.elapsed());
     }
 
+    let phase_started = Instant::now();
+    let mut last_percent = usize::MAX;
+    let phase = match crate::phase::PhaseBank::prepare_with(
+        &bank, &cfg.phase, &|| obs.cancelled(), &mut |done, total| {
+            let percent = done * 100 / total.max(1);
+            if last_percent == usize::MAX || percent / 10 != last_percent / 10 {
+                log::info!(target: TARGET, "analytic phase: {done}/{total} samples ({percent}%)");
+                last_percent = percent;
+            }
+        },
+    ) {
+        Ok(phase) => phase,
+        Err(e) if e.is::<crate::phase::PreparationCancelled>() => {
+            return Ok(Summary { cancelled: true, wall_secs: t0.elapsed().as_secs_f64(), ..Default::default() });
+        }
+        Err(e) => return Err(e),
+    };
+    if cfg.phase.active() {
+        log::info!(target: TARGET, "analytic phase: {} unique samples, {:.1} MiB cache, prepared in {:.2?}",
+            phase.sample_count(), phase.cache_bytes() as f64 / 1048576.0, phase_started.elapsed());
+    }
     obs.phase(Phase::OpeningMidi);
-    let mut driver = Driver::open(&cfg, bank.clone(), &job.midi)?;
+    let mut driver = Driver::open_prepared(&cfg, bank.clone(), &job.midi, phase.clone())?;
     log::info!(target: TARGET, "{} has {} tracks", job.midi.display(), driver.track_count());
 
     let mut out = match encoder {
@@ -448,9 +470,9 @@ pub fn run(
 
     obs.phase(Phase::PreparingDevice);
     let (mut backend, adapter, device_bytes, ids): (Box<dyn Backend>, _, _, _) = match kind {
-        BackendKind::Cpu => (Box::new(CpuSynth::new(&cfg, bank.clone())), None, None, None),
+        BackendKind::Cpu => (Box::new(CpuSynth::new_prepared(&cfg, bank.clone(), phase.clone())), None, None, None),
         BackendKind::Gpu => {
-            let g = gpu::GpuSynth::new(&cfg, bank.clone())?;
+            let g = gpu::GpuSynth::new_prepared(&cfg, bank.clone(), phase)?;
             let name = g.adapter_name().to_string();
             let bytes = g.vram_bytes();
             let ids = g.adapter_ids();
