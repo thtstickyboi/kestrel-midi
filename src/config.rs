@@ -129,104 +129,109 @@ pub enum BackendKind {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Optional analytic sample rotation. Baseline by default.
+    /// Optional analytic sample rotation (`--phase-mode analytic`, contributed \[12\]
     pub phase: crate::phase::PhaseSettings,
-    // [12]
+
+    // [13]
     pub sample_rate: u32,
-    /// Output channel count. Only 2 is implemented; kept here so the constant \[13\]
+    /// Output channel count. Only 2 is implemented; kept here so the constant \[14\]
     pub channels: u32,
 
-    // [14]
+    // [15]
     pub block_frames: u32,
-    /// Frames handled per workgroup reduction step inside the render shader. \[15\]
+    /// Frames handled per workgroup reduction step inside the render shader. \[16\]
     pub reduce_tile: u32,
-    /// Frames between note-off gate checks, and so the granularity of a \[16\]
+    /// Frames between note-off gate checks, and so the granularity of a \[17\]
     pub gate_frames: u32,
     /// Invocations per workgroup in the render pass. One voice per invocation.
     pub workgroup_size: u32,
-    /// Upper bound on workgroups dispatched by the render pass. Voices beyond \[17\]
+    /// Upper bound on workgroups dispatched by the render pass. Voices beyond \[18\]
     pub max_render_workgroups: u32,
-    /// Upper bound on the grid taken by every *per-voice* pass: spawn, steal \[18\]
+    /// Upper bound on the grid taken by every *per-voice* pass: spawn, steal \[19\]
     pub max_pool_workgroups: u32,
 
-    // [19]
+    // [20]
     pub max_voices: u32,
-    /// Voices per (channel, key) note-on. SoundFont layers spawn one voice \[20\]
+    /// Voices per (channel, key) note-on. SoundFont layers spawn one voice \[21\]
     pub max_layers: u32,
     pub steal_rule: StealRule,
     /// Which note-ons survive when a block oversubscribes the pool.
     pub admit_rule: AdmitRule,
-    /// Note-ons quieter than this are not rendered at all. Each is skipped on \[21\]
+    /// Note-ons quieter than this are not rendered at all. Each is skipped on \[22\]
     pub min_velocity: u8,
-    /// Hold notes to BASSMIDI's 4 ms envelope grid: a note-off takes effect at \[22\]
+    /// Hold notes to BASSMIDI's 4 ms envelope grid: a note-off takes effect at \[23\]
     pub note_grid: bool,
-    /// Admission candidates one block may hold before they are thinned. \[23\]
+    /// Admission candidates one block may hold before they are thinned. \[24\]
     pub max_block_candidates: u32,
-    /// Ceiling on how much of the pool one block may steal, in percent. \[24\]
+    /// Threads that build a block's admitted voices, `Driver::materialise`. \[25\]
+    pub materialise_threads: usize,
+    /// Ceiling on how much of the pool one block may steal, in percent. \[26\]
     pub max_steal_percent: u32,
-    /// Frames a stolen voice fades over instead of being cut. \[25\]
+    /// Frames a stolen voice fades over instead of being cut. \[27\]
     pub steal_fade_frames: u32,
-    /// Re-sort the voice pool by (region, envelope stage, phase) during \[26\]
+    /// Re-sort the voice pool by (region, envelope stage, phase) during \[28\]
     pub sort_voices: bool,
+    /// Skip the device for a block in which no voice is alive and none is \[29\]
+    pub skip_silence: bool,
 
     // ---- dsp -------------------------------------------------------------
     pub interpolation: Interpolation,
     pub decay_curve: EnvelopeCurve,
     pub release_curve: EnvelopeCurve,
-    /// Envelope level below which a releasing voice is considered dead. \[27\]
+    /// Envelope level below which a releasing voice is considered dead. \[30\]
     pub env_floor: f32,
-    /// Enable the per-voice low-pass filter. SoundFonts that leave the cutoff \[28\]
+    /// Enable the per-voice low-pass filter. SoundFonts that leave the cutoff \[31\]
     pub filter_enabled: bool,
     /// Linear gain applied to the final mix before limiting.
     pub master_volume: f32,
-    /// How many copies of the params table the sound controllers CC71-CC75 may \[29\]
+    /// How many copies of the params table the sound controllers CC71-CC75 may \[32\]
     pub max_param_variants: u32,
     /// Apply the soft limiter to the mixed output.
     pub limiter: bool,
-    /// Which limiter runs. `Brickwall` is the default: a lookahead true-peak \[30\]
+    /// Which limiter runs. `Brickwall` is the default: a lookahead true-peak \[33\]
     pub limiter_mode: LimiterMode,
     /// Brickwall ceiling in dBFS. 0.0 is flat full scale.
     pub limiter_ceiling_db: f64,
     /// Brickwall lookahead in milliseconds. This is also the render latency.
     pub limiter_lookahead_ms: f64,
-    /// Brickwall release in milliseconds. Short keeps the material after a \[31\]
+    /// Brickwall release in milliseconds. Short keeps the material after a \[34\]
     pub limiter_release_ms: f64,
-    /// Time constant of the brickwall's sustained stage, in milliseconds. \[32\]
+    /// Time constant of the brickwall's sustained stage, in milliseconds. \[35\]
     pub limiter_sustain_ms: f64,
-    /// Detect inter-sample peaks by 4x oversampling rather than looking at the \[33\]
+    /// Detect inter-sample peaks by 4x oversampling rather than looking at the \[36\]
     pub limiter_true_peak: bool,
     /// Limiter attack/release in seconds.
     pub limiter_attack: f32,
     pub limiter_release: f32,
 
-    // [34]
+    // [37]
     pub resample_pool: bool,
-    /// Soft ceiling on sample-pool bytes on the device. When the pool does not \[35\]
+    /// Soft ceiling on sample-pool bytes on the device. When the pool does not \[38\]
     pub sample_pool_budget: u64,
 
-    // [36]
+    // [39]
     pub clamp_output: bool,
 
-    /// Ramp channel gain across a gate tile instead of stepping it. \[37\]
+    /// Ramp channel gain across a gate tile instead of stepping it. \[40\]
     pub gain_ramp: bool,
 
-    /// Ramp biquad coefficients across a gate tile instead of switching them. \[38\]
+    /// Ramp biquad coefficients across a gate tile instead of switching them. \[41\]
     pub filter_ramp: bool,
 
-    /// Evaluate SF2 vibrato and tremolo LFOs. \[39\]
+    /// Evaluate SF2 vibrato and tremolo LFOs. \[42\]
     pub lfo_enabled: bool,
 
-    /// Evaluate the SF2 modulation envelope and its pitch and filter \[40\]
+    /// Evaluate the SF2 modulation envelope and its pitch and filter \[43\]
     pub mod_env_enabled: bool,
 
-    /// Use Kahan compensation for the per-thread partial sums in the reduce \[41\]
+    /// Use Kahan compensation for the per-thread partial sums in the reduce \[44\]
     pub kahan_reduce: bool,
     /// Check every output block for NaN/Inf. Always on in debug builds.
     pub nan_guard: bool,
-    /// Compile the shaders without naga's automatic bounds clamps and loop \[42\]
+    /// Compile the shaders without naga's automatic bounds clamps and loop \[45\]
     pub unchecked_shaders: bool,
 
-    // [43]
+    // [46]
     pub profile: bool,
     /// Force a specific wgpu backend, e.g. "vulkan" or "dx12".
     pub gpu_backend: Option<String>,
@@ -242,11 +247,11 @@ impl Default for Config {
             channels: 2,
 
             block_frames: 4096,
-            // [44]
+            // [47]
             reduce_tile: 4,
             gate_frames: 32,
             workgroup_size: 256,
-            // [45]
+            // [48]
             max_render_workgroups: 2048,
             max_pool_workgroups: u32::MAX,
 
@@ -257,9 +262,11 @@ impl Default for Config {
             min_velocity: 0,
             note_grid: false,
             max_block_candidates: 1 << 27,
+            materialise_threads: 4,
             max_steal_percent: 25,
             steal_fade_frames: 96,
             sort_voices: true,
+            skip_silence: true,
 
             interpolation: Interpolation::Linear,
             decay_curve: EnvelopeCurve::Exponential,
@@ -279,7 +286,7 @@ impl Default for Config {
             limiter_release: 0.1,
 
             resample_pool: true,
-            // [46]
+            // [49]
             sample_pool_budget: 2 << 30,
 
             clamp_output: true,
@@ -339,7 +346,7 @@ impl Config {
                 self.block_frames
             );
         }
-        // [47]
+        // [50]
         let shared_bytes = self.workgroup_size as u64 * (self.reduce_tile as u64 * 2 + 1) * 4;
         if shared_bytes > 49152 {
             bail!(
@@ -350,7 +357,7 @@ impl Config {
                 shared_bytes
             );
         }
-        // [48]
+        // [51]
         if self.workgroup_size < self.reduce_tile * 2 {
             bail!(
                 "workgroup_size {} must be at least twice reduce_tile {}",
@@ -398,7 +405,7 @@ impl Config {
                 self.max_steal_percent
             );
         }
-        // [49]
+        // [52]
         if self.max_layers > 255 {
             bail!("max_layers {} must be at most 255", self.max_layers);
         }
@@ -416,22 +423,22 @@ impl Config {
         10f64.powf(self.limiter_ceiling_db / 20.0)
     }
 
-    /// Frames in which a steal may be scheduled. The fade has to finish inside \[50\]
+    /// Frames in which a steal may be scheduled. The fade has to finish inside \[53\]
     pub fn steal_span(&self) -> u32 {
         self.block_frames.saturating_sub(self.steal_fade_frames).max(1)
     }
 
-    /// Frames in one step of the envelope grid: 4 ms, 192 frames at 48 kHz. \[51\]
+    /// Frames in one step of the envelope grid: 4 ms, 192 frames at 48 kHz. \[54\]
     pub fn env_step_frames(&self) -> u32 {
         (self.sample_rate / 250).clamp(1, crate::voice::GRID_MASK)
     }
 
-    /// Voice slots to allocate. A stolen voice keeps sounding until its own \[52\]
+    /// Voice slots to allocate. A stolen voice keeps sounding until its own \[55\]
     pub fn pool_slots(&self) -> u32 {
         self.max_voices.saturating_add(self.max_steal())
     }
 
-    /// The most voices one block may steal. Integer arithmetic, and both \[53\]
+    /// The most voices one block may steal. Integer arithmetic, and both \[56\]
     pub fn max_steal(&self) -> u32 {
         let n = self.max_voices as u64 * self.max_steal_percent as u64 / 100;
         (n as u32).max(1)

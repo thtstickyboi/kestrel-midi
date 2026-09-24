@@ -1,0 +1,29 @@
+# Comments extracted from src/phase.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/phase.rs:5
+//! Load-time analytic quadrature and immutable note coefficients.
+//! Adapted from SYNCore's public-domain phase processor; see THIRD-PARTY.md.
+
+[2] src/phase.rs:115
+// Addresses are in the finalized, resampled bank. Start offsets stay in the
+// original sample coordinate system, just as in Bank::build_voice.
+
+[3] src/phase.rs:132
+/// One immutable preparation, shared by the MIDI driver and its backend.
+/// GPU words start with four words per region (quadrature base, hold, fade,
+/// reserved), followed by float32 quadrature bits. No transformed PCM at zero
+/// strength or in baseline mode.
+
+[4] src/phase.rs:200
+                    // Conservative bound for f64 complex FFT/Bluestein vectors,
+                    // original samples and the temporary quadrature/loop body.
+
+[5] src/phase.rs:522
+        // Hilbert spectrum: -i for positive frequencies, +i for negative;
+        // DC and the even-length Nyquist bin have zero quadrature.

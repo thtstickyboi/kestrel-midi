@@ -2,8 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Load-time analytic quadrature and immutable note coefficients.
-//! Adapted from SYNCore's public-domain phase processor; see THIRD-PARTY.md.
+//! Load-time analytic quadrature and immutable note coefficients. \[1\]
 
 use crate::bank::{sample_geometry, Bank};
 use anyhow::{ensure, Result};
@@ -112,8 +111,7 @@ fn check_cancel(cancel: &dyn Fn() -> bool) -> Result<()> {
     Ok(())
 }
 
-// Addresses are in the finalized, resampled bank. Start offsets stay in the
-// original sample coordinate system, just as in Bank::build_voice.
+// [2]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct SampleKey {
     base: u32,
@@ -129,10 +127,7 @@ struct Entry {
     scales: Vec<f32>,
 }
 
-/// One immutable preparation, shared by the MIDI driver and its backend.
-/// GPU words start with four words per region (quadrature base, hold, fade,
-/// reserved), followed by float32 quadrature bits. No transformed PCM at zero
-/// strength or in baseline mode.
+/// One immutable preparation, shared by the MIDI driver and its backend. \[3\]
 pub struct PhaseBank {
     pub(crate) words: Vec<u32>,
     pub(crate) settings: PhaseSettings,
@@ -197,8 +192,7 @@ impl PhaseBank {
                     keys.push(key);
                     seen.insert(key, id);
                     total_words += len as u64;
-                    // Conservative bound for f64 complex FFT/Bluestein vectors,
-                    // original samples and the temporary quadrature/loop body.
+                    // [4]
                     let fft_len = fft_size(len as usize * 2)? as u64;
                     scratch = scratch.max(fft_len * 64 + len as u64 * 32);
                     id
@@ -519,8 +513,7 @@ fn quadrature(input: &[f64], padded: bool, cancel: &dyn Fn() -> bool) -> Result<
     }
     v = forward(v, cancel)?;
     for (i, x) in v.iter_mut().enumerate() {
-        // Hilbert spectrum: -i for positive frequencies, +i for negative;
-        // DC and the even-length Nyquist bin have zero quadrature.
+        // [5]
         *x = if i == 0 || (n % 2 == 0 && i == n / 2) {
             Complex::default()
         } else if i < n.div_ceil(2) {

@@ -409,6 +409,7 @@ pub struct Extra {
 
 /// Flags no loader reads: they choose the device, the voice pool, the \[10\]
 pub(crate) const LOAD_NEUTRAL: &[&str] = &[
+    // [11]
     "--phase-mode",
     "--phase-strength",
     "--phase-seed",
@@ -440,11 +441,12 @@ pub(crate) const LOAD_NEUTRAL: &[&str] = &[
     "--seconds",
     "--steal",
     "--steal-percent",
+    "--track-jobs",
     "--unchecked-shaders",
 ];
 
-/// Check typed flags against what the earlier steps already chose. \[11\]
-pub fn extra_flags(tokens: Vec<String>, adapters: usize) -> Result<Extra, String> {
+/// Check typed flags against what the earlier steps already chose. \[12\]
+pub fn extra_flags(tokens: Vec<String>, adapters: usize, per_track: bool) -> Result<Extra, String> {
     let mut out = Extra::default();
     let mut it = tokens.into_iter();
     while let Some(tok) = it.next() {
@@ -478,11 +480,36 @@ pub fn extra_flags(tokens: Vec<String>, adapters: usize) -> Result<Extra, String
         if name == "--force-cli" {
             continue;
         }
+        // [13]
+        if name == "--gpu-backend" {
+            let value = match tok.split_once('=') {
+                Some((_, v)) => Some(v.to_string()),
+                None => it.clone().next(),
+            };
+            if let Some(n) = value.filter(|v| v.trim().parse::<usize>().is_ok()) {
+                let n = n.trim();
+                return Err(format!(
+                    "--gpu-backend takes a name: vulkan, dx12 or gl. To render on adapter [{n}] \
+                     from the list above, type --adapter {n}"
+                ));
+            }
+        }
         if name == "--soundfont" || short('s') {
             return Err("soundfonts were chosen in step 2".into());
         }
         if name == "--out" || short('o') {
-            return Err("the output was chosen in steps 4 and 5".into());
+            return Err(if per_track { "the output was chosen in steps 5 to 7" } else { "the output was chosen in steps 4 and 5" }.into());
+        }
+        // What the per-track steps choose, and what turns a render into one.
+        match (name.as_str(), per_track) {
+            ("--track" | "--tracks" | "--merge" | "--stem-format" | "--setup-tracks", false) => {
+                return Err(format!("{name} is a per-track render, which is [2] on the menu"));
+            }
+            ("--track", true) => return Err("the tracks were chosen in step 3".into()),
+            ("--tracks" | "--setup-tracks", true) => return Err("the tracks were chosen in step 3".into()),
+            ("--merge", true) => return Err("the output was chosen in step 5".into()),
+            ("--stem-format", true) => return Err("the format was chosen in step 6".into()),
+            _ => {}
         }
         if matches!(name.as_str(), "-h" | "--help" | "-V" | "--version") {
             return Err("type ? to list the flags".into());
@@ -572,7 +599,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Every character the timestamp puts in a name has to be legal on \[12\]
+    /// Every character the timestamp puts in a name has to be legal on \[14\]
     #[test]
     fn the_timestamp_is_a_legal_windows_file_name() {
         let stamp = timestamp();
@@ -679,7 +706,22 @@ mod tests {
     }
 
     fn flags(line: &str) -> Result<Extra, String> {
-        extra_flags(split_args(line).unwrap(), 3)
+        extra_flags(split_args(line).unwrap(), 3, false)
+    }
+
+    /// A per-track render's steps choose the tracks, the output and the \[15\]
+    #[test]
+    fn per_track_flags_go_where_their_steps_are() {
+        let per = |line: &str| extra_flags(split_args(line).unwrap(), 3, true);
+        for typed in ["--tracks 1-4", "--tracks=all", "--track 2", "--merge", "--stem-format flac", "--setup-tracks ignore"] {
+            let e = flags(typed).unwrap_err();
+            assert!(e.contains("[2]"), "{typed}: {e}");
+            assert!(per(typed).is_err(), "{typed}");
+        }
+        assert!(per("-o x").unwrap_err().contains("5 to 7"));
+        let jobs = per("--track-jobs 3").unwrap();
+        assert!(!jobs.reload);
+        assert_eq!(jobs.args, ["--track-jobs", "3"]);
     }
 
     #[test]
@@ -695,6 +737,12 @@ mod tests {
         assert!(flags("--adapter two").is_err());
         assert!(flags("--adapter").is_err());
         assert!(flags("--adapter 1 --gpu-adapter Intel").is_err());
+        // A list number after --gpu-backend is pointed at --adapter.
+        for typed in ["--gpu-backend 5", "--gpu-backend=3"] {
+            let e = flags(typed).unwrap_err();
+            assert!(e.contains("--adapter"), "{typed}: {e}");
+        }
+        assert!(flags("--gpu-backend vulkan").is_ok());
 
         for clash in [
             "-s x.sf2",

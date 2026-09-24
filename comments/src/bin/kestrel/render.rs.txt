@@ -19,7 +19,7 @@
     /// The render these arguments describe, with everything clap cannot check
     /// -- the named enums, `Config::validate` -- already checked.
 
-[4] src/bin/kestrel/render.rs:40
+[4] src/bin/kestrel/render.rs:55
 /// The command line's observer: a progress line a second, and the per-pass
 /// timings under `--profile`, exactly as the loop printed them before it was
 /// shared.

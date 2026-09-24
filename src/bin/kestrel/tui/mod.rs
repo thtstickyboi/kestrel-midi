@@ -17,7 +17,7 @@ mod capture;
 pub(crate) mod checks;
 pub mod extras;
 mod progress;
-mod style;
+pub(crate) mod style;
 
 use kestrel::session::{self, Job, Plan, Summary};
 use crate::{Cli, Cmd, RenderArgs};
@@ -31,6 +31,7 @@ use crossterm::{cursor, execute, queue, terminal};
 use kestrel::bank::Bank;
 use kestrel::config::{BackendKind, Config};
 use kestrel::gpu::AdapterSummary;
+use kestrel::tracks::{self as ktracks, SetupTracks, TrackKind, TrackList, TrackScan};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io::Write;
@@ -237,6 +238,11 @@ const SPIN: [&str; 4] = [
 /// Run `work` on a thread and animate `label` until it is done. Loaders log
 /// through `capture`, so nothing else writes to the line meanwhile.
 fn spin<T: Send>(label: &str, work: impl FnOnce() -> T + Send) -> T {
+    spin_status(label, &|| None, work)
+}
+
+/// `spin`, with `status` -- a percentage, say -- shown after the label.
+fn spin_status<T: Send>(label: &str, status: &(dyn Fn() -> Option<String> + Sync), work: impl FnOnce() -> T + Send) -> T {
     let tty = std::io::stdout().is_tty();
     std::thread::scope(|scope| {
         let handle = scope.spawn(work);
@@ -245,6 +251,9 @@ fn spin<T: Send>(label: &str, work: impl FnOnce() -> T + Send) -> T {
         while tty && !handle.is_finished() {
             let secs = t0.elapsed().as_secs_f64();
             let mut line = vec![c(SPIN[tick % SPIN.len()], AMBER), s(format!(" {label}\u{2026}"))];
+            if let Some(st) = status() {
+                line.push(s(format!("  {st}")));
+            }
             if secs >= 2.0 {
                 line.push(c(format!("  {secs:.0} s"), DIM));
             }
@@ -673,12 +682,9 @@ fn guided(io: &mut dyn Io) -> Result<()> {
                 }
             }
             Choice::PerTrack => {
-                style::blank();
-                style::status(
-                    AMBER,
-                    vec![b("Per-Track Render", AMBER), s(" is coming in a later release.")],
-                );
-                continue;
+                if per_track_loop(io, &env)? == Next::Exit {
+                    return Ok(());
+                }
             }
             Choice::Extras => match extras::open_window() {
                 Ok(()) => {
@@ -704,8 +710,14 @@ fn guided(io: &mut dyn Io) -> Result<()> {
 fn main_menu(io: &mut dyn Io) -> Choice {
     style::heading("What would you like to do?", "");
     option("1", "Single / Multiple MIDIs", "render a MIDI to audio");
-    option("2", "Per-Track Render", "coming soon");
-    option("3", "Extras", "GPU info, file info, null test, flag help, updates");
+    option("2", "Per-Track Render", "each track alone: a file each, or one mix");
+    // The null test is a dev-build Extras entry; say only what this build has.
+    let extras = if cfg!(feature = "dev") {
+        "GPU info, file info, null test, flag help, updates"
+    } else {
+        "GPU info, file info, flag help, updates"
+    };
+    option("3", "Extras", extras);
     option("4", "Exit", "");
     loop {
         prompt();
@@ -729,11 +741,11 @@ fn render_loop(io: &mut dyn Io, env: &Env) -> Result<Next> {
         style::print_banner();
         compact_env(env);
 
-        let midi = step!(step_midi(io));
-        let fonts = step!(step_soundfonts(io));
-        let voices = step!(step_voices(io, env));
-        let format = step!(step_format(io, env));
-        let folder = step!(step_folder(io, &midi.path));
+        let midi = step!(step_midi(io, (1, 6)));
+        let fonts = step!(step_soundfonts(io, (2, 6)));
+        let voices = step!(step_voices(io, env, (3, 6), None));
+        let format = step!(step_format(io, env, (4, 6)));
+        let folder = step!(step_folder(io, &midi.path, (5, 6), "the folder to write into"));
         let out = checks::output_path(&folder, &midi.path, format.ext, &checks::timestamp());
         let mut writes = vec![c("Writes ", DIM), b(file_name(&out), AMBER)];
         if out.file_stem() != midi.path.file_stem() {
@@ -743,7 +755,7 @@ fn render_loop(io: &mut dyn Io, env: &Env) -> Result<Next> {
             ));
         }
         style::detail(writes);
-        let ready = step!(step_flags(io, env, &midi, &fonts, voices, &out));
+        let ready = step!(step_flags(io, env, &midi, &fonts, voices, &out, (6, 6), &[]));
         // The render holds its own handle on this bank when it can use it,
         // and loads a new one when a typed flag changes how soundfonts load.
         // Either way this handle is done with. Kept, it held the step 2 bank
@@ -757,6 +769,7 @@ fn render_loop(io: &mut dyn Io, env: &Env) -> Result<Next> {
             format: format!("{} \u{00B7} {}", format.label, format_note(format.ext)),
             fonts: fonts.names.clone(),
             max_voices: ready.plan.cfg.max_voices,
+            per_track: false,
         };
         let _ = capture::problems();
         let result = progress::run(&ready.job, ready.plan, ready.bank, &labels);
@@ -778,20 +791,342 @@ fn render_loop(io: &mut dyn Io, env: &Env) -> Result<Next> {
 
         clear_screen();
         style::print_banner();
-        show_outcome(&out, ready.adapter.as_deref(), &result, &problems);
+        show_outcome(&out, ready.adapter.as_deref(), &ready.flags, &result, &problems, None);
+        if what_next(io) == Next::Exit {
+            return Ok(Next::Exit);
+        }
+    }
+}
+
+/// After a render: another, or out.
+fn what_next(io: &mut dyn Io) -> Next {
+    {
         style::heading("What next?", "");
         option("1", "Start another render", "");
         option("2", "Exit", "");
         loop {
             prompt();
             let Some(line) = io.line() else {
-                return Ok(Next::Exit);
+                return Next::Exit;
             };
             match line.trim() {
-                "1" => break,
-                "2" | "0" | "q" | "Q" => return Ok(Next::Exit),
+                "1" => return Next::Menu,
+                "2" | "0" | "q" | "Q" => return Next::Exit,
                 _ => style::error("Type 1 or 2."),
             }
+        }
+    }
+}
+
+/// Per-track renders, one after another, until the person stops asking.
+/// Every track is rendered alone, as `--track` renders one, and written as a
+/// stem or summed into one file; see `kestrel::stems`. The render is the
+/// argument list the steps build, parsed by clap like any other.
+fn per_track_loop(io: &mut dyn Io, env: &Env) -> Result<Next> {
+    const OF: u8 = 8;
+    loop {
+        clear_screen();
+        style::print_banner();
+        compact_env(env);
+
+        let (midi, scan) = loop {
+            let midi = step!(step_midi(io, (1, OF)));
+            if let Some(scan) = scan_tracks(&midi) {
+                break (midi, scan);
+            }
+        };
+        let fonts = step!(step_soundfonts(io, (2, OF)));
+        let tracks = step!(step_tracks(io, &scan, (3, OF)));
+        let voices = step!(step_voices(io, env, (4, OF), Some((tracks.named, &fonts.bank))));
+        let merged = step!(step_output(io, (5, OF)));
+        let format = step!(step_format(io, env, (6, OF)));
+        let note = if merged { "the folder to write the file into" } else { "a folder named after the MIDI goes in here" };
+        let folder = step!(step_folder(io, &midi.path, (7, OF), note));
+
+        // Merged, a file, named as a normal render's is and never over one
+        // already there. Stems, the folder the stems' own folder goes in.
+        let stem_name = midi.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "stems".into());
+        let (out, shown) = if merged {
+            let out = checks::output_path(&folder, &midi.path, format.ext, &checks::timestamp());
+            let shown = file_name(&out);
+            (out, shown)
+        } else {
+            let into = folder.join(&stem_name);
+            if std::fs::read_dir(&into).is_ok_and(|mut d| d.next().is_some()) {
+                style::warn(format!(
+                    "{} already has files in it. Stems of the same names will be replaced.",
+                    into.display()
+                ));
+                if step!(confirm(io)) {
+                    continue;
+                }
+            }
+            (folder.clone(), format!("{stem_name}{}", std::path::MAIN_SEPARATOR))
+        };
+        style::detail(vec![c("Writes ", DIM), b(shown.clone(), AMBER)]);
+
+        let mut base: Vec<OsString> = vec![
+            format!("--tracks={}", tracks.spec).into(),
+            format!("--setup-tracks={}", if tracks.setup == SetupTracks::Ignore { "ignore" } else { "apply" }).into(),
+        ];
+        if merged {
+            base.push("--merge".into());
+        } else {
+            base.push(format!("--stem-format={}", format.ext).into());
+        }
+        let mut ready = step!(step_flags(io, env, &midi, &fonts, voices, &out, (8, OF), &base));
+        drop(fonts.bank);
+
+        // What the render will do, now that --min-velocity is known.
+        let min = ready.plan.cfg.min_velocity;
+        let kept = TrackList::parse(&tracks.spec)
+            .and_then(|l| l.resolve(&scan))
+            .map(|(named, _)| named.into_iter().filter(|&t| scan.tracks[t].notes_from(min) > 0).count())
+            .unwrap_or(0);
+        if kept == 0 {
+            style::error(format!("No track has a note at velocity {min} or above, so there is nothing to render."));
+            if what_next(io) == Next::Exit {
+                return Ok(Next::Exit);
+            }
+            continue;
+        }
+        // As `stems::run` settles it: never more than the tracks.
+        let threads = ready.job.stems.as_ref().map_or(1, |s| s.jobs).min(ktracks::max_jobs()).min(kept).max(1);
+        let secs = ktracks::render_secs(&scan, ready.plan.cfg.sample_rate, ready.job.seconds);
+        let float32 = ready.job.wav_format == kestrel::wav::SampleFormat::Float32;
+        let (bytes, exact) = ktracks::output_bytes(if merged { 1 } else { kept }, secs, ready.plan.cfg.sample_rate, format.ext, float32);
+        style::status(
+            OK,
+            vec![
+                b(format!("{} track{}", style::thousands(kept as u64), plural(kept)), AMBER),
+                s(format!(
+                    " \u{00B7} {} voices each \u{00B7} {threads} thread{} \u{00B7} ",
+                    thousands(ktracks::voices_each(ready.plan.cfg.max_voices, kept)),
+                    plural(threads)
+                )),
+                s(if merged {
+                    "one file".to_string()
+                } else {
+                    format!("{} files", style::thousands(kept as u64))
+                }),
+                c(format!("  {} {}", if exact { "about" } else { "at most" }, style::bytes(bytes)), DIM),
+            ],
+        );
+        if let Some(stems) = ready.job.stems.as_mut() {
+            stems.scanned = Some(scan.clone());
+        }
+
+        let labels = progress::Labels {
+            midi: file_name(&midi.path),
+            output: shown,
+            format: format!("{} \u{00B7} {}", format.label, format_note(format.ext)),
+            fonts: fonts.names.clone(),
+            max_voices: ready.plan.cfg.max_voices,
+            per_track: true,
+        };
+        let _ = capture::problems();
+        let result = progress::run(&ready.job, ready.plan, ready.bank, &labels);
+        let problems = capture::problems();
+        let result = result.map_err(|e| format!("{e:#}"));
+
+        clear_screen();
+        style::print_banner();
+        let at = if merged { out.clone() } else { out.join(&stem_name) };
+        show_outcome(&at, ready.adapter.as_deref(), &ready.flags, &result, &problems, Some(PerTrack { tracks: kept, merged }));
+        if what_next(io) == Next::Exit {
+            return Ok(Next::Exit);
+        }
+    }
+}
+
+/// `[Enter]` goes on, `[C]` chooses again: true for choosing again.
+fn confirm(io: &mut dyn Io) -> Step<bool> {
+    style::say(vec![
+        c("[Enter]", AMBER),
+        c(" go ahead   ", DIM),
+        c("[C]", AMBER),
+        c(" start over   ", DIM),
+        c("[0]", AMBER),
+        c(" back to the menu", DIM),
+    ]);
+    loop {
+        prompt();
+        let Some(line) = io.line() else {
+            return Step::Exit;
+        };
+        match line.trim().to_ascii_lowercase().as_str() {
+            "" => return Step::Got(false),
+            "c" => return Step::Got(true),
+            "0" => return Step::Menu,
+            _ => style::error("Press Enter to go ahead, C to start over, or 0 for the menu."),
+        }
+    }
+}
+
+/// Read every track of `midi`, and say what they hold. `None`, having said
+/// why, when there is nothing to render in it.
+fn scan_tracks(midi: &MidiInfo) -> Option<Arc<TrackScan>> {
+    let progress = ktracks::ScanProgress::default();
+    let status = || {
+        let total = progress.bytes_total.load(std::sync::atomic::Ordering::Relaxed);
+        let read = progress.bytes_read.load(std::sync::atomic::Ordering::Relaxed);
+        (total > 0).then(|| format!("{:.0}%", read as f64 * 100.0 / total as f64))
+    };
+    let t0 = Instant::now();
+    let label = format!("Reading {} track{}", style::thousands(midi.tracks as u64), plural(midi.tracks));
+    let scanned = spin_status(&label, &status, || ktracks::scan(&midi.path, 0, Some(&progress)));
+    let _ = capture::problems();
+    let scan = match scanned {
+        Ok(scan) => scan,
+        Err(e) => {
+            style::error(format!("{e:#}"));
+            style::say(vec![c("Choose another.", DIM)]);
+            return None;
+        }
+    };
+    let count = |kind| scan.of_kind(kind).count();
+    let (with, setup, empty) = (count(TrackKind::Notes), count(TrackKind::Setup), count(TrackKind::Empty));
+    if with == 0 {
+        style::status(ERR, vec![s("No track in this file has a note in it, so there is nothing to render.")]);
+        style::say(vec![c("Choose another.", DIM)]);
+        return None;
+    }
+    let notes = scan.notes();
+    style::status(
+        OK,
+        vec![
+            s(format!("{} tracks read", style::thousands(scan.tracks.len() as u64))),
+            c(format!("  in {:.1} s", t0.elapsed().as_secs_f64()), DIM),
+        ],
+    );
+    style::detail(vec![c(
+        format!(
+            "{} with notes \u{00B7} {} setup \u{00B7} {} empty \u{00B7} {} notes \u{00B7} {} long",
+            style::thousands(with as u64),
+            style::thousands(setup as u64),
+            style::thousands(empty as u64),
+            style::thousands(notes),
+            style::audio_clock(scan.duration(48_000))
+        ),
+        DIM,
+    )]);
+    if let Some(t) = scan.busiest() {
+        let info = &scan.tracks[t];
+        style::detail(vec![
+            c("busiest: ", DIM),
+            s(format!("track {}", t + 1)),
+            s(info.display_name().map(|n| format!(" ({n})")).unwrap_or_default()),
+            c(
+                format!(
+                    ", {} notes, {:.1}%",
+                    style::thousands(info.notes()),
+                    info.notes() as f64 * 100.0 / notes.max(1) as f64
+                ),
+                DIM,
+            ),
+        ]);
+    }
+    Some(Arc::new(scan))
+}
+
+/// What step 3 chose.
+struct Tracks {
+    /// As `--tracks` takes it.
+    spec: String,
+    setup: SetupTracks,
+    /// Tracks with notes it names.
+    named: usize,
+}
+
+fn step_tracks(io: &mut dyn Io, scan: &TrackScan, at: (u8, u8)) -> Step<Tracks> {
+    style::heading(&step_title(at, "Tracks"), "which to render, each alone");
+    // No listing here: `kestrel --force-cli tracks` prints every track, and
+    // the user found a list in this step redundant beside it (2026-09-24).
+    let all = scan.of_kind(TrackKind::Notes).count();
+    style::detail(vec![c("kestrel --force-cli tracks lists every track, with its notes and name", DIM)]);
+    option("Enter", "every track with notes", &format!("{} track{}", style::thousands(all as u64), plural(all)));
+    style::say(vec![c("  or type track numbers and ranges: 1-40, 57, 90-", DIM)]);
+    let (spec, named) = loop {
+        prompt();
+        let Some(line) = io.line() else {
+            return Step::Exit;
+        };
+        let typed = line.trim();
+        let spec = if typed.is_empty() || typed.eq_ignore_ascii_case("enter") { "all" } else { typed };
+        match TrackList::parse(spec).and_then(|l| l.resolve(scan)) {
+            Ok((named, _)) if named.is_empty() => {
+                style::error("None of those tracks has notes. Type others, or press Enter for all of them.")
+            }
+            Ok((named, without)) => {
+                if !without.is_empty() {
+                    style::warn(format!(
+                        "{} of those {} no notes and {} skipped.",
+                        style::thousands(without.len() as u64),
+                        if without.len() == 1 { "has" } else { "have" },
+                        if without.len() == 1 { "is" } else { "are" }
+                    ));
+                }
+                style::status(
+                    OK,
+                    vec![b(style::thousands(named.len() as u64), AMBER), s(format!(" track{}", plural(named.len())))],
+                );
+                break (spec.to_string(), named.len());
+            }
+            Err(e) => style::error(format!("{e:#}")),
+        }
+    };
+
+    let setups = scan.of_kind(TrackKind::Setup).count();
+    let mut setup = SetupTracks::Apply;
+    if setups > 0 {
+        style::say(vec![c(
+            format!(
+                "{} setup track{}: controllers, programs and bends with no notes of {}.",
+                style::thousands(setups as u64),
+                plural(setups),
+                if setups == 1 { "its own" } else { "their own" }
+            ),
+            DIM,
+        )]);
+        option("Enter", "apply to every track", "as a render of the whole file would");
+        option("2", "ignore", "each track hears only its own");
+        loop {
+            prompt();
+            let Some(line) = io.line() else {
+                return Step::Exit;
+            };
+            match line.trim() {
+                "" => break,
+                "2" => {
+                    setup = SetupTracks::Ignore;
+                    break;
+                }
+                _ => style::error("Press Enter to apply them, or type 2 to ignore them."),
+            }
+        }
+    }
+    Step::Got(Tracks { spec, setup, named })
+}
+
+fn step_output(io: &mut dyn Io, at: (u8, u8)) -> Step<bool> {
+    style::heading(&step_title(at, "Output"), "one file, or a file a track");
+    option("1", "One merged file", "every track rendered alone, summed, limited once");
+    option("2", "A file per track", "stems, in a folder named after the MIDI");
+    loop {
+        prompt();
+        let Some(line) = io.line() else {
+            return Step::Exit;
+        };
+        match line.trim() {
+            "1" => {
+                style::status(OK, vec![s("One merged file")]);
+                return Step::Got(true);
+            }
+            "2" => {
+                style::status(OK, vec![s("A file per track")]);
+                return Step::Got(false);
+            }
+            _ => style::error("Type 1 or 2."),
         }
     }
 }
@@ -880,8 +1215,13 @@ fn pick_many(io: &mut dyn Io, kind: Pick, title: &str) -> Step<Vec<PathBuf>> {
     }
 }
 
-fn step_midi(io: &mut dyn Io) -> Step<MidiInfo> {
-    style::heading("Step 1 of 6 \u{00B7} MIDI", "the file to render");
+/// A step's heading: where it is in the flow, and what it asks.
+fn step_title(at: (u8, u8), name: &str) -> String {
+    format!("Step {} of {} \u{00B7} {name}", at.0, at.1)
+}
+
+fn step_midi(io: &mut dyn Io, at: (u8, u8)) -> Step<MidiInfo> {
+    style::heading(&step_title(at, "MIDI"), "the file to render");
     loop {
         let picked = match pick_many(io, Pick::Midi, "Kestrel \u{00B7} choose a MIDI file") {
             Step::Got(p) => p,
@@ -1115,9 +1455,9 @@ fn describe_layering(layers: &[(PathBuf, Bank, FontProfile)], reordered: bool) {
     }
 }
 
-fn step_soundfonts(io: &mut dyn Io) -> Step<Fonts> {
+fn step_soundfonts(io: &mut dyn Io, at: (u8, u8)) -> Step<Fonts> {
     style::heading(
-        "Step 2 of 6 \u{00B7} Soundfonts",
+        &step_title(at, "Soundfonts"),
         "up to two: a General MIDI bank, a piano, or both",
     );
     let cfg = match load_config() {
@@ -1207,54 +1547,125 @@ fn step_soundfonts(io: &mut dyn Io) -> Step<Fonts> {
     }
 }
 
-fn step_voices(io: &mut dyn Io, env: &Env) -> Step<u32> {
-    style::heading("Step 3 of 6 \u{00B7} Voices", "how many may sound at once");
-    let default = Config::default().max_voices;
+/// For a per-track render, `per_track` is the tracks and the soundfont: the
+/// total is shared between the tracks and defaults to `tracks::GUIDED_VOICES`.
+/// Its device max is what that many tracks hold with as many on the device at
+/// once as a batch takes, capped at `tracks::MAX_TOTAL_VOICES`. More may be
+/// typed and runs fewer tracks at a time; a typed total past the cap is held
+/// to it. As the user set it, 2026-09-24.
+fn step_voices(io: &mut dyn Io, env: &Env, at: (u8, u8), per_track: Option<(usize, &kestrel::Bank)>) -> Step<u32> {
+    match per_track {
+        None => style::heading(&step_title(at, "Voices"), "how many may sound at once"),
+        Some((n, _)) => style::heading(
+            &step_title(at, "Voices"),
+            &format!("the total, shared evenly between the {} track{}", style::thousands(n as u64), plural(n)),
+        ),
+    }
     let device = env.default_adapter();
+    let cfg = Config::default();
+    let ceiling = ktracks::MAX_TOTAL_VOICES;
+    let max = match (device, per_track) {
+        (Some(a), Some((n, bank))) => Some(ktracks::max_voices_at_once(&cfg, bank, a.binding_bytes, n)),
+        (Some(a), None) => Some(a.max_voices),
+        (None, _) => None,
+    };
+    let default = if per_track.is_some() { ktracks::GUIDED_VOICES } else { cfg.max_voices };
     option("Enter", "default", &thousands(default));
-    match device {
-        Some(a) => option(
+    match (device, max) {
+        (Some(a), Some(m)) => option(
             "-1",
             "device max",
-            &format!("{}  on {}", thousands(a.max_voices), a.name),
+            &match per_track {
+                Some((n, _)) if n > 1 => {
+                    let lanes = n.min(kestrel::gpu::LANES_MAX);
+                    format!(
+                        "{}  {} a track, {} on {}",
+                        thousands(m),
+                        thousands(ktracks::voices_each(m, n)),
+                        if lanes == n {
+                            format!("all {} at once", style::thousands(n as u64))
+                        } else {
+                            format!("{lanes} at a time")
+                        },
+                        a.name
+                    )
+                }
+                _ => format!("{}  on {}", thousands(m), a.name),
+            },
         ),
-        None => style::detail(vec![c("No GPU was found, so there is no device max.", DIM)]),
+        _ => style::detail(vec![c("No GPU was found, so there is no device max.", DIM)]),
+    }
+    // One track has no others to make room for: past -1 it is held down.
+    if per_track.is_some_and(|(n, _)| n > 1) {
+        match max {
+            Some(m) if m < ceiling => style::detail(vec![c(
+                format!("more is taken, up to {}, with fewer tracks on the GPU at a time", thousands(ceiling)),
+                DIM,
+            )]),
+            Some(_) => {}
+            None => style::detail(vec![c(format!("at most {}", thousands(ceiling)), DIM)]),
+        }
     }
     style::say(vec![c(
         "  or type a number: 700000, 700,000 and 700k all work",
         DIM,
     )]);
-    let got = |n: u32| {
-        style::status(OK, vec![b(thousands(n), AMBER), s(" voices")]);
-        Step::Got(n)
+    let got = |total: u32| {
+        let mut line = vec![b(thousands(total), AMBER), s(" voices")];
+        if let Some((n, bank)) = per_track {
+            let each = ktracks::voices_each(total, n);
+            let mut note = format!("  about {} a track, before --min-velocity", thousands(each));
+            if let Some(a) = device {
+                let alone = ktracks::max_voices_alone(&cfg, bank, a.binding_bytes);
+                let k = ktracks::tracks_at_once(&cfg, bank, a.binding_bytes, n, total);
+                if each > alone {
+                    note.push_str(&format!("; held to {} a track, one at a time", thousands(alone)));
+                } else if k < n.min(kestrel::gpu::LANES_MAX) {
+                    note.push_str(&format!(", {} at a time", style::thousands(k as u64)));
+                }
+            }
+            line.push(c(note, DIM));
+        }
+        style::status(OK, line);
+        Step::Got(total)
     };
     loop {
         prompt();
         let Some(line) = io.line() else {
             return Step::Exit;
         };
-        match checks::parse_voices(&line, device.map(|a| a.max_voices)) {
-            VoiceAnswer::Default => match device {
-                Some(a) if default > a.max_voices => style::warn(format!(
+        // A per-track total is held to the ceiling, not to the device max.
+        let limit = if per_track.is_some() { Some(ceiling) } else { max };
+        match checks::parse_voices(&line, limit) {
+            VoiceAnswer::Default => match max {
+                Some(m) if per_track.is_none() && default > m => style::warn(format!(
                     "The default of {} is over this device's max of {}. Type -1, or a smaller number.",
                     thousands(default),
-                    thousands(a.max_voices)
+                    thousands(m)
                 )),
                 _ => return got(default),
             },
-            VoiceAnswer::DeviceMax => match device {
-                Some(a) => return got(a.max_voices),
-                None => style::error("There is no device max without a GPU. Type a number."),
+            VoiceAnswer::DeviceMax => match (device, max) {
+                (Some(_), Some(m)) => return got(m),
+                _ => style::error("There is no device max without a GPU. Type a number."),
             },
             VoiceAnswer::Count(n) => return got(n),
-            VoiceAnswer::TooMany(n) => style::warn(match device {
-                Some(a) => format!(
+            VoiceAnswer::TooMany(n) if per_track.is_some() => {
+                style::warn(format!(
+                    "{} is over the most a per-track render takes; {} it is.",
+                    style::thousands(n),
+                    thousands(ceiling)
+                ));
+                return got(ceiling);
+            }
+            VoiceAnswer::TooMany(n) => style::warn(match (device, max) {
+                (Some(a), Some(m)) => format!(
                     "{} is over the device max of {} on {}. Type -1 for the max, or a smaller number.",
                     style::thousands(n),
-                    thousands(a.max_voices),
+                    thousands(m),
                     a.name
                 ),
-                None => format!(
+                _ => format!(
                     "{} is more than Kestrel can address; the most is {}.",
                     style::thousands(n),
                     thousands(u32::MAX)
@@ -1267,8 +1678,8 @@ fn step_voices(io: &mut dyn Io, env: &Env) -> Step<u32> {
     }
 }
 
-fn step_format(io: &mut dyn Io, env: &Env) -> Step<&'static Format> {
-    style::heading("Step 4 of 6 \u{00B7} Format", "");
+fn step_format(io: &mut dyn Io, env: &Env, at: (u8, u8)) -> Step<&'static Format> {
+    style::heading(&step_title(at, "Format"), "");
     for (i, f) in FORMATS.iter().enumerate() {
         let note = match format_available(env, f.ext) {
             Ok(()) => c(format_note(f.ext), DIM),
@@ -1309,8 +1720,8 @@ fn step_format(io: &mut dyn Io, env: &Env) -> Step<&'static Format> {
     }
 }
 
-fn step_folder(io: &mut dyn Io, midi: &Path) -> Step<PathBuf> {
-    style::heading("Step 5 of 6 \u{00B7} Destination", "the folder to write into");
+fn step_folder(io: &mut dyn Io, midi: &Path, at: (u8, u8), note: &str) -> Step<PathBuf> {
+    style::heading(&step_title(at, "Destination"), note);
     loop {
         style::say(vec![c("Opening the folder picker\u{2026}", DIM)]);
         match io.pick_folder("Kestrel \u{00B7} choose where to save the render", midi.parent()) {
@@ -1333,6 +1744,9 @@ struct Ready {
     /// `None` when the typed flags change how the soundfont loads.
     bank: Option<Arc<Bank>>,
     adapter: Option<String>,
+    /// Every flag the render runs with but its MIDI, soundfonts and output,
+    /// the steps' own among them, as the done screen lists them.
+    flags: Vec<String>,
 }
 
 fn joined(flag: &str, path: &Path) -> OsString {
@@ -1354,6 +1768,9 @@ fn clap_message(e: &clap::Error) -> String {
     kept.join("\n").trim_start_matches("error: ").to_string()
 }
 
+/// `base` is what earlier steps chose beyond the render's own: a per-track
+/// render's `--tracks` and the rest.
+#[allow(clippy::too_many_arguments)]
 fn step_flags(
     io: &mut dyn Io,
     env: &Env,
@@ -1361,8 +1778,10 @@ fn step_flags(
     fonts: &Fonts,
     voices: u32,
     out: &Path,
+    at: (u8, u8),
+    base: &[OsString],
 ) -> Step<Ready> {
-    style::heading("Step 6 of 6 \u{00B7} Additional flags", "optional");
+    style::heading(&step_title(at, "Additional flags"), "optional");
     style::say(vec![c(
         "Press Enter to start rendering, or type render flags as you would on a command line.",
         DIM,
@@ -1374,7 +1793,7 @@ fn step_flags(
         };
         let typed = line.trim();
         let extra = match checks::split_args(typed)
-            .and_then(|tokens| checks::extra_flags(tokens, env.adapters.len()))
+            .and_then(|tokens| checks::extra_flags(tokens, env.adapters.len(), !base.is_empty()))
         {
             Ok(x) => x,
             Err(e) => {
@@ -1388,6 +1807,7 @@ fn step_flags(
             argv.push(joined("--soundfont=", p));
         }
         argv.push(joined("--out=", out));
+        argv.extend(base.iter().cloned());
         if !extra.max_voices {
             argv.push(format!("--max-voices={voices}").into());
         }
@@ -1404,6 +1824,11 @@ fn step_flags(
             argv.push(format!("--gpu-adapter={}", a.name).into());
         }
         argv.extend(extra.args.iter().map(OsString::from));
+        let flags: Vec<String> = argv[2..]
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .filter(|a| !a.starts_with("--soundfont=") && !a.starts_with("--out="))
+            .collect();
         argv.push("--".into());
         argv.push(midi.path.clone().into_os_string());
 
@@ -1435,7 +1860,10 @@ fn step_flags(
             match spin("Checking the adapter", || kestrel::gpu::survey(cfg)) {
                 Ok((list, Some(i))) => {
                     let a = &list[i];
-                    if cfg.max_voices > a.max_voices {
+                    // Not a per-track total: that is shared between the
+                    // tracks, and the render holds each track's share to what
+                    // it can hold rather than refusing.
+                    if job.stems.is_none() && cfg.max_voices > a.max_voices {
                         style::warn(format!(
                             "{} tops out at {} voices and this render asks for {}. Add \
                              --max-voices with a smaller number, or pick another adapter.",
@@ -1483,15 +1911,55 @@ fn step_flags(
             plan,
             bank,
             adapter,
+            flags,
         });
     }
 }
 
+/// The done screen's "Flags" rows: `flags` as they would be typed, one after
+/// another, wrapped at whole flags to `inner` columns under a 10-column label.
+fn flag_lines(flags: &[String], inner: usize) -> Vec<Line> {
+    let label = |t: &str| c(format!("{t:<10}"), DIM);
+    let room = inner.saturating_sub(10).max(20);
+    let mut rows: Vec<String> = Vec::new();
+    let mut row = String::new();
+    for flag in flags.iter().map(|f| quote(f)) {
+        if !row.is_empty() && row.chars().count() + 1 + flag.chars().count() > room {
+            rows.push(std::mem::take(&mut row));
+        }
+        if !row.is_empty() {
+            row.push(' ');
+        }
+        row.push_str(&flag);
+    }
+    if !row.is_empty() {
+        rows.push(row);
+    }
+    if rows.is_empty() {
+        return vec![vec![label("Flags"), c("none", DIM)]];
+    }
+    rows.into_iter()
+        .enumerate()
+        .map(|(i, r)| vec![label(if i == 0 { "Flags" } else { "" }), s(style::middle(&r, room))])
+        .collect()
+}
+
+/// A per-track render's outcome, for `show_outcome`: how many tracks, and
+/// whether they were summed into `out` or written as stems into it.
+struct PerTrack {
+    tracks: usize,
+    merged: bool,
+}
+
+/// `flags` is what the render ran with beyond its MIDI, soundfonts and
+/// output; see `Ready::flags`.
 fn show_outcome(
     out: &Path,
     adapter: Option<&str>,
+    flags: &[String],
     result: &std::result::Result<Summary, String>,
     problems: &[(log::Level, String)],
+    per_track: Option<PerTrack>,
 ) {
     let inner = panel_width();
     let label = |t: &str| c(format!("{t:<10}"), DIM);
@@ -1504,24 +1972,45 @@ fn show_outcome(
                     style::audio_clock(sum.audio_secs),
                     style::clock(sum.wall_secs)
                 ))],
-                vec![c("The partial file was removed.", DIM)],
+                vec![c(
+                    match &per_track {
+                        None => "The partial file was removed.",
+                        Some(p) if p.merged => "A mix missing tracks isn't the file asked for, so none was written.",
+                        Some(_) => "The stems finished before the stop are in the folder; the rest are cut short.",
+                    },
+                    DIM,
+                )],
             ],
             inner,
             None,
         ),
         Ok(sum) => {
             let speed = sum.audio_secs / sum.wall_secs.max(1e-9);
+            let stems = per_track.as_ref().filter(|p| !p.merged);
             let mut body = vec![
-                vec![label("Wrote"), b(file_name(out), AMBER)],
+                match (&per_track, stems) {
+                    (Some(p), Some(_)) => vec![
+                        label("Wrote"),
+                        b(format!("{} stem{}", style::thousands(p.tracks as u64), plural(p.tracks)), AMBER),
+                    ],
+                    _ => vec![label("Wrote"), b(file_name(out), AMBER)],
+                },
                 vec![
                     label("Folder"),
-                    s(out.parent().map(|p| p.display().to_string()).unwrap_or_default()),
+                    // The end of a path is the part that says which folder.
+                    s(style::middle(
+                        &match stems {
+                            Some(_) => out.display().to_string(),
+                            None => out.parent().map(|p| p.display().to_string()).unwrap_or_default(),
+                        },
+                        inner - 10,
+                    )),
                 ],
                 Line::new(),
                 vec![
                     label("Audio"),
                     s(style::audio_clock(sum.audio_secs)),
-                    c("  in ", DIM),
+                    c(if stems.is_some() { " over all stems  in " } else { "  in " }, DIM),
                     s(format!("{:.1} s", sum.wall_secs)),
                     c("  = ", DIM),
                     b(format!("{speed:.2}\u{00D7} realtime"), AMBER),
@@ -1543,9 +2032,9 @@ fn show_outcome(
                 ],
                 {
                     let mut peak = vec![
-                        label("Mix peak"),
+                        label(if stems.is_some() { "Peak" } else { "Mix peak" }),
                         s(format!("{:.3}", sum.peak_level)),
-                        c("  before the limiter", DIM),
+                        c(if stems.is_some() { "  loudest stem, before any limiter" } else { "  before the limiter" }, DIM),
                     ];
                     if sum.clipped > 0 {
                         peak.push(c(
@@ -1559,9 +2048,17 @@ fn show_outcome(
                     peak
                 },
             ];
+            if let Some(p) = per_track.as_ref().filter(|p| p.merged) {
+                body.push(vec![
+                    label("Tracks"),
+                    s(style::thousands(p.tracks as u64)),
+                    c(" rendered alone and summed, then limited once", DIM),
+                ]);
+            }
             if let Some(a) = adapter {
                 body.push(vec![label("Device"), s(a.to_string())]);
             }
+            body.extend(flag_lines(flags, inner));
             style::panel(vec![b("Done", OK)], &body, inner, None)
         }
         Err(message) => {
@@ -1609,6 +2106,202 @@ mod tests {
         fn pick_folder(&mut self, _: &str, _: Option<&Path>) -> Option<PathBuf> {
             self.folders.pop_front()
         }
+    }
+
+    /// No adapters, no ffmpeg, no update check: what a test can run anywhere.
+    fn bare_env() -> Env {
+        Env {
+            adapters: Vec::new(),
+            default_adapter: None,
+            gpu_error: None,
+            ffmpeg: Err("not looked for".into()),
+            ring: Ring::default(),
+            update: None,
+        }
+    }
+
+    /// Every file under `dir`, by name, with its bytes.
+    fn files(dir: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut v: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| {
+                let p = e.unwrap().path();
+                (file_name(&p), std::fs::read(&p).unwrap())
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// The guided renderer's promise, for its per-track renders: every step,
+    /// the progress screen and the outcome, driven by script, write what the
+    /// same command writes. Once merged, over every track; once as stems, over
+    /// a typed list. On the CPU backend, so it runs anywhere, and with a
+    /// setup track, so step 3 asks its second question.
+    #[test]
+    fn a_guided_per_track_render_is_byte_identical_to_the_same_command() {
+        use kestrel::midi::MidiWriter;
+        let dir = std::env::temp_dir().join("kestrel_guided_per_track");
+        let _ = std::fs::remove_dir_all(&dir);
+        let [merged, stems, cli_merged, cli_stems] =
+            ["merged", "stems", "cli_merged", "cli_stems"].map(|d| dir.join(d));
+        for d in [&merged, &stems, &cli_merged, &cli_stems] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let font = dir.join("rich.sf2");
+        kestrel::testkit::rich_sf2(&font, 48_000).unwrap();
+        let midi = dir.join("song.mid");
+        let notes = |ch: u8, start: u64| -> Vec<(u64, Vec<u8>)> {
+            (0..24u64)
+                .flat_map(|i| {
+                    let key = 48 + ((i * 7 + ch as u64) % 24) as u8;
+                    let t = start + i * 120;
+                    [(t, vec![0x90 | ch, key, 90]), (t + 200, vec![0x80 | ch, key, 0])]
+                })
+                .collect()
+        };
+        let mut w = MidiWriter::new(480);
+        w.raw_track(vec![(0, vec![0xFF, 0x51, 0x03, 0x07, 0xA1, 0x20])]);
+        w.raw_track(vec![(0, vec![0xB0, 7, 80]), (0, vec![0xB1, 10, 20])]);
+        w.raw_track(notes(0, 0));
+        w.raw_track(notes(1, 240));
+        w.raw_track(notes(0, 480));
+        w.save(&midi).unwrap();
+
+        let mut io = Script {
+            lines: [
+                // merged: MIDI, soundfont, all tracks, setup applied, default
+                // voices, one file, WAV, flags; then another render
+                "", "", "", "", "", "1", "1", "--backend cpu --seconds 2", "1",
+                // stems: tracks 3 to 4, setup applied, default voices, a file
+                // each, WAV, flags; then exit
+                "", "", "3-4", "", "", "2", "1", "--backend cpu --seconds 2", "2",
+            ]
+            .into(),
+            files: [vec![midi.clone()], vec![font.clone()], vec![midi.clone()], vec![font.clone()]].into(),
+            folders: [merged.clone(), stems.clone()].into(),
+        };
+        let next = per_track_loop(&mut io, &bare_env()).unwrap();
+        assert!(next == Next::Exit && io.lines.is_empty(), "the flow stopped early: {:?}", io.lines);
+
+        let cli = |out: &Path, extra: &[&str]| {
+            let mut argv: Vec<OsString> = vec!["kestrel".into(), "render".into(), midi.clone().into_os_string()];
+            argv.extend(["-s".into(), font.clone().into_os_string(), "-o".into(), out.as_os_str().to_owned()]);
+            argv.extend(["--backend", "cpu", "--seconds", "2"].map(OsString::from));
+            argv.extend(extra.iter().map(OsString::from));
+            crate::render::render_cli(parse_render(argv).unwrap()).unwrap();
+        };
+        // Enter at the voices step is the per-track default, which the
+        // command line does not share.
+        cli(&cli_merged.join("song.wav"), &["--tracks", "all", "--merge", "--max-voices", "60000000"]);
+        cli(&cli_stems, &["--tracks", "3-4", "--max-voices", "60000000"]);
+
+        let (a, b) = (files(&merged), files(&cli_merged));
+        assert_eq!(a.len(), 1);
+        assert!(a[0].1.len() > 1000, "the merged render is empty");
+        assert!(a == b, "the guided merge differs from the command's");
+        let (a, b) = (files(&stems.join("song")), files(&cli_stems.join("song")));
+        let names: Vec<&str> = a.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["3.wav", "4.wav"]);
+        assert!(a == b, "the guided stems differ from the command's");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Step 4 of a per-track render, as the user set it (2026-09-24). Enter
+    /// is 60M. -1 is what the tracks hold with as many on the device at once
+    /// as a batch takes, and 2B where that is more. A typed total is taken as
+    /// typed, past -1 as well, and held to 2B past that.
+    #[test]
+    fn a_per_track_voice_total_defaults_to_60m_and_its_max_is_the_tracks_share_of_the_card() {
+        let dir = std::env::temp_dir().join("kestrel_guided_voices");
+        std::fs::create_dir_all(&dir).unwrap();
+        let font = dir.join("rich.sf2");
+        kestrel::testkit::rich_sf2(&font, 48_000).unwrap();
+        let bank = kestrel::load_bank(&font, &Config::default()).unwrap();
+        let binding = 2047u64 << 20;
+        let mut env = bare_env();
+        env.adapters.push(AdapterSummary {
+            name: "Test GPU".into(),
+            backend: wgpu::Backend::Vulkan,
+            device_type: wgpu::DeviceType::DiscreteGpu,
+            binding_bytes: binding,
+            max_voices: kestrel::gpu::max_voices_for_config(binding, &Config::default()),
+        });
+        env.default_adapter = Some(0);
+        let cfg = Config::default();
+        let fast = |n| ktracks::max_voices_at_once(&cfg, &bank, binding, n);
+        let at_once = |n, total| ktracks::tracks_at_once(&cfg, &bank, binding, n, total);
+        let answer = |env: &Env, lines: &[&'static str], tracks: usize| {
+            let mut io = Script { lines: lines.iter().copied().collect(), files: [].into(), folders: [].into() };
+            let got = match step_voices(&mut io, env, (4, 8), Some((tracks, &bank))) {
+                Step::Got(n) => n,
+                _ => panic!("step 4 ended without an answer"),
+            };
+            assert!(io.lines.is_empty(), "answers left over: {:?}", io.lines);
+            got
+        };
+        let (guided, ceiling) = (ktracks::GUIDED_VOICES, ktracks::MAX_TOTAL_VOICES);
+
+        // Thousands of tracks: -1 is what 256 of them at a time hold.
+        assert!(guided < fast(6291) && fast(6291) < ceiling);
+        assert_eq!(answer(&env, &[""], 6291), guided);
+        assert_eq!(answer(&env, &["-1"], 6291), fast(6291));
+        // Up to it all 256 lanes share the device, and one more voice a
+        // track takes one off.
+        let each = ktracks::voices_each(fast(6291), 6291);
+        assert_eq!(at_once(6291, each * 6291), kestrel::gpu::LANES_MAX);
+        assert!(at_once(6291, (each + 1) * 6291) < kestrel::gpu::LANES_MAX);
+        // Past -1 is taken as typed, and past 2B held to 2B.
+        assert_eq!(answer(&env, &["1000000000"], 6291), 1_000_000_000);
+        assert_eq!(answer(&env, &["2000000001"], 6291), ceiling);
+        assert_eq!(answer(&env, &["99999999999"], 6291), ceiling);
+
+        // So many tracks that -1 would pass 2B: it is 2B.
+        assert!(fast(100_000) == ceiling);
+        assert_eq!(answer(&env, &["-1"], 100_000), ceiling);
+
+        // Thirty tracks: -1 keeps all thirty on the device, and 60M, past it,
+        // is taken with fewer at a time.
+        assert!(fast(30) < guided);
+        assert_eq!(answer(&env, &["-1"], 30), fast(30));
+        assert_eq!(answer(&env, &[""], 30), guided);
+        assert!((1..30).contains(&at_once(30, guided)), "{} at once", at_once(30, guided));
+
+        // One track: Enter is still 60M, which the render holds to what one
+        // track holds alone.
+        assert_eq!(answer(&env, &[""], 1), guided);
+        assert!(ktracks::max_voices_alone(&cfg, &bank, binding) < guided);
+
+        // No GPU: no -1, and still held to 2B.
+        let bare = bare_env();
+        assert_eq!(answer(&bare, &["-1", ""], 30), guided);
+        assert_eq!(answer(&bare, &["3000000000"], 30), ceiling);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The done screen's "Flags" rows: every flag, as it would be typed,
+    /// wrapped at whole flags under the label.
+    #[test]
+    fn the_done_screen_lists_the_flags_a_render_ran_with() {
+        let flags: Vec<String> = [
+            "--tracks=all",
+            "--setup-tracks=apply",
+            "--merge",
+            "--max-voices=60000000",
+            "--gpu-adapter=NVIDIA GeForce RTX 5060 Laptop GPU",
+            "--format",
+            "pcm16",
+        ]
+        .map(String::from)
+        .into();
+        let lines: Vec<String> = flag_lines(&flags, 76).iter().map(|l| style::plain(l)).collect();
+        assert!(lines[0].starts_with("Flags     --tracks=all --setup-tracks=apply"), "{lines:?}");
+        assert!(lines.len() > 1 && lines[1..].iter().all(|l| l.starts_with(&" ".repeat(10))), "{lines:?}");
+        let rows: Vec<&str> = lines.iter().map(|l| l[10..].trim_end()).collect();
+        // Whole flags on each row, a flag with spaces quoted, none left out.
+        assert!(rows.iter().any(|r| r.contains("\"--gpu-adapter=NVIDIA GeForce RTX 5060 Laptop GPU\"")), "{rows:?}");
+        assert_eq!(rows.join(" ").split(' ').filter(|w| w.contains("--")).count(), 6, "{rows:?}");
+        assert_eq!(style::plain(&flag_lines(&[], 60)[0]).trim_end(), "Flags     none");
     }
 
     #[test]

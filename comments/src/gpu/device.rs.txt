@@ -6,7 +6,11 @@
 # they always match it. The development tree keeps every comment
 # inline; its history is the place to compare versions.
 
-[1] src/gpu/device.rs:21
+[1] src/gpu/device.rs:10
+/// Whether `name` is something `--gpu-backend` takes, so the command line can
+/// refuse a wrong one when it parses rather than when the device opens.
+
+[2] src/gpu/device.rs:27
 /// Which compiler turns the shaders into DX12 bytecode: DXC, statically linked
 /// through wgpu's `static-dxc` feature, wherever that feature exists, so no
 /// `dxcompiler.dll` has to ship beside the executable.
@@ -17,14 +21,14 @@
 /// render variant before getting that far. Reported by a user of 1.1.1 on
 /// 2026-09-19. Windows on ARM has no static DXC, and keeps FXC.
 
-[2] src/gpu/device.rs:38
+[3] src/gpu/device.rs:44
 /// Discrete first, then integrated. Within a tier, prefer Vulkan over DX12
 /// over GL: the compute paths are better tested there.
 ///
 /// Shared by `create` and `survey`, so the adapter a listing marks as the
 /// default is the one a render actually opens.
 
-[3] src/gpu/device.rs:59
+[4] src/gpu/device.rs:65
 /// Pick an adapter and open a device.
 ///
 /// Never silently falls back to a software adapter: if the only thing wgpu can
@@ -34,31 +38,31 @@
 /// On DX12 the shaders are compiled by DXC, linked into the executable, not by
 /// wgpu's default FXC. See `dx12_compiler`.
 
-[4] src/gpu/device.rs:131
+[5] src/gpu/device.rs:137
     // A device error that arrives asynchronously would otherwise show up as
     // silently wrong audio.
 
-[5] src/gpu/device.rs:141
+[6] src/gpu/device.rs:147
 /// Compute-only bind group layout. `read_only[i]` says whether binding i is a
 /// read-only storage buffer; binding 0 is always the uniform block.
 
-[6] src/gpu/device.rs:197
+[7] src/gpu/device.rs:203
 /// List every adapter wgpu can reach, for working out which device a render
 /// will land on.
 
-[7] src/gpu/device.rs:216
+[8] src/gpu/device.rs:222
         // The number people actually want off this listing. `gpu-info` used to
         // print the binding size and leave the division to the reader.
 
-[8] src/gpu/device.rs:242
+[9] src/gpu/device.rs:248
     /// The most of one buffer the adapter will bind to a shader, which is
     /// what caps the voice pool.
 
-[9] src/gpu/device.rs:245
+[10] src/gpu/device.rs:251
     /// The largest `--max-voices` that binding takes at the configured
     /// `--steal-percent`: the same figure `gpu-info` prints.
 
-[10] src/gpu/device.rs:257
+[11] src/gpu/device.rs:263
 /// Every adapter wgpu can reach, best first, and the index of the one
 /// `create` would open for `cfg` -- `None` when nothing is eligible.
 ///

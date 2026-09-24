@@ -19,7 +19,7 @@ Double-click it and a guided renderer walks you through a render in the terminal
 - **No human has line-by-line reviewed this code.** Not me, not anyone. If you are the sort of person who reads a diff before running it, read this one.
 - **It was developed against a test suite that is not in this repository:** null tests against a separate single-threaded CPU reference, byte-for-byte determinism checks, phase-accumulator precision tests, envelope curves checked against analytically computed ones, and timing and LFO behaviour measured against BASSMIDI. The GPU path matches the CPU reference to better than -98 dB. That is real verification and it caught real bugs -- but you are taking my word for it, because the evidence is not here.
 - **The corners are where it will break.** SF2 loading, the render loop and voice stealing under saturation are exercised constantly and are in decent shape. Unusual soundfonts, exotic SFZ opcodes and malformed MIDI are much less certain.
-- **Check the output yourself.** `kestrel null` exists precisely so you can diff a render against a reference you trust.
+- **Check the output yourself.** `kestrel null`, in a dev build, exists precisely so you can diff a render against a reference you trust.
 
 I am not claiming this is production software. I am claiming it renders black MIDI fast and the output sounded right to me. Please open an issue when it breaks, because it will.
 
@@ -88,7 +88,7 @@ Kestrel requests whatever limits your adapter reports and checks them before all
 **VRAM is usually the binding constraint.** The startup line prints the breakdown:
 
 ```
-gpu: NVIDIA GeForce RTX 5060 Laptop GPU (Vulkan) | 1107.0 MiB of device buffers
+gpu: NVIDIA GeForce RTX 5060 Laptop GPU (Vulkan) | 1148.6 MiB of device buffers
 (757.1 MiB sample pool, 250.0 MiB voice pool for 1310720 voices, 64.0 MiB partials)
 ```
 
@@ -105,13 +105,13 @@ The voice pool is one storage buffer, and every adapter caps how much of a singl
 Start `kestrel` with no arguments -- double-clicking it does exactly that -- and it walks you through a render:
 
 1. **Environment check.** Every GPU Kestrel can use, the most voices each will hold, whether ffmpeg was found, and whether a newer Kestrel is out.
-2. **Menu.** Render a MIDI; per-track render (coming soon); Extras; exit.
+2. **Menu.** Render a MIDI; per-track render (see *Per-track rendering*); Extras; exit.
 3. **MIDI and soundfonts**, through your system's own file pickers, from as many folders as you like. At most two soundfonts; if one of them is a General MIDI bank it goes underneath the other.
 4. **Voices, format and destination folder.** A name that is already taken gets the date and time added rather than being overwritten.
 5. **Additional flags**, one free-form line for anything the steps do not ask about -- `--limiter omni`, `--seconds 30`, `--volume 80`.
-6. **Progress**, with speed, voices, RAM and VRAM, then a summary and the option to start another render.
+6. **Progress**, with speed, voices, RAM and VRAM, then a summary, the flags the render ran with, and the option to start another render.
 
-**Extras** opens in a window of its own: GPU info, file info, the null test, help for every flag, the update ring, and the folders Kestrel remembers.
+**Extras** opens in a window of its own: GPU info, file info, help for every flag, the update ring, and the folders Kestrel remembers. A dev build adds the null test.
 
 **Updates.** At startup the guided renderer asks GitHub for the latest release and tells you if there is a newer one. It never downloads or installs anything. In Extras, the **Fast Ring** (default) tells you about every release and the **Slow Ring** only about feature releases such as 1.2.0 or 2.0.0. Set `KESTREL_NO_UPDATE_CHECK=1` to turn the check off. The command line never checks unless you ask it to with `check-update`.
 
@@ -170,6 +170,7 @@ kestrel --force-cli get-ffmpeg        # download one into ffmpeg/ beside Kestrel
 | `--interp` | `linear` | `nearest`, `linear` or `cubic`. Cubic reads twice as many samples per voice. |
 | `--phase-mode` | `baseline` | `analytic` enables SYNCore-style phase rotation with cached coefficients. Adds quadrature memory and GPU work; see [phase controls and tests](docs/analytic-phase-rotation.md). |
 | `--seconds N` | off | Stop after N seconds of output. Use this constantly while experimenting. |
+| `--tracks LIST` | off | Render each track on its own, as stems or, with `--merge`, summed into one file. See *Per-track rendering*. |
 | `--volume P` | `100` | Volume as a percentage, 0 to 200, applied before the limiter. See below. |
 | `--limiter` | `brickwall` | `brickwall`, `omni` or `off`. See *Limiting*. |
 | `--ceiling-db` | `0`, or `-1` for lossy | The brickwall's ceiling in dBFS. |
@@ -195,6 +196,7 @@ kestrel --force-cli api                   # a session another program drives; se
 kestrel --force-cli gpu-info              # adapters, limits, and each one's --max-voices ceiling
 kestrel --force-cli info file.sf2         # what the loader made of a soundfont
 kestrel --force-cli info file.mid         # ...or of a MIDI: note counts, CC usage, tempo, density
+kestrel --force-cli tracks file.mid       # what each track holds, for per-track rendering
 kestrel --force-cli ffmpeg-info           # the ffmpeg encoded output would use
 kestrel --force-cli get-ffmpeg            # fetch one; see Output formats
 kestrel --force-cli check-update          # is a newer Kestrel out? downloads nothing
@@ -235,6 +237,48 @@ To watch a single render instead, add `--progress json` to a render command: the
 
 From Rust, the same pipeline is `kestrel::session`: a `Job`, `plan` and `run`, and a `Monitor` that any number of readers take snapshots from at their own rate.
 
+### Per-track rendering
+
+Renders every track of a MIDI on its own, as if the file held nothing else, and writes each one to a file of its own, or sums them all into one.
+
+```bash
+kestrel --force-cli tracks song.mid                  # what each track holds
+kestrel --force-cli render song.mid -s piano.sfz --tracks all --merge -o song.flac
+kestrel --force-cli render song.mid -s piano.sfz --tracks all -o stems --stem-format flac
+kestrel --force-cli render song.mid -s piano.sfz --track 3 -o track3.wav
+```
+
+In the guided renderer it is menu item 2, and it walks you through the same choices.
+
+**What a track hears.**
+- Its own notes and controllers.
+- The file's tempo, whichever track carries it.
+- The file's *setup tracks*, the ones with controllers and no notes, unless you add `--setup-tracks ignore`.
+
+It does **not** hear other tracks' controllers. A track whose channel another track turns down, pans or bends will sound different on its own. MIDI ports are ignored, and analytic phase (`--phase-*`) doesn't apply.
+
+**Which tracks.** `--tracks all` is every track with notes. Otherwise list them as `kestrel tracks` numbers them, with ranges: `--tracks 1-40,57,90-`. A range with no end runs to the last track. Tracks without notes are skipped and named in the log.
+
+**Voices are a total**, shared evenly: `--max-voices 60000000` over 50,000 tracks is 1,200 each. A track `--min-velocity` would leave empty is skipped and takes no share.
+- The most is 2,000,000,000 in all; a bigger number is held to that.
+- The guided renderer starts at 60,000,000. `-1` there gives the most your card takes with up to 256 tracks on it at once. On the 8 GB laptop card it was tested on, that is about 8.6 million in all for 256 tracks or fewer, and about 33,500 a track for more.
+- More than that still renders, with fewer tracks at a time, and slower.
+
+**Stems** (`--tracks` without `--merge`):
+- They go in a folder named after the MIDI, inside the folder `-o` names, as `003 Piano.flac`.
+- `--stem-format` picks the container: `wav`, `flac`, `opus`, `ogg`, `mp3` or `m4a`.
+- 32-bit float WAV stems are written without the limiter, so they add back up to the mix. Every other format limits each stem on its own.
+- Every stem runs the whole length of the file, so WAV stems of a big file can be very big: 16-bit WAV stems of a file with a few thousand tracks can come to hundreds of gigabytes. Kestrel checks the free space before it starts, and refuses a WAV render that can't fit. FLAC makes the silence nearly free.
+
+**One file** (`--merge`):
+- Every track renders on its own and without a limiter. The tracks are then summed, and `--volume`, the limiter and the encode apply once, as in a normal render.
+- The sum is exact, so the file is the same bytes whatever order the tracks finish in. A MIDI with a single track merges to exactly the file a normal render writes.
+- The mix is held in memory while the tracks render, about 92 MB per minute of audio. A stopped merge writes no file, since a mix with tracks missing isn't the file you asked for.
+
+**Speed.** Up to 256 tracks render together, one GPU dispatch at a time. `--track-jobs N` sets how many CPU threads prepare them: 8 by default, and at most your core count less two. A stretch where a track is silent never reaches the GPU. On a file of over a hundred thin tracks, stems took 4.6 s where rendering the tracks one at a time took 9.3 s.
+
+**Progress** counts the notes read and the stretches where tracks have notes, not every block of every track, because the silent stretches cost almost nothing. The speed it shows is of the file being made, so a big merge can honestly read below 1x realtime.
+
 ## General MIDI
 
 **Rudimentary.** An ordinary GM file will play, but this is not guaranteed to render a file the way a GM synth would. Treat it as usable and unfinished, not as a supported format. What is listed below is what was built and checked; what is under *Where it is still wrong* is what is known to be off, and there is very likely more that has not been found yet.
@@ -270,6 +314,7 @@ Where Kestrel and BASSMIDI disagree, BASSMIDI is taken as the reference, and the
 - **LFOs.** SFZ's amplitude and pitch LFOs were measured against BASSMIDI's: a triangle starting at zero, delayed from the note's own start, at the depth, rate and direction it plays them. SF2's run on the same oscillator. Every LFO and modulation envelope counts from its note's own start -- before 1.1.0 they could run up to a block early. They update every 32 frames.
 - **Short notes, with `--note-grid`.** BASSMIDI moves each note's envelope in 4 ms steps counted from its note-on, so a note-off only takes effect at the next step, and a release shorter than a step becomes a 4 ms fade. A note one sample long still sounds for 4 ms. With `--note-grid` Kestrel does the same, matched to the sample; without it a note ends on its own note-off, as before. It is off by default because almost no file notices and it costs about 12% of a render, but a file that encodes audio as one-sample notes renders silent without it.
 - **Portamento.** CC65 turns it on, CC5 sets the speed and CC84 names the next note's starting key, as in BASSMIDI: a note glides in a straight line in pitch from the channel's last note, and CC5 = 0, the power-on value, means no glide. Kestrel's glides match BASSMIDI's speed to within 0.03%. Mono mode (CC126) is not implemented, so a note struck over a held one glides but does not cut it.
+- **MIDI ports.** A track that names a port with the FF 21 meta event gets sixteen channels of its own: channel 6 on port B is not channel 6 on port A. As in BASSMIDI, a port belongs to its track and applies from where it appears, an FF 21 that does not carry exactly one byte is ignored, and channel 10 is drums on every port. **One deliberate difference:** Kestrel keeps sixteen ports, A to P, as Domino does, where BASSMIDI keeps eight. A file that plays on ports I to P renders those parts on channels of their own here, and merged onto A to H in BASSMIDI.
 
 ## Limiting
 
@@ -319,7 +364,9 @@ One command buffer per audio block, five compute passes: **steal**, **spawn**, *
 - **Note boundaries can click on presets with no attack or release.** Kestrel starts and stops a voice on its exact frame, where other synths apply a few milliseconds of fade. On a preset whose volume envelope is all defaults over a looped waveform -- a synth lead or a square-wave bass -- every note-on and note-off is then a step discontinuity, which reads as grit over the tone. It is the largest known audible gap.
 - **No realtime playback**, and **no host integration**: offline rendering only, no C ABI and no plugin build.
 - **A render once failed with `buffer map failed: BufferAsyncError`.** Not reproduced. If you see it, the voice count, the MIDI and the soundfont are what would pin it down.
-- **On the densest files the host is the bottleneck.** MIDI reading and admission run on one CPU core, and a block carrying around a billion note-ons takes minutes of host work while the GPU waits.
+- **On the densest files the host is the bottleneck.** MIDI reading and most of admission run on one CPU core, and a block carrying around a billion note-ons takes minutes of host work while the GPU waits.
+- **A block too dense to hold whole can lose one side of a stereo piano.** Past the candidate cap under *Memory*, the thinning keeps the same layer of every note-on, so with a stereo sample library one channel goes quiet in the densest moments. It needs a block of over a hundred million note-ons in a normal render, and a much denser track in a per-track one. Fixing it is planned for 1.2.1.
+- **A merge isn't the whole file.** It is the sum of the tracks as each sounds alone. On a file whose tracks drive each other's channels (one track holding most of the notes on all 16 channels while the others set their volume and pan), the merge sounds noticeably different from a normal render. That's by design. When it isn't what you want, render the file normally.
 - **SFZ support is almost complete.** The common opcodes work, including `#include`, `#define`, velocity layers, `lorand`/`hirand`, velocity crossfade, `fil_veltrack`, `amp_veltrack`, `key`, `loopstart`/`loopend`, `pitch_keytrack`, `off_by`, and the amplitude and pitch LFOs (`amplfo_*`, `pitchlfo_*`). Not applied: `fillfo_depth`, the LFO `*_fade` opcodes (BASSMIDI ramps the depth in over them; Kestrel applies it at once), LFOs driven by a controller, SFZ v2's `lfoN_*`, `note_selfmask`, and the per-stage envelope velocity-tracking opcodes. Kestrel warns about every opcode it does not apply, so you will not hit this silently.
 - **The SF2 modulation LFO's filter destination** (`modLfoToFilterFc`) is not implemented. Its pitch and volume destinations are.
 - **VRAM figures** in the progress screen and the JSON feed are Windows only.
@@ -329,7 +376,11 @@ One command buffer per audio block, five compute passes: **steal**, **spawn**, *
 
 **A de-click fade at note boundaries** -- see *Known limitations*. It is measured and understood; what is left is calibrating the length and deciding whether it clamps the envelope or sits beside it.
 
-**A faster host.** The single-core host path first, then spreading it across cores, which is also what **per-track rendering** needs; the guided renderer already lists it as coming soon.
+**A faster host.** MIDI reading still runs on one core; spreading it across cores is next.
+
+**A high-pass on the mix before the limiter**, so the inaudible low-frequency build-up of very dense mixes stops spending the limiter's headroom.
+
+**A faster per-track render**: the pass that mixes each track's voices down does far more work than it needs to when hundreds of tracks share the GPU.
 
 **A log file per render**, so a failure leaves its settings and its point of failure behind.
 

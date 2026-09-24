@@ -1,0 +1,76 @@
+# Comments extracted from src/mix.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/mix.rs:5
+//! Per-track rendering, merged: every track's blocks summed into one mix as
+//! they arrive, in whatever order, then limited and written once.
+//!
+//! **Exact, so the order cannot matter.** Tracks finish their blocks in
+//! whatever order the lanes and threads happen to run them, and adding floats
+//! in that order would give different bytes from one run to the next (hard
+//! requirement 1 in CLAUDE.md). So each sample is held as an `i128` in units
+//! of 2^-96. Every f32 a render produces from 2^-73 up to 2^30 is exactly a
+//! whole number of those units, integer addition gives the same answer in any
+//! order, and the sum goes back to f32 once, rounded once, at the end.
+//!
+//! One consequence is checked by the tests: a track's samples go in and come
+//! back out unchanged. With the same output stage behind the mix, a one-track
+//! file merges to exactly the bytes of a normal render of it.
+//!
+//! It holds the whole render in memory, 32 bytes a stereo frame -- about
+//! 92 MB a minute at 48 kHz -- only for the blocks where some track made a
+//! sound. Nothing can be written early, because the last track to start may
+//! still add to the first block.
+
+[2] src/mix.rs:36
+/// Blocks added to the table at a time when a track reaches past its end, so
+/// the table's write lock is taken rarely.
+
+[3] src/mix.rs:40
+/// `v` in units of 2^-96. Exact for every magnitude from 2^-73 to 2^30,
+/// because it shifts the f32's 24-bit significand into place instead of
+/// converting through a float, which is a library call for `i128` and costs
+/// several times as much at a few billion samples. Anything smaller is
+/// truncated toward zero -- one fixed answer, 440 dB down -- and anything
+/// larger, or not finite, is refused rather than wrapped.
+
+[4] src/mix.rs:71
+/// Back to f32, rounded once. `i128 as f32` rounds to nearest, and the scale
+/// is a power of two that leaves every nonzero result a normal float, so it
+/// is exact.
+
+[5] src/mix.rs:81
+    /// One entry per block; empty until some track adds sound to it, and
+    /// zeros where none ever does.
+
+[6] src/mix.rs:84
+    /// Blocks the longest track ran for, silent ones included: how long the
+    /// merged file is.
+
+[7] src/mix.rs:93
+    /// Largest magnitude in the mix before the output stage, as a render's
+    /// `peak level` is.
+
+[8] src/mix.rs:106
+    /// Add a track's block number `block`. A block of zeros only counts
+    /// towards the length.
+
+[9] src/mix.rs:135
+    /// Write the mix to `path` through the output stage `cfg` describes:
+    /// the limiter, the clamp, the non-finite check, block by block as a
+    /// render's driver runs them.
+
+[10] src/mix.rs:175
+    /// Every f32 in the range the mix promises comes back as itself: all of
+    /// them, by exponent, with the significand's extremes and a pattern
+    /// between. This is what makes a one-track merge a normal render.
+
+[11] src/mix.rs:200
+    /// The same blocks added in any order make the same mix, which float
+    /// addition would not: these three values sum differently depending on
+    /// which two meet first.

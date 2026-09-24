@@ -1,0 +1,11 @@
+# Comments extracted from shaders/phase.wgsl
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] shaders/phase.wgsl:5
+// Compiled into analytic render pipelines only. Coefficients were prepared on
+// the host: no trigonometric functions or normalization in the sample loop.

@@ -97,6 +97,23 @@ enum Cmd {
         #[arg(short = 's', long = "soundfont")]
         soundfont: Option<PathBuf>,
     },
+    /// List a MIDI's tracks: how many notes each holds and at which
+    /// velocities, its channels, when its notes start and stop, and which
+    /// tracks carry only controllers. Every track is read on its own and in
+    /// parallel, so on a file with many tracks this is far quicker than `info`.
+    Tracks {
+        /// A MIDI file (.mid, .midi).
+        midi: PathBuf,
+        /// Threads to read tracks on; 0 is one per core.
+        #[arg(long, default_value_t = 0)]
+        jobs: usize,
+        /// Sample rate the times are worked out at.
+        #[arg(long, default_value_t = 48000)]
+        rate: u32,
+        /// Also count the notes `render --min-velocity` would keep, per track.
+        #[arg(long = "min-velocity", value_name = "VEL")]
+        min_velocity: Option<u8>,
+    },
     /// Compare two WAV files and report the null-test difference.
     #[cfg(feature = "dev")]
     Null {
@@ -177,6 +194,7 @@ enum Cmd {
 }
 
 #[derive(Args)]
+#[command(group(clap::ArgGroup::new("per_track").args(["track", "tracks"])))]
 struct RenderArgs {
     /// Input MIDI file.
     midi: PathBuf,
@@ -269,6 +287,51 @@ struct RenderArgs {
     /// notes, which render silent without it. Costs about 12% of the render.
     #[arg(long = "note-grid")]
     note_grid: bool,
+    /// Render only this track, numbered from 1 as `kestrel tracks` lists them:
+    /// its own notes and controllers, timed by the whole file's tempo whichever
+    /// track carries it, with every MIDI port folded onto the first. The file
+    /// is scanned before the render starts. --phase-* does not apply.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    track: Option<u32>,
+    /// Render these tracks as stems, each alone as --track renders one and
+    /// each to a file of its own, in a folder named after the MIDI inside the
+    /// directory -o names -- or, with --merge, summed into the one file -o
+    /// names. `all` is every track with notes; otherwise track numbers and
+    /// ranges, `1-40,57,90-`, a range with no end running to the last track.
+    /// --max-voices is a total, split evenly between the tracks, and a track
+    /// --min-velocity would empty is skipped.
+    #[arg(long, value_name = "LIST", conflicts_with = "track")]
+    tracks: Option<String>,
+    /// With --track or --tracks: whether the file's setup tracks --
+    /// controllers, programs and bends, no notes -- reach each track as they
+    /// would in a render of the whole file (apply), or are left out (ignore).
+    #[arg(
+        long = "setup-tracks",
+        default_value = "apply",
+        value_parser = ["apply", "ignore"],
+        requires = "per_track"
+    )]
+    setup_tracks: String,
+    /// With --tracks: the format every stem is written in. 32-bit float WAV
+    /// stems are written without the limiter, so they add back up to the mix;
+    /// every other format limits each stem.
+    #[arg(
+        long = "stem-format",
+        default_value = "wav",
+        value_parser = ["wav", "flac", "opus", "ogg", "mp3", "m4a"],
+        requires = "tracks",
+        conflicts_with = "track"
+    )]
+    stem_format: String,
+    /// With --tracks: one file instead of a folder of stems. Every track is
+    /// still rendered alone; they are summed exactly, and --volume and the
+    /// limiter apply to the sum, once, as in a normal render. -o is that file.
+    #[arg(long, requires = "tracks", conflicts_with_all = ["stem_format", "track"])]
+    merge: bool,
+    /// With --tracks: how many threads do the host's share of the tracks.
+    /// Held to this machine's cores less two.
+    #[arg(long = "track-jobs", value_name = "N", default_value_t = kestrel::tracks::default_jobs(), requires = "tracks", conflicts_with = "track")]
+    track_jobs: usize,
     /// WAV sample format. Encoded containers take float and refuse anything
     /// else.
     #[arg(long, default_value = "float32", value_parser = ["float32", "pcm16"])]
@@ -308,7 +371,7 @@ struct RenderArgs {
     #[arg(long)]
     seconds: Option<f64>,
     /// Force a wgpu backend: vulkan, dx12, metal, gl.
-    #[arg(long = "gpu-backend")]
+    #[arg(long = "gpu-backend", value_parser = parse_gpu_backend)]
     gpu_backend: Option<String>,
     /// Substring match against the adapter name.
     #[arg(long = "gpu-adapter")]
@@ -425,6 +488,11 @@ struct DevArgs {
     /// voice counts; only useful for measuring what the sort buys.
     #[arg(long = "no-sort")]
     no_sort: bool,
+    /// Send every block to the device, even one with no voice alive and none
+    /// admitted. Such a block renders exact zeros either way; this is for
+    /// checking that it does.
+    #[arg(long = "no-skip-silence")]
+    no_skip_silence: bool,
     /// Write one CSV row per block: the admission decision and the level it
     /// produced. This is the diagnostic for block-rate pumping -- the audio is
     /// downstream of these numbers, so read them rather than the waveform.
@@ -474,6 +542,16 @@ fn parse_volume(s: &str) -> std::result::Result<f32, String> {
         return Err(format!("volume is at most 200, twice as loud, not {s}"));
     }
     Ok(v)
+}
+
+/// `--gpu-backend`: refused here if it is not a name the device layer knows,
+/// with the names it could be, instead of after the soundfont has loaded.
+fn parse_gpu_backend(s: &str) -> std::result::Result<String, String> {
+    if gpu::backend_known(s) {
+        Ok(s.to_string())
+    } else {
+        Err(format!("{s:?} is not a GPU backend; use vulkan, dx12, metal or gl"))
+    }
 }
 
 impl RenderArgs {
@@ -528,6 +606,7 @@ impl RenderArgs {
             lfo_enabled: !dev.no_lfo,
             mod_env_enabled: !dev.no_mod_env,
             sort_voices: !dev.no_sort,
+            skip_silence: !dev.no_skip_silence,
             resample_pool: !self.no_resample_pool,
             sample_pool_budget: self.pool_budget << 20,
             profile: self.profile,
@@ -652,6 +731,12 @@ fn main() -> Result<()> {
             sf_release,
             soundfont,
         } => info(path, block, rate, sf_layers, sf_release, soundfont),
+        Cmd::Tracks {
+            midi,
+            jobs,
+            rate,
+            min_velocity,
+        } => tracks(midi, jobs, rate, min_velocity),
         #[cfg(feature = "dev")]
         Cmd::Null { a, b, threshold } => null(a, b, threshold),
         Cmd::GpuInfo => gpu::print_adapters(),
@@ -840,6 +925,156 @@ fn ffmpeg_info(explicit: Option<PathBuf>) -> Result<()> {
     }
     println!("\nevery container Kestrel encodes is available");
     Ok(())
+}
+
+/// `kestrel tracks`: the per-track scan, as a table.
+fn tracks(midi: PathBuf, jobs: usize, rate: u32, min_velocity: Option<u8>) -> Result<()> {
+    use kestrel::tracks::{self, TrackKind};
+    use tui::style::{audio_clock, thousands};
+
+    let t0 = std::time::Instant::now();
+    let s = tracks::scan(&midi, jobs, None)?;
+    let took = t0.elapsed().as_secs_f64();
+    let threads = tracks::jobs_for(jobs, s.tracks.len());
+
+    // Every tick the table shows, converted in one pass over the tempo map.
+    let mut ticks = vec![s.end_tick()];
+    for t in &s.tracks {
+        ticks.push(t.first_note.unwrap_or(0));
+        ticks.push(t.last_note.unwrap_or(0));
+    }
+    let secs: Vec<f64> = s.frames_at(&ticks, rate).iter().map(|f| f / rate as f64).collect();
+
+    let name = midi
+        .file_name()
+        .map_or_else(|| midi.display().to_string(), |n| n.to_string_lossy().into_owned());
+    let bytes: u64 = s.tracks.iter().map(|t| t.bytes).sum();
+    println!("{name}");
+    println!(
+        "  format {}, {}, {} tracks, {} of track data",
+        s.format,
+        tui::checks::describe_division(s.division),
+        s.tracks.len(),
+        fmt_bytes(bytes)
+    );
+    let total = s.notes();
+    println!(
+        "  {} notes, {} tempo change{}, {} to the last event at {rate} Hz",
+        thousands(total),
+        thousands(s.tempo.len() as u64),
+        if s.tempo.len() == 1 { "" } else { "s" },
+        audio_clock(secs[0])
+    );
+    println!("  read in {took:.2} s on {threads} thread{}", if threads == 1 { "" } else { "s" });
+    println!();
+
+    let kept_head = min_velocity
+        .map(|v| format!("  {:>13}", format!("vel >= {v}")))
+        .unwrap_or_default();
+    println!(
+        "  {:>5}  {:<5}  {:>13}{kept_head}  {:<7}  {:<14}  {:>9}  {:>9}  {:>9}  name",
+        "track", "kind", "notes", "vel", "channels", "controls", "first", "last"
+    );
+    let dash = |show: bool, v: String| if show { v } else { "-".to_string() };
+    for (i, t) in s.tracks.iter().enumerate() {
+        let kind = match t.kind() {
+            TrackKind::Notes => "notes",
+            TrackKind::Setup => "setup",
+            TrackKind::Empty => "empty",
+        };
+        let has_notes = t.first_note.is_some();
+        let kept = min_velocity
+            .map(|v| format!("  {:>13}", dash(has_notes, thousands(t.notes_from(v)))))
+            .unwrap_or_default();
+        let vel = t.velocity_range().map_or("-".to_string(), |(lo, hi)| {
+            if lo == hi {
+                lo.to_string()
+            } else {
+                format!("{lo}-{hi}")
+            }
+        });
+        println!(
+            "  {:>5}  {:<5}  {:>13}{kept}  {:<7}  {:<14}  {:>9}  {:>9}  {:>9}  {}",
+            i + 1,
+            kind,
+            dash(has_notes, thousands(t.notes())),
+            vel,
+            channel_list(t.channels),
+            dash(t.controls > 0, thousands(t.controls)),
+            dash(has_notes, audio_clock(secs[1 + 2 * i])),
+            dash(has_notes, audio_clock(secs[2 + 2 * i])),
+            t.display_name().unwrap_or_default()
+        );
+    }
+    println!();
+
+    let count = |kind| s.of_kind(kind).count();
+    let plural = |n: usize, what: &str| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
+    println!(
+        "  {} with notes, {}, {}",
+        plural(count(TrackKind::Notes), "track"),
+        plural(count(TrackKind::Setup), "setup track"),
+        plural(count(TrackKind::Empty), "empty track")
+    );
+    if let Some(b) = s.busiest() {
+        let n = s.tracks[b].notes();
+        println!(
+            "  busiest: track {}, {} notes ({:.1}%)",
+            b + 1,
+            thousands(n),
+            n as f64 * 100.0 / total as f64
+        );
+    }
+    let tempo_tracks: Vec<String> = s
+        .tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.tempos > 0)
+        .map(|(i, _)| (i + 1).to_string())
+        .collect();
+    match tempo_tracks.len() {
+        0 => println!("  no tempo changes: 120 bpm throughout"),
+        1..=8 => println!("  tempo changes on track {}", tempo_tracks.join(", ")),
+        n => println!("  tempo changes on {n} tracks"),
+    }
+    if let Some(v) = min_velocity {
+        let kept: u64 = s.tracks.iter().map(|t| t.notes_from(v)).sum();
+        let with = count(TrackKind::Notes);
+        let left = s.tracks.iter().filter(|t| t.notes_from(v) > 0).count();
+        println!(
+            "  --min-velocity {v} keeps {} notes ({:.1}%) on {left} of {with} tracks; {} would render nothing",
+            thousands(kept),
+            if total > 0 { kept as f64 * 100.0 / total as f64 } else { 0.0 },
+            plural(with - left, "track")
+        );
+    }
+    Ok(())
+}
+
+/// Channels as ranges, 1-based: `1-16`, `1,3,10`.
+fn channel_list(mask: u16) -> String {
+    let mut out = Vec::new();
+    let mut c = 0;
+    while c < 16 {
+        if mask & (1 << c) == 0 {
+            c += 1;
+            continue;
+        }
+        let start = c;
+        while c < 16 && mask & (1 << c) != 0 {
+            c += 1;
+        }
+        out.push(if c - start == 1 {
+            format!("{}", start + 1)
+        } else {
+            format!("{}-{}", start + 1, c)
+        });
+    }
+    if out.is_empty() {
+        "-".into()
+    } else {
+        out.join(",")
+    }
 }
 
 fn fmt_bytes(b: u64) -> String {
@@ -1208,6 +1443,19 @@ mod tests {
         }
     }
 
+    /// A wrong `--gpu-backend` is refused as it is parsed, naming the ones it
+    /// could be, not after the soundfont has loaded.
+    #[test]
+    fn an_unknown_gpu_backend_is_refused_with_the_names() {
+        let Err(e) = render_args(&["--gpu-backend", "5"]) else {
+            panic!("--gpu-backend 5 parsed");
+        };
+        let e = e.to_string();
+        assert!(e.contains("vulkan, dx12, metal or gl"), "{e}");
+        assert!(render_args(&["--gpu-backend", "DX12"]).is_ok());
+        assert!(render_args(&["--gpu-backend=vulkan"]).is_ok());
+    }
+
     /// A release build renders with what a dev build's command line defaults
     /// to, so the same command writes the same file in either.
     #[test]
@@ -1291,6 +1539,24 @@ mod tests {
             super::Cmd::Render(args) => Ok(args),
             _ => unreachable!("the argument list names the render subcommand"),
         }
+    }
+
+    /// `--merge` belongs to `--tracks`, and a stem format means nothing to it.
+    /// `--stem-format` has a default, which must not count as naming it.
+    #[test]
+    fn merge_goes_with_tracks_and_not_with_a_stem_format() {
+        let merged = |extra: &[&str]| render_args(extra).map(|a| a.to_job().unwrap().stems.map(|s| s.merge));
+        assert_eq!(merged(&["--tracks", "all", "--merge"]).unwrap(), Some(true));
+        assert_eq!(merged(&["--tracks", "all"]).unwrap(), Some(false));
+        assert!(render_args(&["--merge"]).is_err(), "--merge without --tracks");
+        assert!(render_args(&["--tracks", "all", "--merge", "--stem-format", "flac"]).is_err());
+        // `--tracks` conflicts with `--track`, and clap waives a requirement
+        // on an argument that conflicts with one present, so these three
+        // need their own conflict with `--track` or they are ignored.
+        assert!(render_args(&["--track", "2", "--merge"]).is_err());
+        assert!(render_args(&["--track", "2", "--stem-format", "flac"]).is_err());
+        assert!(render_args(&["--track", "2", "--track-jobs", "3"]).is_err());
+        assert!(render_args(&["--track", "2"]).is_ok());
     }
 
     /// `--volume` is a percentage from 0 to 200, and 100 is exactly unity, so a

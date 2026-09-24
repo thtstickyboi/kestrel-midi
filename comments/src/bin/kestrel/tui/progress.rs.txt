@@ -22,33 +22,67 @@
 /// How long a first Ctrl+C waits for the second. One keypress should not throw
 /// away an hour of rendering.
 
-[4] src/bin/kestrel/tui/progress.rs:39
+[4] src/bin/kestrel/tui/progress.rs:29
+/// The widest the panel's content goes in a wide terminal: a normal render's,
+/// and a per-track render's, which has more on each row.
+
+[5] src/bin/kestrel/tui/progress.rs:41
+    /// A per-track render, which gets `track_frame`: its tracks render many at
+    /// once, so there is no one render's voices or position to show.
+
+[6] src/bin/kestrel/tui/progress.rs:46
 /// Recent speed and note rate, smoothed over a couple of seconds so the
 /// figures move rather than flicker. The snapshot's own `speed()` is the whole
 /// render's average, which is the figure the command line reports at the end.
 
-[5] src/bin/kestrel/tui/progress.rs:151
-            // Once the events are all read there is nothing left to estimate
-            // from, so the middle field says what is happening instead.
-
-[6] src/bin/kestrel/tui/progress.rs:221
+[7] src/bin/kestrel/tui/progress.rs:126
     // The whole adapter, every process counted. Kestrel's own figure alone
     // cannot say whether the card is nearly full.
 
-[7] src/bin/kestrel/tui/progress.rs:276
+[8] src/bin/kestrel/tui/progress.rs:205
+            // Once the events are all read there is nothing left to estimate
+            // from, so the middle field says what is happening instead.
+
+[9] src/bin/kestrel/tui/progress.rs:296
+/// A per-track render's frame: its tracks, many at once, rather than one
+/// render's blocks. The same rows in every phase, as `frame`'s are.
+
+[10] src/bin/kestrel/tui/progress.rs:448
 /// The terminal while the screen owns it: raw mode so Ctrl+C arrives as a key
 /// rather than killing the process, and no cursor. Restored on drop, which
 /// includes an unwinding panic.
 
-[8] src/bin/kestrel/tui/progress.rs:395
+[11] src/bin/kestrel/tui/progress.rs:538
+        // A per-track render has more to say a row, and was cramped at a
+        // normal render's width (2026-09-24).
+
+[12] src/bin/kestrel/tui/progress.rs:573
             // The poll is the frame clock: it returns at the next key, or when
             // the frame is up.
 
-[9] src/bin/kestrel/tui/progress.rs:476
+[13] src/bin/kestrel/tui/progress.rs:683
     /// Every phase lays out to the same rectangle, so the screen never leaves
     /// a stale row behind when it moves from setup to rendering.
 
-[10] src/bin/kestrel/tui/progress.rs:505
+[14] src/bin/kestrel/tui/progress.rs:712
+    /// And so does a per-track render's, whose rows differ from a normal
+    /// render's but must not move between phases either.
+
+[15] src/bin/kestrel/tui/progress.rs:731
+                // Half the notes read and 30% of the blocks inside them, not
+                // the 40% of all blocks: 0.55 x 50% + 0.45 x 30%.
+
+[16] src/bin/kestrel/tui/progress.rs:734
+                // Of the file being made: 240 s x 41% in 4 s, not the
+                // tracks' summed audio (102.1 s in 4 s).
+
+[17] src/bin/kestrel/tui/progress.rs:750
+    /// At its own width a per-track render's rows fit whole, with figures the
+    /// size a render of thousands of tracks reaches. At a normal render's
+    /// width they were
+    /// cut ("now 740.…", 2026-09-24).
+
+[18] src/bin/kestrel/tui/progress.rs:776
     /// Not a check: prints one frame per phase as plain text, to look at a
     /// layout change without a terminal.
     /// `cargo test --bin kestrel preview_frames -- --ignored --nocapture`

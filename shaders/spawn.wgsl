@@ -80,7 +80,7 @@ fn main(
             voices[F_BORN_VARIANT * c + dst] = (s.variant + 1u) | (s.row_bias << 16u);
             voices[F_STOP_REL * c + dst] = 0u;
             // [4]
-            voices[F_AGE * c + dst] = 0u - s.start_rel;
+            if (USE_LFO || USE_MOD_ENV) { voices[F_AGE * c + dst] = 0u - s.start_rel; }
             if (USE_MOD_ENV) { voices[F_REL_AGE * c + dst] = NO_RELEASE; }
             if (ANALYTIC) {
                 voices[F_ROT_C * c + dst] = bitcast<u32>(s.rotation_cosine);

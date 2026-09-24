@@ -16,6 +16,19 @@ impl RenderArgs {
     /// The render these arguments describe, with everything clap cannot check \[3\]
     pub fn to_job(&self) -> Result<Job> {
         let (cfg, backend) = self.to_config()?;
+        let setup = kestrel::tracks::SetupTracks::parse(&self.setup_tracks)
+            .expect("clap limits --setup-tracks to the two names SetupTracks parses");
+        let stems = match &self.tracks {
+            Some(spec) => Some(kestrel::tracks::Stems {
+                tracks: kestrel::tracks::TrackList::parse(spec)?,
+                setup,
+                jobs: self.track_jobs,
+                ext: self.stem_format.clone(),
+                merge: self.merge,
+                scanned: None,
+            }),
+            None => None,
+        };
         Ok(Job {
             midi: self.midi.clone(),
             soundfonts: self.soundfont.clone(),
@@ -27,6 +40,8 @@ impl RenderArgs {
             ceiling_db: self.ceiling_db,
             seconds: self.seconds,
             block_csv: self.dev_args().block_csv,
+            track: self.track.map(|n| kestrel::tracks::TrackPick { index: n as usize - 1, setup }),
+            stems,
             backend,
             cfg,
         })

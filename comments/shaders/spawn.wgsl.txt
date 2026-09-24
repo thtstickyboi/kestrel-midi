@@ -14,25 +14,32 @@
 // order, so allocation never depends on which invocation runs first. No
 // atomics, and the pool contents are a pure function of the MIDI file.
 
-[2] shaders/spawn.wgsl:71
+[2] shaders/spawn.wgsl:74
             // With the voice's position on the envelope grid, taken once here
             // at its own first frame; the render pass reads it against the
             // block's. Mirrors `cpu.rs`.
 
-[3] shaders/spawn.wgsl:83
+[3] shaders/spawn.wgsl:86
             // Plus one, so that zero can mean "not born in this block" once
             // the render pass clears it. The row bias rides in the high half
             // rather than in a field of its own: it is one bit, it is only
             // meaningful for the block the voice is born in, and this word is
             // already cleared at the end of that block.
 
-[4] shaders/spawn.wgsl:90
+[4] shaders/spawn.wgsl:93
             // Its LFOs and modulation envelope start at the note, not at the
             // top of the block: the age is stored at minus the start frame, so
             // it reaches zero on the frame the voice sounds. Stored as zero it
             // ran them up to a block early -- 73 ms on a note 3,520 frames in,
             // measured against BASSMIDI (2026-09-15).
+            //
+            // Only when the field exists: with neither LFOs nor the modulation
+            // envelope the pool has no age field (`gpu::base_voice_fields`),
+            // and this write, past the end of the pool, was clamped by the
+            // bounds check onto the pool's last word -- the stop frame of its
+            // last slot, which could cancel a stolen voice's fade. Found
+            // 2026-09-23, when a batch lane's pool has another lane's after it.
 
-[5] shaders/spawn.wgsl:102
+[5] shaders/spawn.wgsl:117
 // Advance the live count once the appends are done. One invocation, so there
 // is nothing to race.

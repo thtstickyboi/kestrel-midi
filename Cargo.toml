@@ -1,6 +1,6 @@
 [package]
 name = "kestrel"
-version = "1.1.2"
+version = "1.2.0"
 edition = "2021"
 rust-version = "1.88"
 authors = ["thtstickyboi"]
@@ -48,7 +48,13 @@ claxon = "0.4"
 clap = { version = "4", features = ["derive"] }
 # Colour, cursor control and key events for the guided renderer.
 crossterm = "0.29"
+# Track names that are not UTF-8, such as Shift-JIS, which black MIDI is full
+# of: shown in the guided renderer and put in a stem's file name.
+encoding_rs = "0.8"
 env_logger = "0.11"
+# Free space on the drive a per-track render writes its stems to, checked
+# before it starts. The only alternative is a raw system call.
+fs4 = "0.13"
 log = "0.4"
 # Process resident memory for the progress screen, without `unsafe` here.
 memory-stats = "1.2"

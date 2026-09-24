@@ -48,11 +48,9 @@ pub const FLAG_BITS: u32 = 0x7;
 /// Where the remaining glide starts in the flags word: frames until the glide \[4\]
 pub const REM_SHIFT: u32 = 3;
 pub const REM_MAX: u32 = u32::MAX >> REM_SHIFT;
-/// The part of a gate slot word that is the slot. Bits 11-23 are the voice's \[5\]
-pub const SLOT_MASK: u32 = 0x7FF;
-/// Where CC5 sits in a gate slot word, seven bits of it.
+/// Where CC5 sits in a voice's note-id high word, seven bits of it. The low \[5\]
 pub const RATE_SHIFT: u32 = 24;
-/// Set in a gate slot word when the note glides down onto its own pitch, from \[6\]
+/// Set in a voice's note-id high word when the note glides down onto its own \[6\]
 pub const UP_BIT: u32 = 1 << 31;
 
 /// The exponent is evaluated as `2^(m / OCTAVE - MID_OCTAVES)`, with `m` kept \[7\]
@@ -115,11 +113,11 @@ impl Glide {
 
 /// The 8.24 pitch factor a gliding voice holds for the gate tile evaluated at \[12\]
 #[inline]
-pub fn factor(flags: u32, slot: u32, f: u32, tab: &[u32]) -> u32 {
+pub fn factor(flags: u32, word: u32, f: u32, tab: &[u32]) -> u32 {
     let rem = (flags >> REM_SHIFT).saturating_sub(f);
-    let rq = tab[((slot >> RATE_SHIFT) & 0x7F) as usize];
+    let rq = tab[((word >> RATE_SHIFT) & 0x7F) as usize];
     let raw = ((rq as u64 * rem as u64) >> RATE_FRAC_BITS) as u32;
-    let up = slot & UP_BIT != 0;
+    let up = word & UP_BIT != 0;
     let off = raw.min(if up { UP_MAX_OFF } else { DOWN_MAX_OFF });
     let m = if up { MID + off } else { MID - off };
     let oct = m / OCTAVE;

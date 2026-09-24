@@ -14,7 +14,8 @@ Kestrel is under the Mozilla Public License 2.0 (see [LICENSE](LICENSE)). Some o
 
 The analytic quadrature preparation, deterministic angle assignment, loop-body
 handling, normalization, and attack protection are adapted from **SYNCore**,
-`SAFSYN/phase.cpp` and `SAFSYN/phase.h`, revision `4cd9373`.
+`SAFSYN/phase.cpp` and `SAFSYN/phase.h`, revision `4cd9373`, by **DixelU**,
+who also contributed the port in pull request #1.
 SYNCore releases this code under the Unlicense/public-domain dedication;
 its original [license text](third_party/SYNCore-LICENSE.txt) is included.
 The Rust/GPU integration and finite coefficient tables are Kestrel additions.
@@ -45,7 +46,9 @@ All are permissive and none are copyleft. Full texts are reproduced by `cargo ab
 | `claxon` | Apache-2.0 |
 | `clap` | MIT OR Apache-2.0 |
 | `crossterm` | MIT |
+| `encoding_rs` | (Apache-2.0 OR MIT) AND BSD-3-Clause |
 | `env_logger` | MIT OR Apache-2.0 |
+| `fs4` | MIT OR Apache-2.0 |
 | `log` | MIT OR Apache-2.0 |
 | `memory-stats` | MIT OR Apache-2.0 |
 | `pollster` | Apache-2.0/MIT |
@@ -55,6 +58,10 @@ All are permissive and none are copyleft. Full texts are reproduced by `cargo ab
 | `unicode-width` | MIT OR Apache-2.0 |
 | `wgpu` | MIT OR Apache-2.0 |
 | `windows` *(Windows builds only)* | MIT OR Apache-2.0 |
+
+`encoding_rs` decodes track names that are not UTF-8, such as Shift-JIS, for per-track rendering. The BSD-3-Clause in its licence covers the WHATWG encoding data it carries, so a distributed binary owes that notice too. It brings five crates of its own, all MIT or Apache-2.0: `simdutf8`, `multiversion`, `multiversion-macros`, `multiversion_no_op` and `core_detect`.
+
+`fs4` checks the free space on the drive a per-track render writes its stems to, before it starts.
 
 `rfd` opens the native file pickers. On Linux it is built against the desktop portal rather than GTK, so it links no system library there either.
 

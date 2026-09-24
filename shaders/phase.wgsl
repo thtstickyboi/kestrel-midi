@@ -2,8 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-// Compiled into analytic render pipelines only. Coefficients were prepared on
-// the host: no trigonometric functions or normalization in the sample loop.
+// [1]
 @group(0) @binding(10) var<storage, read> phase_data: array<u32>;
 const PRESERVE_PHASE_ATTACK: bool = {{PRESERVE_PHASE_ATTACK}};
 

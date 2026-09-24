@@ -1,0 +1,262 @@
+# Comments extracted from src/gpu/batch.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/gpu/batch.rs:5
+//! Several renders in one dispatch: the stems runner's way past the device's
+//! per-block floor.
+//!
+//! **Why.** A block that sounds costs about 1.6 ms of render pass whatever its
+//! voice count -- one invocation per voice walks the block's frames and the
+//! workgroup reduces every tile -- so a thin stem keeps one or two workgroups
+//! busy and leaves the rest of the card idle. Separate renders cannot fill it:
+//! one queue's pipeline barriers order every render's passes after every
+//! other's. Measured 2026-09-23, 34 stems: 19.84 s at one job, 15.25 s at
+//! eight. See the development notes, phase 3.
+//!
+//! **How.** A batch holds `lanes` renders. Every buffer a render owns is one
+//! buffer here with a region per lane, and every pass is dispatched once for
+//! the whole batch with the lanes along the grid's second axis. The shaders
+//! are not written twice: [`laned`] rewrites the solo ones as the pipelines are
+//! built, adding the lane's base to every access of a lane's own buffer and
+//! reading the lane's uniforms from an array. The sample pool and the
+//! read-only tables stay shared.
+//!
+//! **Why the result is the same bytes as a solo render.** Nothing a lane
+//! computes depends on the other lanes or on how wide the batch's grid is:
+//! the render pass assigns voices to workgroups by `u.render_workgroups`, the
+//! reduce reads partials by it, and every other pass either works per item or
+//! per block of items or counts with integer atomics. A lane's region holds
+//! exactly what its solo render's buffers would. So a stem rendered in a batch
+//! is the bytes `--track` writes for that track, which is what the tests check.
+
+[2] src/gpu/batch.rs:35
+/// The most one submission uploads into any one of the packed buffers. A
+/// batch whose lanes need more goes up as several submissions; see `flush`.
+/// Below the adapter's binding limit on purpose: every byte of it is staged
+/// in host memory first.
+
+[3] src/gpu/batch.rs:41
+/// Buffers every lane has a region of, as the shaders name them, with the
+/// private variable that holds the lane's base. `voices_out` is the other half
+/// of the lane's own pool: one buffer holds both halves of every lane, so which
+/// half is current is a per-lane offset rather than a choice of bind group.
+
+[4] src/gpu/batch.rs:62
+/// Per-lane control words beside the uniforms. Bit 0 of `flags`: the lane is
+/// in this batch. Bits 1-2: which render pipeline it needs (bit 1 the
+/// controller path, bit 2 the glide path). Bit 3: it steals this block.
+
+[5] src/gpu/batch.rs:82
+    /// Runs only for lanes that steal this block, as the solo render runs the
+    /// selection only when it steals.
+
+[6] src/gpu/batch.rs:85
+    /// The render pass: only for lanes that need this pipeline, and only its
+    /// own `render_workgroups` of the batch's grid.
+
+[7] src/gpu/batch.rs:103
+/// Rewrite one fully substituted solo shader into its batch form.
+///
+/// Every rewrite here is checked: a solo shader that changes shape so that one
+/// of them no longer applies fails the build of the batch pipelines, with the
+/// reason, rather than producing a shader that reads another lane's data.
+
+[8] src/gpu/batch.rs:151
+    // Params and the modulation envelope go through the slot table: variant
+    // 0 is the bank's own table, shared, and every other variant a lane asks
+    // for lives in a slot of its own. Indexed exactly as solo -- `params_base
+    // + variant * per` -- and split back into the two here.
+
+[9] src/gpu/batch.rs:168
+    // An alias is renamed to its buffer only after every rule has run, under
+    // a name no rule matches meanwhile: renamed at once, the rule for the
+    // buffer itself would add its own base on top of the alias's, and the
+    // gather would write the pool's other half at its own offset. (It did:
+    // the first batch lost a voice at every odd block.)
+
+[10] src/gpu/batch.rs:216
+/// Every `name[expr]` indexing the buffer `name` becomes `name[f(expr)]`. Not
+/// a field of something else (`.name[`) and not a longer identifier.
+
+[11] src/gpu/batch.rs:273
+/// Give `entry` a workgroup id if it has none, and open it with the lane's
+/// uniforms, bases and the checks its role needs.
+
+[12] src/gpu/batch.rs:409
+/// A bind group layout whose binding 0 is the lanes' uniforms, read-only
+/// storage, and the rest storage buffers at the given bindings.
+
+[13] src/gpu/batch.rs:449
+    /// The solo layouts with binding 0 as the lanes' uniforms, the second half
+    /// of the pool gone (it is the same buffer now), and the slot table at 11.
+
+[14] src/gpu/batch.rs:559
+/// One lane's host state: what a solo `GpuSynth` keeps in its own fields, plus
+/// the tables it has been handed for the block, held until the batch goes up.
+
+[15] src/gpu/batch.rs:581
+    /// Params slot of each variant this lane has installed, 0 for none:
+    /// variant 0 is slot 0, the bank's own table, shared by every lane.
+
+[16] src/gpu/batch.rs:597
+/// What every lane's backend reaches besides its own `Lane`: the settings, the
+/// queue, and the params slots the lanes' variants share. Held apart from the
+/// lanes so that each lane can be handed out mutably while this is shared, and
+/// the lanes' host work run on several threads at once.
+
+[17] src/gpu/batch.rs:613
+/// The params and modulation-envelope slots, and the buffers holding them.
+/// Slot 0 is the bank's own table; the rest go to the variants lanes install.
+
+[18] src/gpu/batch.rs:634
+/// Up to `lanes` renders on one device, each advanced a block at a time and
+/// all of them submitted together. See the module comment.
+
+[19] src/gpu/batch.rs:649
+    /// The lanes in the batch being sent, which the grid's second axis
+    /// indexes: a batch launches workgroups for its own lanes only.
+
+[20] src/gpu/batch.rs:661
+    /// The per-block uploads -- spawn commands, note-off tables, channel
+    /// rows -- with every lane in a submission packed one after another, at
+    /// offsets its uniforms carry. Sized by what the lanes hold, not by the
+    /// fullest lane times the lane count, which 256 dense tracks took past
+    /// one binding (2026-09-23).
+
+[21] src/gpu/batch.rs:686
+    /// Under `--profile`: device timestamps around each stage, and what they
+    /// have added up to, per stage, over the batches timed.
+
+[22] src/gpu/batch.rs:703
+/// Lanes one batch holds at most. Each lane is one track and a batch is one
+/// submission, so this is how many tracks share one pass over the device;
+/// more wait for a lane to come free. Video memory or the one-binding limit
+/// usually binds first.
+
+[23] src/gpu/batch.rs:709
+/// The batch's buffers that each have to fit in one binding, for `lanes`
+/// lanes at `cfg`, named as `new` names them when one does not. `new` refuses
+/// a batch any of these outgrows, and `max_voices_each` and `lanes_that_bind`
+/// search under the same figures, so the three cannot disagree.
+
+[24] src/gpu/batch.rs:731
+    /// Device bytes one lane costs at `cfg`, before any lane has asked for a
+    /// params variant of its own: what the stems runner divides free video
+    /// memory by.
+
+[25] src/gpu/batch.rs:749
+    /// The most voices each of `lanes` lanes can hold in one batch at `cfg`
+    /// on an adapter that binds `binding_bytes` of one buffer; 0 if not even
+    /// one voice fits. Every lane's pool shares one voice buffer, so the more
+    /// lanes, the less each can hold: at 256 lanes, about a 256th of what one
+    /// render alone can. A per-track render's device max is made of this.
+
+[26] src/gpu/batch.rs:757
+        // Every buffer grows with the pool, so this is the edge of a
+        // predicate that only ever turns false, and one render alone is
+        // above it.
+
+[27] src/gpu/batch.rs:775
+    /// The most lanes, up to `lanes`, whose batch at `cfg` fits an adapter
+    /// that binds `binding_bytes` of one buffer; 0 if not even one does.
+
+[28] src/gpu/batch.rs:826
+        // Small to start, as a thin stem needs; both grow on demand.
+        // Room for a thin block in every lane to start; all three grow on
+        // demand.
+
+[29] src/gpu/batch.rs:844
+        // Params and the modulation envelope: slot 0 is the bank's own table,
+        // which every lane's variant 0 reads; a lane gets a slot of its own
+        // only for a variant it installs. One spare slot a lane to start.
+
+[30] src/gpu/batch.rs:998
+    /// Under `--profile`, the device time each stage took on average over the
+    /// batches sent, in milliseconds, named as the solo render names them.
+
+[31] src/gpu/batch.rs:1076
+    /// Every lane's backend at once, to be driven from as many threads as
+    /// there are lanes. Nothing in one touches another's lane, and what they
+    /// share is behind `LaneHost`; the batch cannot go up while they are out.
+
+[32] src/gpu/batch.rs:1089
+    /// Whether `lane`'s driver handed its last block to the batch -- false for
+    /// a silent block, which the driver writes itself.
+
+[33] src/gpu/batch.rs:1095
+    /// Send every submitted lane's block to the device. Returns false when no
+    /// lane submitted anything, and then `wait` has nothing to wait for.
+    ///
+    /// Usually one submission. Every lane's uploads are packed one after
+    /// another, and when the lanes' blocks together would not fit
+    /// `UPLOAD_MAX` in one binding, they go up as several submissions, in
+    /// order, each a whole pass over its own lanes. Nothing a lane renders
+    /// depends on which submission carried it or where its uploads sat.
+
+[34] src/gpu/batch.rs:1127
+        // A lane bigger than the limit on its own goes up alone; only one
+        // bigger than a binding is refused, as a solo render refuses it.
+
+[35] src/gpu/batch.rs:1153
+        // Regrow what the largest submission overflows. Everything in them is
+        // rewritten below, so nothing needs carrying across.
+
+[36] src/gpu/batch.rs:1185
+            // Uploads and uniforms. A lane not in this submission gets zeros,
+            // which every entry point reads as "not me".
+
+[37] src/gpu/batch.rs:1232
+                // Only the lanes this batch rendered, packed in the order
+                // `active` lists them. Copying every lane's block cost a batch
+                // of six lanes out of 137 a 4.4 MB readback for 190 KB of audio.
+
+[38] src/gpu/batch.rs:1240
+                // Under --profile, a batch sent as several submissions times
+                // its last.
+
+[39] src/gpu/batch.rs:1428
+    /// Give `lane` -- lane `at` of the batch -- a params slot for its variant
+    /// `index` if it has none yet, and upload the variant into it.
+
+[40] src/gpu/batch.rs:1458
+    /// Double the variant slots, keeping every slot's contents. The next
+    /// `flush` rebinds the new buffers.
+
+[41] src/gpu/batch.rs:1489
+/// A lane of a batch, as the `Backend` its driver renders through. Every call
+/// but `submit`, `finish` and `skip_block` only records what the lane was
+/// handed; the batch does the device work for all its lanes at once.
+
+[42] src/gpu/batch.rs:1499
+    /// Make this lane a fresh render: no voices, the counters at zero, the
+    /// envelope grid at frame 0, its variant slots given back. What
+    /// `GpuSynth::reset` is for one render, and for the same reasons.
+
+[43] src/gpu/batch.rs:1521
+    /// Whether the driver handed this lane's last block to the batch -- false
+    /// for a silent block, which the driver writes itself.
+
+[44] src/gpu/batch.rs:1604
+    /// Every batch pass compiles and validates on the device, which is where a
+    /// rewrite that produced bad WGSL would show.
+
+[45] src/gpu/batch.rs:1634
+    /// A render in a batch lane is the same bytes, block for block, as the
+    /// same render on its own `GpuSynth`: in the second lane, so every base is
+    /// non-zero, beside a first lane rendering another file, with a pool small
+    /// enough to steal, and with bends, a sound controller and a glide, so the
+    /// controller and glide pipelines run and the lane takes variant slots.
+    /// Over the feature sets that change the pool's layout.
+    ///
+    /// This is the test that found both of the batch's first two defects: the
+    /// gather writing the pool's other half at its own offset on odd blocks,
+    /// and a shader reading its uniforms through a private copy.
+
+[46] src/gpu/batch.rs:1675
+        // The last sends every batch as two submissions, one a lane: under a
+        // one-byte limit, each lane goes up alone.

@@ -48,7 +48,10 @@ pub trait Backend {
     /// Wait for the block started by `submit` and write it into `out`, \[8\]
     fn finish(&mut self, out: &mut [f32]) -> Result<()>;
 
-    /// Render one block, start to finish. \[9\]
+    /// Step over one block without rendering it, in place of `set_gates` \[9\]
+    fn skip_block(&mut self) -> Result<()>;
+
+    /// Render one block, start to finish. \[10\]
     fn render(&mut self, out: &mut [f32]) -> Result<()> {
         self.submit()?;
         self.finish(out)
@@ -58,7 +61,7 @@ pub trait Backend {
 
     fn name(&self) -> &'static str;
 
-    /// Per-pass timings from the last block, for `--profile`. Empty when the \[10\]
+    /// Per-pass timings from the last block, for `--profile`. Empty when the \[11\]
     fn timings(&self) -> Vec<(&'static str, f64)> {
         Vec::new()
     }

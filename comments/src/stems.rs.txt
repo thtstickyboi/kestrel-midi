@@ -1,0 +1,211 @@
+# Comments extracted from src/stems.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/stems.rs:5
+//! Per-track rendering: every track a render names, each rendered alone
+//! exactly as `--track` renders one, several at a time -- each to a file of its
+//! own in a folder named after the MIDI (stems), or all summed into one file
+//! (`--merge`, through `crate::mix`).
+//!
+//! **Merged, the tracks render raw** -- no limiter, no clamp -- and the mix is
+//! limited and encoded once, by the output stage a normal render uses, so
+//! `--volume` and the limiter apply to the merged result as the user decided.
+//! `--volume` needs nothing more: it is a gain on every voice, ahead of the
+//! limiter, so scaling each track is scaling their sum.
+//!
+//! **One batch, many lanes, several threads.** On the GPU every stem is a lane
+//! of one `gpu::GpuBatch`: one scan, one `Arc<Bank>`, one device and sample
+//! pool, and each lane a region of the batch's buffers holding one render's
+//! voices and tables. A batch is one submission carrying a block from every
+//! lane that has one, so a thin stem -- which costs the device about 3 ms a
+//! block however few voices it has, because one workgroup walks 4,096 frames
+//! in sequence -- shares that 3 ms with every other lane in the batch. A lane
+//! whose stem ends is `reset` and takes the next. Between batches, the host
+//! work of every lane is spread over `--track-jobs` threads.
+//!
+//! Nothing a stem renders depends on which lane took it, what that lane
+//! rendered before, which other lanes were in its batches, or which thread
+//! ran it, so every stem is the bytes `--track` writes for that track at any
+//! thread count; only the order they finish in changes. The CPU backend runs
+//! `--track-jobs` stems at once, one reference synth each.
+//!
+//! **The voice limit is a total**, split evenly between the stems that will be
+//! written, by the user's decision of 2026-09-22.
+
+[2] src/stems.rs:57
+/// Video memory left spare when deciding how many jobs fit, for the desktop
+/// and for anything else that allocates while the render runs.
+
+[3] src/stems.rs:73
+    /// The blocks its notes span, both ends counted: from the one its first
+    /// note-on lands in to the one its last note event does. What progress is
+    /// measured in; see `TrackProgress::span_blocks`.
+
+[4] src/stems.rs:97
+/// A job's renderer. A GPU job keeps one batch of lanes for every stem it
+/// takes, starting a stem in whichever lane comes free; a CPU job builds a
+/// fresh reference synth per stem, which costs next to nothing.
+
+[5] src/stems.rs:105
+/// What the thread `run` was called on reads to report progress: counters
+/// every track adds to block by block, and a slot per lane or job saying which
+/// track is in it.
+
+[6] src/stems.rs:116
+    /// The loudest track's peak, as f32 bits: magnitudes are never negative,
+    /// so their bits order as their values do and `fetch_max` works on them.
+
+[7] src/stems.rs:120
+    /// Per lane or job: one more than the rank of the track in it, 0 when
+    /// empty, and how many blocks that track has rendered.
+
+[8] src/stems.rs:125
+/// What a track has already added to `Progress`, so each block adds only
+/// what is new.
+
+[9] src/stems.rs:159
+    /// The block `driver` just finished for `stem`, `stolen` being its track's
+    /// count.
+
+[10] src/stems.rs:201
+    /// The next stem to start, busiest first, with its rank in that order,
+    /// or none when every stem has been taken or the render has been stopped.
+
+[11] src/stems.rs:297
+/// A GPU job: stems in every lane of `batch`, and a new stem into whichever
+/// lane comes free. Each lane's driver takes the three steps
+/// `Driver::next_block` takes -- submit, prepare the next block, finish --
+/// with the batch going up between the first two and coming back before the
+/// third.
+///
+/// **The lanes do not move in step.** Every round, each lane is run on the
+/// host through the blocks it has that are silent -- which need no device --
+/// until it holds one that sounds, and only then does the batch go up. In step,
+/// a batch carried only the lanes that happened to sound on the same round:
+/// 3.1 of 16 on average on one real file (7,694 sounding blocks in 2,457
+/// batches), so it paid the device's per-batch floor for a fifth of what it
+/// could carry. A lane's blocks are the same blocks in the same order either
+/// way; only how they interleave with other lanes' changes.
+///
+/// **That host work runs on `threads` threads.** Between one batch coming back
+/// and the next going up, every lane finishes the block it was given, runs
+/// through its silent blocks and stages its next sounding one, and the device
+/// waits for all of it: on one thread that was 4.4 s of a 10.4 s render of 137
+/// stems (2026-09-23). The lanes share nothing there but the stem queue and
+/// the params slots, so workers take them in whatever order they come free.
+/// Which thread ran a lane's blocks changes nothing in them.
+
+[12] src/stems.rs:322
+    // Under --profile: host (finishing, silent blocks, starting stems and
+    // staging, over every thread), flush, prepare, device wait; and counts.
+
+[13] src/stems.rs:345
+            // Reading every lane's next block -- its events, and the
+            // candidates they offer -- while the batch is on the device, on
+            // the same threads. On one thread it held the largest file tested
+            // to a batch a minute with the device idle: the busiest tracks'
+            // blocks carry about 660,000 note-ons each, and 256 of them were
+            // read one after another (2026-09-23).
+
+[14] src/stems.rs:382
+/// `f` on every item, on up to `threads` threads, each taking the next item
+/// as it comes free. The first error stops them and is returned. Which thread
+/// ran an item changes nothing in it: each item is one lane's own state.
+
+[15] src/stems.rs:413
+/// One lane's host work for a round: finish the block the last batch rendered
+/// for it, if it has one, then run on through silent blocks -- starting the
+/// next stem whenever one ends -- until it holds a block for the device or
+/// there are no stems left.
+
+[16] src/stems.rs:418
+    // Every lane still holding a stem after a round handed the batch a block,
+    // and the batch has been and come back since.
+
+[17] src/stems.rs:434
+        // Silent: nothing for the device. Finish it here and go on to this
+        // lane's next block, or its next stem.
+
+[18] src/stems.rs:446
+/// Finish the block the lane has in flight, write it, and end the stem if that
+/// was its last block or the render has been stopped.
+
+[19] src/stems.rs:463
+/// Where a finished block goes: the stem's own file, or the mix at the block's
+/// place in the render.
+
+[20] src/stems.rs:491
+    // The scan comes before the soundfont, so a --tracks that names nothing
+    // renderable costs a scan rather than a pool build.
+
+[21] src/stems.rs:523
+    // Decided from the scan's counts, before anything renders: a track
+    // --min-velocity would empty gets no file and no share of the voices.
+
+[22] src/stems.rs:570
+    // Where each track's notes start and end, in blocks: one pass over the
+    // tempo map for them all.
+
+[23] src/stems.rs:631
+            // Opened with one voice, so that a share too big for one binding
+            // is held down here with a warning rather than refused as if the
+            // user had asked for it directly.
+
+[24] src/stems.rs:637
+            // What one lane holds alone: half what a render alone does,
+            // because a batch keeps both halves of a lane's pool in one buffer.
+
+[25] src/stems.rs:650
+            // One job, holding as many stems at once as it can, with the
+            // host's share of them spread over the threads --track-jobs asks
+            // for. Every job is another stream of submissions the one queue
+            // runs after the others' (wgpu chains them), so a second job does
+            // not render beside the first, it takes turns with it, and pays
+            // the per-batch floor again for stems one batch could have
+            // carried. Measured 2026-09-23 on 137 stems: three jobs of 46
+            // 7.7 s, two of 64 6.9 s, one of 137 on one thread 8.9 to 10.4 s
+            // with its host work 4 s of that.
+
+[26] src/stems.rs:676
+            // And no more than share one binding: every lane's pool is a
+            // region of one voice buffer. Fewer at once, rather than refused,
+            // because a render past the guided renderer's device max -- or one
+            // whose --min-velocity left fewer tracks to share the total --
+            // still renders, only with fewer tracks on the device at a time.
+
+[27] src/stems.rs:730
+    // Merged, every track renders raw and the mix goes through the output
+    // stage `cfg` describes, once. See the module comment.
+
+[28] src/stems.rs:752
+    // Busiest first, so the long renders start at once and the short ones
+    // fill in around them; ties by track.
+
+[29] src/stems.rs:776
+    // What `Progress::span` reaches once every track is done: each span, as
+    // far as the render runs.
+
+[30] src/stems.rs:867
+        // The observer is not shared with the jobs; it stays on this thread,
+        // which watches for a cancel and reports until they are done.
+
+[31] src/stems.rs:902
+        // A mix missing tracks is not the file that was asked for, so a
+        // stopped merge writes nothing rather than something that looks done.
+
+[32] src/stems.rs:989
+    // The loop `session::run` runs, less what only one render at a time can
+    // report: the same blocks through the same sink, so a stem is the bytes
+    // `--track` writes for that track.
+
+[33] src/stems.rs:1027
+/// Say how much the stems will take and refuse to start a WAV render that
+/// cannot fit. Every stem runs to the end of the whole file, so a WAV stem's
+/// size is known to within its release tail; the other formats are estimated
+/// from their presets' rates and only warned about. One real file of
+/// thousands of tracks comes to about 344 GB as 16-bit WAV stems.

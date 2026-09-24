@@ -14,13 +14,16 @@ pub mod fixed;
 pub mod gpu;
 pub mod limiter;
 pub mod midi;
+pub(crate) mod mix;
 pub mod phase;
 pub mod porta;
 pub mod resample;
 pub mod session;
 pub mod sf2;
 pub mod sfz;
+pub(crate) mod stems;
 pub mod testkit;
+pub mod tracks;
 pub mod voice;
 pub mod wav;
 

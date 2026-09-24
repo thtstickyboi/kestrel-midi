@@ -48,36 +48,38 @@
 //! field is 4% of the pool's compaction bandwidth, and which files use
 //! portamento is not known until the stream reaches a CC65. The remaining
 //! length rides in the top 29 bits of the voice's flags, and the speed and
-//! direction in the top byte of its gate slot. See `spawn`.
+//! direction in the top byte of its note-id high word, which a 48-bit id
+//! leaves free. See `spawn`. They lived in the top of the gate slot word until
+//! MIDI ports needed its bits.
 //!
 //! The pitch factor is exact integer arithmetic out of a shared table, as the
 //! modulation envelope's is, and for the same reason: a glide's offset persists
 //! long enough that an `exp2` the two backends compute differently integrates
 //! into the phase.
 
-[2] src/porta.rs:55
+[2] src/porta.rs:57
 /// Speed of a glide, in semitones a second, for each value of CC5. BASSMIDI's,
 /// fitted one value at a time over 24, 12 or 4 semitones. Values below about 15
 /// sit within 1% of the truth: BASSMIDI's 4 ms steps are a large share of a
 /// glide that fast. The rest agree across keys and intervals to 0.1%.
 
-[3] src/porta.rs:92
+[3] src/porta.rs:94
 /// Widest glide from above: just under eight octaves is what an 8.24 factor
 /// holds. A note gliding down from further away than that starts from 95
 /// semitones above. From below, all 127 fit.
 
-[4] src/porta.rs:99
+[4] src/porta.rs:101
 /// Where the remaining glide starts in the flags word: frames until the glide
 /// lands, counted from the first frame of the current block. Zero when the
 /// voice is not gliding, so `flags > FLAG_BITS` is "gliding".
 
-[5] src/porta.rs:104
-/// The part of a gate slot word that is the slot. Bits 11-23 are the voice's
-/// position on the envelope grid, `voice::GRID_SHIFT`.
+[5] src/porta.rs:106
+/// Where CC5 sits in a voice's note-id high word, seven bits of it. The low
+/// sixteen bits are the id's, `voice::NOTE_HI_MASK`.
 
 [6] src/porta.rs:109
-/// Set in a gate slot word when the note glides down onto its own pitch, from
-/// above.
+/// Set in a voice's note-id high word when the note glides down onto its own
+/// pitch, from above.
 
 [7] src/porta.rs:113
 /// The exponent is evaluated as `2^(m / OCTAVE - MID_OCTAVES)`, with `m` kept
@@ -101,8 +103,8 @@
 
 [11] src/porta.rs:167
     /// The glide a voice starts with, as the bits to OR into its flags and its
-    /// gate slot. `semitones` is the key it glides from less its own key, and
-    /// `start_rel` the frame in the block it starts on.
+    /// note-id high word. `semitones` is the key it glides from less its own
+    /// key, and `start_rel` the frame in the block it starts on.
     ///
     /// The remaining length is stored from the top of the block rather than
     /// from the voice's start, so it counts down by a whole block at a time and
@@ -110,26 +112,27 @@
 
 [12] src/porta.rs:185
 /// The 8.24 pitch factor a gliding voice holds for the gate tile evaluated at
-/// frame `f` of the block. Exactly one once the glide has landed.
+/// frame `f` of the block. Exactly one once the glide has landed. `word` is the
+/// voice's note-id high word, whose top byte is the glide's.
 ///
 /// Mirrored by `glide_factor` in `render.wgsl`, operation for operation.
 
-[13] src/porta.rs:206
+[13] src/porta.rs:207
 /// The flags word after a block: the glide a block shorter, or gone once it
 /// has landed. Mirrored at the end of `render.wgsl`.
 
-[14] src/porta.rs:248
+[14] src/porta.rs:249
             // At the voice's first frame the offset is the interval less the
             // lead's worth of travel.
 
-[15] src/porta.rs:253
+[15] src/porta.rs:254
             // A glide lasts a whole number of frames, so it can start up to one
             // frame's travel short, plus the table's sixteenth of a cent.
 
-[16] src/porta.rs:276
+[16] src/porta.rs:277
         // The factor at frame f of the next block is the factor at frame
         // f + 4096 of this one.
 
-[17] src/porta.rs:307
+[17] src/porta.rs:308
                 // Ten octaves down an 8.24 factor is a few thousand counts, and
                 // one of them is a sixth of a cent.

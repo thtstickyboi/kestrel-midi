@@ -132,14 +132,15 @@
 // portamento
 // ---------------------------------------------------------------------------
 // A glide lives in two words the voice already has: the remaining length in
-// the top of its flags, the speed and direction in the top byte of its gate
-// slot. The factor comes out of exact integer arithmetic and a shared table,
-// for the reason the modulation envelope's does. Mirrors `porta.rs` operation
-// for operation; the layout and the constants are defined there.
+// the top of its flags, the speed and direction in the top byte of its note-id
+// high word. The factor comes out of exact integer arithmetic and a shared
+// table, for the reason the modulation envelope's does. Mirrors `porta.rs`
+// operation for operation; the layout and the constants are defined there.
 
-[19] shaders/render.wgsl:205
+[19] shaders/render.wgsl:204
 // The 8.24 factor a gliding voice holds for the gate tile evaluated at block
-// frame `f`. Exactly one once it has landed. Mirrors `porta::factor`.
+// frame `f`. Exactly one once it has landed. `word` is the voice's F_NOTE_HI.
+// Mirrors `porta::factor`.
 
 [20] shaders/render.wgsl:231
 // Lanes reduced per tile: TILE frames times two channels, interleaved so a
@@ -166,76 +167,84 @@
         // of a term in the hot path.
 
 [24] shaders/render.wgsl:309
+// `shaders/phase.wgsl` in analytic pipelines, nothing otherwise, so a baseline
+// pipeline compiles the same code it did before analytic phase existed.
+
+[25] shaders/render.wgsl:313
 // Sum sh[] across the workgroup, M lanes at a time, and add the totals into
 // this workgroup's partial slice. Two levels, so the barrier count per tile is
 // three rather than log2(WG). The strided read in level one keeps a warp
 // spread across shared-memory banks instead of piling onto two of them.
 
-[25] shaders/render.wgsl:344
+[26] shaders/render.wgsl:348
     // Clear this workgroup's partial slice. Workgroups with no voices still
     // have to do this, or the reduce pass folds in the previous block's audio.
 
-[26] shaders/render.wgsl:371
+[27] shaders/render.wgsl:375
         // Per-frame increments that walk `gain_l`/`gain_r` to the value the
         // current gate tile asks for, instead of jumping to it. Zero whenever
         // the gain is not moving, which is the overwhelming majority of tiles.
 
-[27] shaders/render.wgsl:379
-        // The whole gate slot word, whose top byte is a glide's speed and
-        // direction. Only the glide path reads it.
+[28] shaders/render.wgsl:383
+        // The whole gate slot word: the slot, and the voice's envelope grid
+        // position above it. Only the grid reads the upper part.
 
-[28] shaders/render.wgsl:386
+[29] shaders/render.wgsl:386
+        // The voice's note-id high word, whose top byte is a glide's speed and
+        // direction. Loaded only by a build that carries the glide path.
+
+[30] shaders/render.wgsl:393
         // Frame this voice's note-off lands on, once the gate has placed it.
         // `NO_RELEASE` while nothing is due, so the per-frame test is a plain
         // compare with no companion flag.
 
-[29] shaders/render.wgsl:390
+[31] shaders/render.wgsl:397
         // What the release subtracts every frame, or zero for the region's
         // curve; set when it starts, at the top of every block and on a
         // variant change. See `release_fall`.
 
-[30] shaders/render.wgsl:396
+[32] shaders/render.wgsl:403
         // Live biquad coefficients, and the per-frame increments that walk
         // them to whatever the current variant asks for. Held apart from `p`
         // because `p` is the table's copy and these are this voice's, mid-ramp.
 
-[31] shaders/render.wgsl:407
+[33] shaders/render.wgsl:414
         // Crossfade between the bypassed and filtered paths, used only while
         // `use_filter` is toggling. Zero increment means "not in a transition",
         // and then the steady-state paths below run exactly as they did before
         // this existed -- which is what keeps every render that never toggles
         // bit-identical.
 
-[32] shaders/render.wgsl:416
+[34] shaders/render.wgsl:423
         // Non-zero only for a voice born in this block, and then it is the
         // variant current at its own note-on plus one.
 
-[33] shaders/render.wgsl:419
+[35] shaders/render.wgsl:426
         // Which row this voice takes its opening bend and gain from, relative
         // to the tile it is born in. See `SpawnCmd::row_bias`.
 
-[34] shaders/render.wgsl:425
+[36] shaders/render.wgsl:432
         // The step after bend but before the LFOs. Bend moves once per gate
         // tile and the LFOs move every reduce tile, so keeping the two apart
         // means the faster one does not have to redo the slower one's work.
 
-[35] shaders/render.wgsl:431
+[37] shaders/render.wgsl:438
         // Modulation envelope. `mp` is this voice's entry, `rel_age` the age
         // at which its note-off lands -- resolved once for the block, like
         // `release_frame`, because the level is then a pure function of the
         // age at every tile.
 
-[36] shaders/render.wgsl:439
+[38] shaders/render.wgsl:446
         // The pitch LFOs' 8.24 factor for the current gate tile, exactly one
         // for none. Only the modulation envelope reads it between gate tiles.
 
-[37] shaders/render.wgsl:449
+[39] shaders/render.wgsl:459
             // The pool holds the note's unbent step. When any channel is bent
             // the effective step is this scaled by the channel's factor,
             // refreshed once per gate tile below; when nothing is bent the two
             // are the same value and the multiply never happens.
 
-[38] shaders/render.wgsl:482
+[40] shaders/render.wgsl:496
             // Where this voice's note-off lands, resolved once for the whole
             // block from the exact frame the host recorded. A slot's note-offs
             // travel as runs of one frame with a cumulative count, and this
@@ -250,43 +259,44 @@
             // the voice's own first frame is a note that never sounds, and it
             // falls from there, before its attack has begun.
 
-[39] shaders/render.wgsl:499
+[41] shaders/render.wgsl:513
                     // Released before this block began, and still waiting for
                     // its grid point, which is at most a step away: the frame
                     // before this block may have been it, and then the fall
                     // starts on frame 0.
 
-[40] shaders/render.wgsl:547
+[42] shaders/render.wgsl:561
                     // The note-off frame is already known, so the age it lands
                     // at is too. Tiles before it still read the pre-release
                     // curve, because the level compares against this age.
 
-[41] shaders/render.wgsl:559
+[43] shaders/render.wgsl:573
         // Voices already carry their gate slot for the note-off lookup, and
-        // the channel is the top of it, so bend needs no extra pool field.
+        // the channel -- counted across every MIDI port -- is the top of it,
+        // so bend needs no extra pool field.
 
-[42] shaders/render.wgsl:562
+[44] shaders/render.wgsl:577
         // The gate tile this voice starts in. Only meaningful while
         // `born_variant` says the voice was born in this block; after that
         // `start_rel` has been cleared and every tile is one it was alive for.
 
-[43] shaders/render.wgsl:568
+[45] shaders/render.wgsl:583
             // Channel rows are still per gate tile: bend and the channel gains
             // are continuous quantities and a tile of latency on them is
             // inaudible. The note-off is not -- it is an event, and it now
             // carries its own frame, resolved once above.
 
-[44] shaders/render.wgsl:574
+[46] shaders/render.wgsl:589
                 // What the channel asks the gains to reach by the end of this
                 // gate tile, and whether it set them outright rather than
                 // ramping. The tremolo below multiplies into both.
 
-[45] shaders/render.wgsl:580
+[47] shaders/render.wgsl:595
                 // Releasing voices bend and fade too, so this is not folded
                 // into the gate check above. One channel's entry is four
                 // adjacent words, so both reads come off the same cache line.
 
-[46] shaders/render.wgsl:585
+[48] shaders/render.wgsl:600
                     // Bend and channel gain come from a row that carries the
                     // state at the *start* of its tile, which is right for a
                     // voice already sounding and wrong for one struck later in
@@ -297,7 +307,7 @@
                     // read `ci`: both already have exact mechanisms of their
                     // own.
 
-[47] shaders/render.wgsl:610
+[49] shaders/render.wgsl:625
                         // Tile 0 of a block, and the tile a voice is born in,
                         // are both set directly. Row 0 carries the state at
                         // the block *start*, which is the previous block's
@@ -307,12 +317,12 @@
                         // this must not do. `born_gate` is 0 for any voice not
                         // born in this block, so one test covers both.
 
-[48] shaders/render.wgsl:619
+[50] shaders/render.wgsl:634
                             // From wherever the ramp actually got to, not from
                             // the previous target, so fp drift cannot compound
                             // across tiles.
 
-[49] shaders/render.wgsl:632
+[51] shaders/render.wgsl:647
                     // CC120 silenced this channel at a known frame. Voices
                     // already sounding fade out from it over the same window a
                     // stolen voice uses; ones struck afterwards are untouched.
@@ -328,11 +338,11 @@
                     // The two loads are inside the branch because a file that
                     // never sends CC120 must not pay for them.
 
-[50] shaders/render.wgsl:649
+[52] shaders/render.wgsl:664
                             // `u.capacity` rather than the `c` the load block
                             // uses: that one is scoped to the load block.
 
-[51] shaders/render.wgsl:661
+[53] shaders/render.wgsl:676
                     // CC71-CC75 change things that live in RegionParams, so
                     // the voice re-reads its constants from a different copy
                     // of the table. Only when the copy actually changes: an
@@ -349,50 +359,50 @@
                     // and out of the stability region, which is a filter that
                     // blows up to NaN rather than one that sounds wrong.
 
-[52] shaders/render.wgsl:683
+[54] shaders/render.wgsl:698
                     // A row holds the state at the start of its tile, which is
                     // older than a voice born inside that tile: the voice
                     // already carries the variant that was current at its own
                     // frame. So rows govern it only from the tile after the one
                     // it was born in.
 
-[53] shaders/render.wgsl:694
+[55] shaders/render.wgsl:709
                         // CC72 moves the release, and can make it short
                         // mid-fall; then it reaches silence at the end of the
                         // step it is in. The gate slot word is read again
                         // rather than held through the loop for this.
 
-[54] shaders/render.wgsl:702
+[56] shaders/render.wgsl:717
                         // CC71 and CC74 move the cutoff and resonance the
                         // modulation envelope modulates *around*, so its entry
                         // comes from the new variant too.
 
-[55] shaders/render.wgsl:713
+[57] shaders/render.wgsl:728
                         // Three cases. Filter engaged on both sides: ramp the
                         // coefficients, as before. Filter toggling: there is no
                         // coefficient path between "biquad" and "bypassed", so
                         // crossfade the two outputs instead. Neither: snap.
 
-[56] shaders/render.wgsl:726
+[58] shaders/render.wgsl:741
                                 // Coming on. The state is whatever was left the
                                 // last time the filter ran, which may be from
                                 // long ago and is not history for this signal;
                                 // starting from rest and fading in is honest
                                 // where reusing it would ring.
 
-[57] shaders/render.wgsl:740
+[59] shaders/render.wgsl:755
                                 // Going off. Keep the coefficients and the
                                 // state that produced the current output and
                                 // fade that output out; there is nothing to
                                 // ramp them towards.
 
-[58] shaders/render.wgsl:764
+[60] shaders/render.wgsl:779
                 // Portamento, once per gate tile like bend and on top of it.
                 // From the unglided step every time -- the bent one when bend
                 // refreshed it just above, the note's own otherwise -- so the
                 // factor never compounds. Mirrors `cpu.rs`.
 
-[59] shaders/render.wgsl:782
+[61] shaders/render.wgsl:797
                 // LFOs, once per gate tile -- 1,500 Hz at the defaults, against
                 // oscillators that run at a few hertz -- and the same work for
                 // every voice.
@@ -413,32 +423,32 @@
                 // delay computes exactly one for both and comes out bit for bit
                 // untouched.
 
-[60] shaders/render.wgsl:802
+[62] shaders/render.wgsl:817
                     // Re-read rather than taken from `p`, which measured 1.3 s
                     // slower in an earlier arrangement of this block.
 
-[61] shaders/render.wgsl:807
+[63] shaders/render.wgsl:822
                     // Exact where the channel set the gains outright, from
                     // wherever the walk got to otherwise, and linear to the
                     // exact value at the next gate tile either way.
 
-[62] shaders/render.wgsl:825
+[64] shaders/render.wgsl:840
                     // Held for the gate tile, as bend is: 8.24, the same
                     // fixed-point factor bend uses. Exactly one whenever
                     // neither LFO is under way, which the scale passes through
                     // unchanged.
 
-[63] shaders/render.wgsl:838
+[65] shaders/render.wgsl:853
             // The modulation envelope, once per reduce tile rather than per
             // frame: a 12 kHz control rate at the defaults.
 
-[64] shaders/render.wgsl:841
+[66] shaders/render.wgsl:856
                 // Age at the top of this tile, counted from the note's own
                 // start. Derived from the block frame rather than accumulated,
                 // so it cannot drift from the CPU reference over frames either
                 // side skips.
 
-[65] shaders/render.wgsl:849
+[67] shaders/render.wgsl:864
                     // Not summed into `cents`: that path ends in an `exp2` the
                     // two backends do not compute alike, and this is the one
                     // modulator whose offset persists long enough for the
@@ -446,7 +456,7 @@
                     // factor from the shared table instead, applied as a second
                     // exact scaling below.
 
-[66] shaders/render.wgsl:860
+[68] shaders/render.wgsl:875
                         // Rebuilt rather than ramped: the envelope moves the
                         // cutoff every tile, so there is nothing to ramp
                         // towards. The ramp increments are cleared for the same
@@ -455,11 +465,11 @@
                         // region, which is a filter that blows up rather than
                         // one that sounds wrong.
 
-[67] shaders/render.wgsl:879
+[69] shaders/render.wgsl:894
                 // From the bent step and the LFO factor, which move only on
                 // gate tiles, because this scaling moves every reduce tile.
 
-[68] shaders/render.wgsl:902
+[70] shaders/render.wgsl:917
                     // The note-off takes effect on its own frame on the grid,
                     // not at the top of the tile that discovered it. Ahead of
                     // `looping`, because a `loop_sustain` region stops looping
@@ -472,18 +482,18 @@
                     // note is at full level on frame 192, which is the frame
                     // the one file that found this puts its only sample on.
 
-[69] shaders/render.wgsl:928
+[71] shaders/render.wgsl:943
                         // Envelope first, so an instant attack is at full
                         // level on the voice's very first frame.
 
-[70] shaders/render.wgsl:974
+[72] shaders/render.wgsl:986
                         // `FILTER_RAMP` is a compile-time constant, so with
                         // the flag off this whole arm is dead code and the
                         // steady path below is the only thing that survives.
                         // That makes `--no-filter-ramp` a true revert in cost
                         // as well as in output.
 
-[71] shaders/render.wgsl:980
+[73] shaders/render.wgsl:992
                             // Mid-toggle: run the biquad and crossfade its
                             // output against the dry path. Kept in its own
                             // branch so the steady-state case below is the
@@ -491,32 +501,32 @@
                             // not bitwise `fy`, and folding the two together
                             // would move every filtered sample in every render.
 
-[72] shaders/render.wgsl:990
+[74] shaders/render.wgsl:1002
                             // Advanced here rather than beside the coefficient
                             // ramp below, because this is the only place the
                             // value is ever read. A transition is a handful of
                             // tiles in a whole render; the steady path should
                             // not pay an add per frame for it.
 
-[73] shaders/render.wgsl:1002
+[75] shaders/render.wgsl:1014
                         // A stolen voice fades to silence over STEAL_FADE
                         // frames from its own stop frame, rather than every
                         // victim being cut together at the top of the block.
                         // After the filter, so the biquad keeps seeing the
                         // untapered signal and does not ring on the taper.
 
-[74] shaders/render.wgsl:1021
+[76] shaders/render.wgsl:1033
                             // One subtraction covers any step shorter than the
                             // loop; the modulo is only there for extreme
                             // pitches, and gives the same answer either way.
 
-[75] shaders/render.wgsl:1034
+[77] shaders/render.wgsl:1046
                 // After the write, so the first frame of a tile still uses the
                 // gain the tile started from and the last frame lands on the
                 // target. Unconditional: the increments are zero unless a ramp
                 // is in flight, and a branch here would cost more than the add.
 
-[76] shaders/render.wgsl:1046
+[78] shaders/render.wgsl:1058
             // Two barriers per tile, not three. The barrier inside the reduce
             // already separates level one's reads of `sh` from the next tile's
             // writes to it, and the barrier at the top of the next tile
