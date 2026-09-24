@@ -35,13 +35,13 @@ Ready-made builds are attached to each [release](https://github.com/thtstickyboi
 |---|---|---|
 | `kestrel-<version>-windows-x64.zip` | Windows 10/11, 64-bit | Tested |
 | `kestrel-<version>-macos-universal.dmg` | macOS 11 or newer, Apple silicon and Intel | Built, **never run** |
-| `kestrel-<version>-linux-x64.tar.gz` | 64-bit Linux with glibc 2.35 or newer (Ubuntu 22.04+) | Built, **never run** |
+| `kestrel-<version>-linux-x64.tar.gz` | 64-bit Linux with glibc 2.35 or newer (Ubuntu 22.04+) | Tested |
 
 - **Windows:** unzip, double-click `kestrel.exe`. The executable is not code-signed, so SmartScreen may warn about it: **More info -> Run anyway**.
 - **macOS:** open the dmg and copy `kestrel` out of it. It is not signed or notarised, so macOS refuses it the first time: go to **System Settings -> Privacy & Security** and press **Open Anyway**, or run `xattr -dr com.apple.quarantine kestrel` in Terminal.
 - **Linux:** `tar xzf` the archive and run `./kestrel` from a terminal. It needs a Vulkan driver, and the file pickers go through the desktop portal (`xdg-desktop-portal`).
 
-The macOS and Linux builds are compiled by GitHub Actions and nobody has run them. If you are first on one, please open an issue either way. `SHA256SUMS.txt` beside the downloads holds each file's checksum.
+The macOS build is compiled by GitHub Actions and nobody has run it yet. If you are first, please open an issue either way. `SHA256SUMS.txt` beside the downloads holds each file's checksum.
 
 **Building from source** needs Rust 1.88 or newer from [rustup.rs](https://rustup.rs):
 
@@ -58,10 +58,10 @@ Build in **release mode**; the debug build is unusable for real files. That is t
 |---|---|
 | **GPU** | Anything with a working Vulkan, DX12 or Metal driver |
 | **VRAM** | Depends on the soundfont and `--max-voices`. Tuned against 8 GB |
-| **OS** | Windows, Linux, macOS. Only Windows has been *run* |
+| **OS** | Windows, Linux, macOS. macOS has not been *run* yet |
 | **ffmpeg** | Only for output other than WAV |
 
-Tested on NVIDIA and Intel GPUs on Windows. Integrated GPUs are slower but usable, and Kestrel prefers a discrete GPU when both are present. `--backend cpu` renders on the CPU reference instead, far slower, if you have no usable GPU.
+Tested on NVIDIA and Intel GPUs on Windows, and on Linux. Integrated GPUs are slower but usable, and Kestrel prefers a discrete GPU when both are present. `--backend cpu` renders on the CPU reference instead, far slower, if you have no usable GPU.
 
 **Memory.** VRAM is usually the limit: the voice pool (250 MiB at the default 1,048,576 voices) plus your soundfont's samples. The most voices your card holds is printed by `kestrel --force-cli gpu-info` and on the guided renderer's first screen: 16,519,104 on an RTX 5060. If a soundfont will not fit in `--pool-budget` (2 GB), it is downsampled until it does. Kestrel checks every limit before allocating and names the flag to lower rather than failing mid-render. The details are in DESIGN.md.
 
