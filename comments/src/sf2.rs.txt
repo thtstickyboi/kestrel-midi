@@ -56,17 +56,17 @@
                 // Preset generators offset the instrument's, except for the
                 // ones the spec reserves to instrument level.
 
-[7] src/sf2.rs:590
+[7] src/sf2.rs:589
         // SF2 has neither random selection nor velocity crossfade; these are
         // the wide-open values, which is what the SFZ defaults mean too.
 
-[8] src/sf2.rs:609
+[8] src/sf2.rs:608
         // Converted to the centibels the rest of the engine works in, which
         // are the spec's 0.1 dB ones: 0.04 dB per unit is 0.4 centibels.
         // LFOs. Frequencies are absolute cents, where zero is 8.176 Hz; delays
         // are timecents, where the -12000 default is instant.
 
-[9] src/sf2.rs:617
+[9] src/sf2.rs:616
         // Modulation envelope. Times are timecents like the volume envelope's,
         // but `sustainModEnv` is not `sustainVolEnv`: it is quoted in units of
         // 0.1% *below* full scale rather than in centibels of attenuation, so
@@ -75,20 +75,20 @@
         // a calibration sweep, case 2, settles at exactly half the
         // excursion for `sustainModEnv = 500`.
 
-[10] src/sf2.rs:637
+[10] src/sf2.rs:636
         // SF2 has no `amp_veltrack`; its velocity-to-attenuation
         // modulator is exactly the full-tracking case.
 
-[11] src/sf2.rs:671
+[11] src/sf2.rs:670
 /// Frames of silence between pool entries so the interpolator can read past
 /// the end of a sample without touching its neighbour.
 
-[12] src/sf2.rs:683
+[12] src/sf2.rs:682
     // Decide the pool rate. Start at the output rate and halve it until the
     // estimated pool fits the budget. Degrade the pool rather than fail the
     // load: a downsampled render beats no render.
 
-[13] src/sf2.rs:750
+[13] src/sf2.rs:749
         // Recorded for completeness; SF2 never infers looping from the points.
         // Generator 54 (`sampleModes`) says so outright, which is why the SF2
         // path never had the SFZ path's whole-sample-fallback bug.

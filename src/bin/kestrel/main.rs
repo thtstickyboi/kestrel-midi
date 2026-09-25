@@ -336,11 +336,11 @@ struct RenderArgs {
     /// else.
     #[arg(long, default_value = "float32", value_parser = ["float32", "pcm16"])]
     format: String,
-    /// Volume as a percentage, from 0 to 200: 100 leaves the mix as it is, 50
-    /// is half, 200 is twice, 0 is silent. Applied to every voice, before the
-    /// limiter. A dense mix sits far above full scale and the limiter holds it
-    /// at the ceiling, so lowering this eases the limiting more than it quietens
-    /// the file; --ceiling-db sets how loud the file can get.
+    /// Volume of the finished file as a percentage, from 0 to 200: 100 leaves
+    /// it as it is, 50 is half (6 dB down, dense passages included), 0 is
+    /// silent. Up to 100 it applies after the limiter. Above 100 the extra goes
+    /// in ahead of the limiter, which still holds the file at the ceiling, so
+    /// it makes the mix denser rather than louder.
     #[arg(
         long,
         value_name = "PERCENT",
@@ -349,6 +349,11 @@ struct RenderArgs {
         allow_negative_numbers = true
     )]
     volume: f32,
+    /// High-pass the mix at 15 Hz ahead of the limiter. A very high voice count
+    /// builds up a DC offset and a slow sub-audio swell that nobody hears but
+    /// the limiter still spends its headroom on; this takes them out.
+    #[arg(long = "dc-blocker")]
+    dc_blocker: bool,
     /// Which limiter: brickwall (lookahead true-peak, the default), off, or
     /// omni (the OmniConverter port, deprecated for rendering).
     #[arg(long, default_value = "brickwall", value_parser = ["brickwall", "omni", "off"])]
@@ -452,6 +457,9 @@ struct DevArgs {
     /// Brickwall lookahead in ms. Also the render latency.
     #[arg(long = "lookahead-ms", default_value_t = 2.0)]
     lookahead_ms: f64,
+    /// The --dc-blocker corner in Hz, a second-order Butterworth high-pass.
+    #[arg(long = "dc-blocker-hz", default_value_t = 15.0)]
+    dc_blocker_hz: f64,
     /// Brickwall release in ms.
     #[arg(long = "limiter-release-ms", default_value_t = 60.0)]
     limiter_release_ms: f64,
@@ -592,6 +600,8 @@ impl RenderArgs {
             min_velocity: self.min_velocity,
             note_grid: self.note_grid,
             master_volume: self.volume / 100.0,
+            dc_blocker: self.dc_blocker,
+            dc_blocker_hz: dev.dc_blocker_hz,
             limiter: !dev.no_limiter,
             // `None` here means "not chosen yet". `render` fills it in from
             // the output container, which `to_config` cannot see.
@@ -1470,6 +1480,9 @@ mod tests {
         assert_eq!(typed.max_render_workgroups, d.render_workgroups);
         assert_eq!(typed.limiter_release_ms, d.limiter_release_ms);
         assert_eq!(typed.limiter_lookahead_ms, d.lookahead_ms);
+        assert_eq!(typed.dc_blocker_hz, d.dc_blocker_hz);
+        assert_eq!(typed.dc_blocker_hz, kestrel::config::Config::default().dc_blocker_hz);
+        assert!(!typed.dc_blocker, "the DC blocker is opt-in");
         assert!(typed.lfo_enabled && typed.mod_env_enabled && typed.sort_voices);
         assert!(typed.filter_enabled && typed.gain_ramp && typed.filter_ramp);
         assert!(typed.limiter && typed.limiter_true_peak && !typed.unchecked_shaders);

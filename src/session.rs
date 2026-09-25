@@ -792,8 +792,8 @@ pub fn run(
         log::info!(
             target: TARGET,
             "final clamp is off: the limiter is off and the format is float32, so the file \
-             holds the raw mix and may exceed +/-1.0. Peak was {:.3}.",
-            driver.stats.peak
+             holds the raw mix and may exceed +/-1.0. Its peak is {:.3}.",
+            driver.output_peak()
         );
     }
     if driver.stats.clipped > 0 {

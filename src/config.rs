@@ -182,56 +182,60 @@ pub struct Config {
     pub env_floor: f32,
     /// Enable the per-voice low-pass filter. SoundFonts that leave the cutoff \[31\]
     pub filter_enabled: bool,
-    /// Linear gain applied to the final mix before limiting.
+    /// `--volume` as a factor: 1 leaves the output as it is. \[32\]
     pub master_volume: f32,
-    /// How many copies of the params table the sound controllers CC71-CC75 may \[32\]
+    /// High-pass the mix ahead of the limiter, removing the sub-audio \[33\]
+    pub dc_blocker: bool,
+    /// The DC blocker's corner, in Hz: a second-order Butterworth high-pass.
+    pub dc_blocker_hz: f64,
+    /// How many copies of the params table the sound controllers CC71-CC75 may \[34\]
     pub max_param_variants: u32,
     /// Apply the soft limiter to the mixed output.
     pub limiter: bool,
-    /// Which limiter runs. `Brickwall` is the default: a lookahead true-peak \[33\]
+    /// Which limiter runs. `Brickwall` is the default: a lookahead true-peak \[35\]
     pub limiter_mode: LimiterMode,
     /// Brickwall ceiling in dBFS. 0.0 is flat full scale.
     pub limiter_ceiling_db: f64,
     /// Brickwall lookahead in milliseconds. This is also the render latency.
     pub limiter_lookahead_ms: f64,
-    /// Brickwall release in milliseconds. Short keeps the material after a \[34\]
+    /// Brickwall release in milliseconds. Short keeps the material after a \[36\]
     pub limiter_release_ms: f64,
-    /// Time constant of the brickwall's sustained stage, in milliseconds. \[35\]
+    /// Time constant of the brickwall's sustained stage, in milliseconds. \[37\]
     pub limiter_sustain_ms: f64,
-    /// Detect inter-sample peaks by 4x oversampling rather than looking at the \[36\]
+    /// Detect inter-sample peaks by 4x oversampling rather than looking at the \[38\]
     pub limiter_true_peak: bool,
     /// Limiter attack/release in seconds.
     pub limiter_attack: f32,
     pub limiter_release: f32,
 
-    // [37]
+    // [39]
     pub resample_pool: bool,
-    /// Soft ceiling on sample-pool bytes on the device. When the pool does not \[38\]
+    /// Soft ceiling on sample-pool bytes on the device. When the pool does not \[40\]
     pub sample_pool_budget: u64,
 
-    // [39]
+    // [41]
     pub clamp_output: bool,
 
-    /// Ramp channel gain across a gate tile instead of stepping it. \[40\]
+    /// Ramp channel gain across a gate tile instead of stepping it. \[42\]
     pub gain_ramp: bool,
 
-    /// Ramp biquad coefficients across a gate tile instead of switching them. \[41\]
+    /// Ramp biquad coefficients across a gate tile instead of switching them. \[43\]
     pub filter_ramp: bool,
 
-    /// Evaluate SF2 vibrato and tremolo LFOs. \[42\]
+    /// Evaluate SF2 vibrato and tremolo LFOs. \[44\]
     pub lfo_enabled: bool,
 
-    /// Evaluate the SF2 modulation envelope and its pitch and filter \[43\]
+    /// Evaluate the SF2 modulation envelope and its pitch and filter \[45\]
     pub mod_env_enabled: bool,
 
-    /// Use Kahan compensation for the per-thread partial sums in the reduce \[44\]
+    /// Use Kahan compensation for the per-thread partial sums in the reduce \[46\]
     pub kahan_reduce: bool,
     /// Check every output block for NaN/Inf. Always on in debug builds.
     pub nan_guard: bool,
-    /// Compile the shaders without naga's automatic bounds clamps and loop \[45\]
+    /// Compile the shaders without naga's automatic bounds clamps and loop \[47\]
     pub unchecked_shaders: bool,
 
-    // [46]
+    // [48]
     pub profile: bool,
     /// Force a specific wgpu backend, e.g. "vulkan" or "dx12".
     pub gpu_backend: Option<String>,
@@ -247,11 +251,11 @@ impl Default for Config {
             channels: 2,
 
             block_frames: 4096,
-            // [47]
+            // [49]
             reduce_tile: 4,
             gate_frames: 32,
             workgroup_size: 256,
-            // [48]
+            // [50]
             max_render_workgroups: 2048,
             max_pool_workgroups: u32::MAX,
 
@@ -274,6 +278,9 @@ impl Default for Config {
             env_floor: 1.0e-5, // -100 dB
             filter_enabled: true,
             master_volume: 1.0,
+            dc_blocker: false,
+            // [51]
+            dc_blocker_hz: 15.0,
             max_param_variants: 32,
             limiter: true,
             limiter_mode: LimiterMode::Brickwall,
@@ -286,7 +293,7 @@ impl Default for Config {
             limiter_release: 0.1,
 
             resample_pool: true,
-            // [49]
+            // [52]
             sample_pool_budget: 2 << 30,
 
             clamp_output: true,
@@ -346,7 +353,7 @@ impl Config {
                 self.block_frames
             );
         }
-        // [50]
+        // [53]
         let shared_bytes = self.workgroup_size as u64 * (self.reduce_tile as u64 * 2 + 1) * 4;
         if shared_bytes > 49152 {
             bail!(
@@ -357,7 +364,7 @@ impl Config {
                 shared_bytes
             );
         }
-        // [51]
+        // [54]
         if self.workgroup_size < self.reduce_tile * 2 {
             bail!(
                 "workgroup_size {} must be at least twice reduce_tile {}",
@@ -370,6 +377,13 @@ impl Config {
                 "limiter_ceiling_db {} must be in -24..=0",
                 self.limiter_ceiling_db
             );
+        }
+        if !(0.0..=2.0).contains(&self.master_volume) {
+            bail!("master_volume {} must be in 0..=2", self.master_volume);
+        }
+        // [55]
+        if !(1.0..=200.0).contains(&self.dc_blocker_hz) || self.dc_blocker_hz >= self.sample_rate as f64 / 10.0 {
+            bail!("dc_blocker_hz {} must be in 1..=200 and under a tenth of the rate", self.dc_blocker_hz);
         }
         if !(0.05..=100.0).contains(&self.limiter_lookahead_ms) {
             bail!(
@@ -405,7 +419,7 @@ impl Config {
                 self.max_steal_percent
             );
         }
-        // [52]
+        // [56]
         if self.max_layers > 255 {
             bail!("max_layers {} must be at most 255", self.max_layers);
         }
@@ -423,22 +437,22 @@ impl Config {
         10f64.powf(self.limiter_ceiling_db / 20.0)
     }
 
-    /// Frames in which a steal may be scheduled. The fade has to finish inside \[53\]
+    /// Frames in which a steal may be scheduled. The fade has to finish inside \[57\]
     pub fn steal_span(&self) -> u32 {
         self.block_frames.saturating_sub(self.steal_fade_frames).max(1)
     }
 
-    /// Frames in one step of the envelope grid: 4 ms, 192 frames at 48 kHz. \[54\]
+    /// Frames in one step of the envelope grid: 4 ms, 192 frames at 48 kHz. \[58\]
     pub fn env_step_frames(&self) -> u32 {
         (self.sample_rate / 250).clamp(1, crate::voice::GRID_MASK)
     }
 
-    /// Voice slots to allocate. A stolen voice keeps sounding until its own \[55\]
+    /// Voice slots to allocate. A stolen voice keeps sounding until its own \[59\]
     pub fn pool_slots(&self) -> u32 {
         self.max_voices.saturating_add(self.max_steal())
     }
 
-    /// The most voices one block may steal. Integer arithmetic, and both \[56\]
+    /// The most voices one block may steal. Integer arithmetic, and both \[60\]
     pub fn max_steal(&self) -> u32 {
         let n = self.max_voices as u64 * self.max_steal_percent as u64 / 100;
         (n as u32).max(1)

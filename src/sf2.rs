@@ -513,7 +513,6 @@ pub fn load(path: impl AsRef<Path>, cfg: &Config) -> Result<Bank> {
         menv_factor_half: 0,
         menv_log2: Vec::new(),
         gain_table: Vec::new(),
-        gain_volume: 0.0,
         delay_frames: Vec::new(),
         key_ok: Vec::new(),
         presets,

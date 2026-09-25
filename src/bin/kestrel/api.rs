@@ -1166,7 +1166,7 @@ mod tests {
             .into_iter()
             .map(String::from)
             .collect();
-        assert_eq!(load_flags(&flags), ["--rate=44100", "--volume=50"]);
+        assert_eq!(load_flags(&flags), ["--rate=44100"]);
     }
 
     #[test]

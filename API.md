@@ -56,7 +56,7 @@ A session can list GPUs and ffmpeg, describe MIDIs and soundfonts, list every re
 
 Soundfonts in a list are layered in order: each one replaces whatever the ones before it define at the same bank and program. Put a General MIDI bank first and an instrument after it. `sf_programs` places the last soundfont on those programs of bank 0, spelled as `--sf-programs` takes it: `"0,1"` or `"0-7"`.
 
-A render with no `soundfonts` uses the loaded ones. **A loaded soundfont is reused** by every render that would load it the same way, which saves the load time on each render (seconds on a large library). A render that changes an option marked `reloads_soundfonts`, such as `volume` or `rate`, loads again, and that becomes the loaded set. A render that names different `soundfonts` does the same.
+A render with no `soundfonts` uses the loaded ones. **A loaded soundfont is reused** by every render that would load it the same way, which saves the load time on each render (seconds on a large library). A render that changes an option marked `reloads_soundfonts`, such as `rate`, loads again, and that becomes the loaded set. (`volume` did too until 1.2.1; it is applied to the output now and never reloads.) A render that names different `soundfonts` does the same.
 
 Analytic phase options, such as `"phase_mode": "analytic"` and `"phase_seed": 42`, reuse the loaded soundfont. Quadrature is prepared separately for each render, with log progress during `loading_soundfont` and cancellation checks inside preparation. Cancellation there creates no output file. See [analytic phase controls](docs/analytic-phase-rotation.md).
 

@@ -423,6 +423,9 @@ pub(crate) const LOAD_NEUTRAL: &[&str] = &[
     "--backend",
     "--block-csv",
     "--ceiling-db",
+    // The output stage's, applied to the mix, which the loader never sees.
+    "--dc-blocker",
+    "--dc-blocker-hz",
     "--ffmpeg",
     "--format",
     "--gpu-adapter",
@@ -443,9 +446,11 @@ pub(crate) const LOAD_NEUTRAL: &[&str] = &[
     "--steal-percent",
     "--track-jobs",
     "--unchecked-shaders",
+    // [12]
+    "--volume",
 ];
 
-/// Check typed flags against what the earlier steps already chose. \[12\]
+/// Check typed flags against what the earlier steps already chose. \[13\]
 pub fn extra_flags(tokens: Vec<String>, adapters: usize, per_track: bool) -> Result<Extra, String> {
     let mut out = Extra::default();
     let mut it = tokens.into_iter();
@@ -480,7 +485,7 @@ pub fn extra_flags(tokens: Vec<String>, adapters: usize, per_track: bool) -> Res
         if name == "--force-cli" {
             continue;
         }
-        // [13]
+        // [14]
         if name == "--gpu-backend" {
             let value = match tok.split_once('=') {
                 Some((_, v)) => Some(v.to_string()),
@@ -599,7 +604,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Every character the timestamp puts in a name has to be legal on \[14\]
+    /// Every character the timestamp puts in a name has to be legal on \[15\]
     #[test]
     fn the_timestamp_is_a_legal_windows_file_name() {
         let stamp = timestamp();
@@ -709,7 +714,7 @@ mod tests {
         extra_flags(split_args(line).unwrap(), 3, false)
     }
 
-    /// A per-track render's steps choose the tracks, the output and the \[15\]
+    /// A per-track render's steps choose the tracks, the output and the \[16\]
     #[test]
     fn per_track_flags_go_where_their_steps_are() {
         let per = |line: &str| extra_flags(split_args(line).unwrap(), 3, true);
@@ -764,10 +769,10 @@ mod tests {
 
     #[test]
     fn only_flags_no_loader_reads_keep_the_loaded_soundfont() {
-        for neutral in ["--seconds 10", "--profile", "--limiter omni", "--gpu-backend dx12", "--steal oldest"] {
+        for neutral in ["--seconds 10", "--profile", "--limiter omni", "--gpu-backend dx12", "--steal oldest", "--volume 50", "--dc-blocker"] {
             assert!(!flags(neutral).unwrap().reload, "{neutral}");
         }
-        for loading in ["--rate 44100", "--no-filter", "--volume 50", "--sf-programs 0-7", "--pool-budget 512", "--decay-curve linear"] {
+        for loading in ["--rate 44100", "--no-filter", "--sf-programs 0-7", "--pool-budget 512", "--decay-curve linear"] {
             assert!(flags(loading).unwrap().reload, "{loading}");
         }
     }

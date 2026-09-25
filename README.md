@@ -102,7 +102,8 @@ kestrel --force-cli render input.mid -s soundfont.sfz -o output.wav
 | `--seconds N` | off | Stop after N seconds of output. Use this constantly while experimenting. |
 | `--tracks LIST` | off | Render each track on its own, as stems or, with `--merge`, summed into one file. See *Per-track rendering*. |
 | `--min-velocity N` | `0` | Skip every note quieter than velocity N, as if the file did not contain it. On black MIDI full of ghost notes this can make a render many times faster. |
-| `--volume P` | `100` | Volume as a percentage, 0 to 200, before the limiter. A dense mix sits far above full scale, so lowering it eases the limiting more than it quietens the file. |
+| `--volume P` | `100` | Volume of the finished file as a percentage, 0 to 200. Up to 100 it applies after the limiter, so 50 is half as loud, dense passages included. Above 100 the extra goes in before the limiter, which still holds the ceiling, so the mix gets denser rather than louder. |
+| `--dc-blocker` | off | Filter out everything below 15 Hz before the limiter. Very dense mixes build up an inaudible low-frequency rumble that the limiter spends its headroom on; with this on, the music gets that headroom back. |
 | `--limiter` | `brickwall` | `brickwall` never exceeds its ceiling. `omni` is kept only for level-matching against OmniConverter, BASS or XSynth. `off` clips, and is refused for encoded output. |
 | `--ceiling-db` | `0`, or `-1` for lossy | The limiter's ceiling in dBFS. |
 | `--note-grid` | off | Hold notes to BASSMIDI's 4 ms envelope grid, so notes shorter than 4 ms still sound. Only for files that rely on it. |
@@ -177,7 +178,6 @@ Known to differ from a reference GM synth:
 
 - **No effects.** No reverb or chorus; CC91 and CC93 do nothing.
 - **Note boundaries can click on presets with no attack or release**, such as synth leads and square-wave basses, because Kestrel starts and stops a voice on its exact frame. It is the largest known audible gap.
-- **A block too dense to hold whole can lose one side of a stereo piano.** Past the per-block candidate cap, the thinning keeps the same layer of every note-on, so with a stereo sample library one channel goes quiet in the densest moments. Fixing it is planned for 1.2.1.
 - **A merge isn't the whole file.** It is the sum of the tracks as each sounds alone, so a file whose tracks drive each other's channels merges noticeably differently from a normal render. That's by design.
 - **On the densest files the host is the bottleneck.** MIDI reading runs on one CPU core, and a block carrying around a billion note-ons takes minutes of host work while the GPU waits.
 - **Analytic phase is experimental.** It prepares for a few minutes before every render and needs extra memory, and on a large piano `--phase-scratch-mib 1024`; the error names the flag.
@@ -187,7 +187,7 @@ Known to differ from a reference GM synth:
 
 ## Planned
 
-- **1.2.1:** the stereo thinning fix above; a high-pass on the mix before the limiter, so the inaudible low end of very dense mixes stops spending its headroom; and a faster per-track render.
+- **A faster per-track render**, for files with hundreds of tracks playing at once.
 - **A de-click fade at note boundaries.** Measured and understood; the fade length is what is left to settle.
 - **A faster host**, with MIDI reading spread across cores.
 - **A log file per render**, so a failure leaves its settings and its point of failure behind.

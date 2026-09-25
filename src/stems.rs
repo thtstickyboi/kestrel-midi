@@ -641,6 +641,8 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
     let mix = if merge {
         stem_cfg.limiter_mode = LimiterMode::Off;
         stem_cfg.clamp_output = false;
+        stem_cfg.master_volume = 1.0;
+        stem_cfg.dc_blocker = false;
         let secs = job.seconds.map_or(scan.duration(cfg.sample_rate), |s| s.min(scan.duration(cfg.sample_rate)));
         log::info!(
             target: TARGET,
