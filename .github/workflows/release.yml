@@ -63,6 +63,13 @@ jobs:
 
       - name: Build
         shell: bash
+        env:
+          # Windows keeps line tables, which the Microsoft linker writes to a
+          # separate kestrel.pdb; the exe only gains a pointer to it. The .pdb
+          # is kept as a workflow artifact below and never shipped, so a
+          # user's backtrace or minidump can be decoded afterwards.
+          CARGO_PROFILE_RELEASE_DEBUG: ${{ matrix.name == 'windows-x64' && 'line-tables-only' || '0' }}
+          CARGO_PROFILE_RELEASE_STRIP: ${{ matrix.name == 'windows-x64' && 'none' || 'symbols' }}
         run: |
           if [ "${{ matrix.name }}" = macos-universal ]; then
             cargo build --release --locked --no-default-features --target aarch64-apple-darwin
@@ -123,6 +130,18 @@ jobs:
             kestrel-*.tar.gz
             kestrel-*.dmg
 
+      # The symbols for exactly the exe in the zip, kept with the run, not the
+      # release: GitHub keeps a public repository's artifacts for up to 90
+      # days, so download it from the run and archive it with each release.
+      - name: Keep the symbols
+        if: matrix.name == 'windows-x64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: symbols-windows-x64
+          if-no-files-found: error
+          retention-days: 90
+          path: target/release/kestrel.pdb
+
   release:
     needs: build
     runs-on: ubuntu-latest
@@ -144,8 +163,10 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # Every artifact comes down merged into dist/, the symbols with them;
+      # they are not a download.
       - name: Checksums
-        run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+        run: rm -f dist/*.pdb && cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
 
       # A signed statement from GitHub that each download was built by this
       # workflow, from this repository, at the tagged commit. Anyone can check
