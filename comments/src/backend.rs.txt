@@ -91,3 +91,7 @@
 [11] src/backend.rs:116
     /// Per-pass timings from the last block, for `--profile`. Empty when the
     /// backend has nothing to report.
+
+[12] src/backend.rs:122
+    /// Lose the device on purpose, for testing what a render does when the
+    /// driver resets under it. See `session::crash_test`.

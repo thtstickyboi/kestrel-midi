@@ -1,0 +1,75 @@
+# Comments extracted from src/falconeye/redact.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/falconeye/redact.rs:5
+//! Hiding whose machine a log or a report came from, while keeping what it
+//! was about.
+//!
+//! The user's rule, 2026-09-26: hide every name except the MIDI's, the
+//! soundfont's, and anything else belonging to a MIDI. So the PC's name and
+//! the Windows account's name go wherever they turn up -- inside a path, in
+//! `DOMAIN\user`, on their own -- and a MIDI file name, a soundfont file name
+//! and a track name stay exactly as they are, even when a hidden name happens
+//! to be part of one. Those are registered with [`Redactor::keep`].
+//!
+//! A name is matched as a whole word, ignoring case, so `Fule` goes in
+//! `C:\Users\Fule\` and in `Fule's midis` but not in `Fuller`. A name of one
+//! or two letters would take too much else with it, so it is matched only
+//! as a whole path segment, between separators.
+
+[2] src/falconeye/redact.rs:30
+    /// Account names: the login name, and the profile folder's name where it
+    /// differs.
+
+[3] src/falconeye/redact.rs:52
+    /// Hide this machine's names, read from the environment. On Windows,
+    /// `USERNAME`, the last folder of `USERPROFILE`, `COMPUTERNAME` and
+    /// `USERDOMAIN`; elsewhere `USER`, the last folder of `HOME`, and the
+    /// host name.
+
+[4] src/falconeye/redact.rs:81
+    /// Show `name` as it is wherever it appears: a MIDI or soundfont file
+    /// name, or a track name.
+
+[5] src/falconeye/redact.rs:97
+    /// Overwrite the hidden names in binary data, such as a minidump, with
+    /// `X`s of the same length, as 8-bit text and as UTF-16, ignoring ASCII
+    /// case. Nothing in the data moves, so a debugger still reads it. A name
+    /// shorter than three letters is left, as it would take too much else
+    /// with it. Returns how many were overwritten.
+
+[6] src/falconeye/redact.rs:120
+        // The kept names go behind markers first, so nothing below can touch
+        // them, and come back at the end. The markers are private-use
+        // characters, which no path or log line carries.
+
+[7] src/falconeye/redact.rs:145
+/// Every match of `pat` in `bytes`, ignoring ASCII case, overwritten unit by
+/// unit with `X` (and zeros for the rest of a UTF-16 unit).
+
+[8] src/falconeye/redact.rs:170
+/// `text` with every account SID hidden. Not a name, but it names one
+/// account as surely as the account name does, and Windows' event records
+/// carry it. Only `S-1-5-21-...`, the accounts' own; the well-known ones such
+/// as SYSTEM's `S-1-5-18` say nothing about whose machine this is.
+
+[9] src/falconeye/redact.rs:200
+/// Letters that continue a name: a match must not have one on either side.
+/// `-` and `_` count, so `DESKTOP-1` is not found inside `DESKTOP-12`.
+
+[10] src/falconeye/redact.rs:210
+/// Where `name` matches `text` from byte `at`, ignoring case, and the byte
+/// the match ends at.
+
+[11] src/falconeye/redact.rs:223
+/// `text` with every whole-word match of `name` replaced by `with`. A short
+/// name must also sit between path separators, or end a path.
+
+[12] src/falconeye/redact.rs:234
+                // Never inside a placeholder already written: an account
+                // named "user" must not turn `<user>` into `<<user>>`.

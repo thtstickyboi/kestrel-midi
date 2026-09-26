@@ -7,6 +7,7 @@
 use crate::backend::{Backend, BlockStats};
 use crate::config::{BackendKind, Config};
 use crate::limiter::LimiterMode;
+use crate::falconeye::{observe, renderlog};
 use crate::{bank::Bank, cpu::CpuSynth, driver::Driver, gpu, load_bank, wav};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
@@ -531,6 +532,26 @@ pub fn run(
     preloaded: Option<Arc<Bank>>,
     obs: &mut dyn Observer,
 ) -> Result<Summary> {
+    let log = observe::open_log(job, &plan);
+    let result = match log {
+        Some(_) => run_inner(job, plan, preloaded, &mut observe::Logged::new(obs)),
+        None => run_inner(job, plan, preloaded, obs),
+    };
+    if log.is_some() {
+        match &result {
+            Ok(s) => renderlog::note("DONE", &format!("{s:?}")),
+            Err(e) => renderlog::note("ERROR", &format!("{e:#}")),
+        }
+    }
+    result
+}
+
+fn run_inner(
+    job: &Job,
+    plan: Plan,
+    preloaded: Option<Arc<Bank>>,
+    obs: &mut dyn Observer,
+) -> Result<Summary> {
     if job.stems.is_some() {
         return crate::stems::run(job, plan, preloaded, obs);
     }
@@ -697,6 +718,9 @@ pub fn run(
             start,
             last,
         });
+
+        #[cfg(feature = "dev")]
+        observe::crash_test(driver.stats.blocks, backend.as_mut());
 
         if last {
             break;

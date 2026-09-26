@@ -1,0 +1,34 @@
+# Comments extracted from src/falconeye/observe.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/falconeye/observe.rs:5
+//! What `session::run` hands FalconEye: the render log's header, the
+//! breadcrumbs, and -- in dev builds -- failures on purpose. Kept here so the
+//! session's block loop carries two calls into FalconEye and nothing else.
+
+[2] src/falconeye/observe.rs:21
+/// The render log's header: the files, what the render is, and the whole
+/// configuration it runs with.
+
+[3] src/falconeye/observe.rs:61
+/// Passes everything to the front end's observer, and writes the render log's
+/// breadcrumbs on the way: each phase as it starts, the device once it is
+/// set up, and about once a second where the render is. A log that ends
+/// mid-render ends on the last of these.
+
+[4] src/falconeye/observe.rs:169
+/// Fail on purpose partway through a render, to see what each kind of failure
+/// leaves behind: `KESTREL_CRASH_TEST=<kind>@<block>`. `panic` panics, `lost`
+/// destroys the device as a driver reset would lose it, `abort` aborts,
+/// `exit` exits without closing the log, `segv` crashes with an access
+/// violation, and `hang` stops finishing blocks. Dev builds only; the release
+/// zips do not contain it.
+
+[5] src/falconeye/observe.rs:194
+        // Stops finishing blocks while the heartbeat goes on, as a render
+        // stuck on the device would.

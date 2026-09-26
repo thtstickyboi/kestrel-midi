@@ -109,6 +109,7 @@ pub fn run() -> anyhow::Result<()> {
 #[derive(Clone, Copy)]
 enum Item {
     GpuInfo,
+    MachineReport,
     FileInfo,
     /// A dev-build entry, like the `null` command it runs.
     #[cfg(feature = "dev")]
@@ -120,7 +121,7 @@ enum Item {
 
 /// What the Extras menu offers, in the order shown and numbered from 1. Built \[6\]
 fn items() -> Vec<Item> {
-    let mut v = vec![Item::GpuInfo, Item::FileInfo];
+    let mut v = vec![Item::GpuInfo, Item::MachineReport, Item::FileInfo];
     #[cfg(feature = "dev")]
     v.push(Item::NullTest);
     v.extend([Item::FlagHelp, Item::UpdateRing, Item::Folders]);
@@ -141,6 +142,11 @@ pub fn menu(io: &mut dyn Io) {
                 Item::GpuInfo => {
                     super::option(&n, "GPU info", "every adapter wgpu can see, and its limits")
                 }
+                Item::MachineReport => super::option(
+                    &n,
+                    "Machine report",
+                    "a file to send when Kestrel goes wrong on this machine",
+                ),
                 Item::FileInfo => {
                     super::option(&n, "File info", "what the loader makes of a soundfont or MIDI")
                 }
@@ -183,6 +189,7 @@ pub fn menu(io: &mut dyn Io) {
         style::blank();
         match item {
             Item::GpuInfo => gpu_info(),
+            Item::MachineReport => machine_report(io),
             Item::FileInfo => file_info(io),
             #[cfg(feature = "dev")]
             Item::NullTest => null_test(io),
@@ -281,6 +288,48 @@ fn gpu_info() {
     }
 }
 
+/// FalconEye's machine report. What it holds is shown before anything is \[7\]
+fn machine_report(io: &mut dyn Io) {
+    use kestrel::falconeye::report;
+    style::heading("Machine report", "a file to send when Kestrel goes wrong on this machine");
+    for line in report::HEADER.lines() {
+        style::say(vec![c(line, DIM)]);
+    }
+    style::blank();
+    style::say(vec![s("Run the GPU self-test too? It loads each GPU for up to a minute. [Y/n]")]);
+    prompt();
+    let Some(answer) = io.line() else { return };
+    let self_test = !matches!(answer.trim(), "n" | "N" | "no" | "No");
+    // The administrator step is its own question, and no unless asked.
+    let mut elevate_with = None;
+    if cfg!(windows) {
+        style::say(vec![s(
+            "Also collect Windows' own records of GPU crashes? Windows will ask for administrator \
+             permission; Kestrel only reads them, and copies no dump. [y/N]",
+        )]);
+        prompt();
+        let Some(answer) = io.line() else { return };
+        if matches!(answer.trim(), "y" | "Y" | "yes" | "Yes") {
+            elevate_with = std::env::current_exe().ok();
+        }
+    }
+    style::blank();
+    let built = report::build(
+        report::Options { self_test, extra: vec![settings::report_section()], out_dir: None, elevate_with },
+        &mut |line| style::say(vec![c(line, DIM)]),
+    );
+    style::blank();
+    match built {
+        Ok(path) => {
+            style::say(vec![b("Saved: ", OK), s(path.display().to_string())]);
+            style::say(vec![c("Send this file to Kestrel's developer, privately.", DIM)]);
+            #[cfg(windows)]
+            let _ = std::process::Command::new("explorer").arg("/select,").arg(&path).spawn();
+        }
+        Err(e) => style::error(format!("The report could not be written: {e:#}")),
+    }
+}
+
 fn file_info(io: &mut dyn Io) {
     style::heading("File info", "a soundfont or a MIDI file");
     style::say(vec![c("Opening the file picker\u{2026}", DIM)]);
@@ -324,7 +373,7 @@ fn null_test(io: &mut dyn Io) {
     }
 }
 
-/// Every public subcommand's flags, straight from the clap definitions that \[7\]
+/// Every public subcommand's flags, straight from the clap definitions that \[8\]
 pub fn flag_help() {
     let mut cmd = crate::Cli::command();
     cmd.build();

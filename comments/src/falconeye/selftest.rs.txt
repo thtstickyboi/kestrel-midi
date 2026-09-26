@@ -1,0 +1,59 @@
+# Comments extracted from src/falconeye/selftest.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/falconeye/selftest.rs:5
+//! The GPU self-test: how long this GPU takes over one block, at voice counts
+//! that double until the next would risk taking too long.
+//!
+//! Windows resets a GPU that spends more than 2 s on one piece of work, and
+//! Kestrel sends it one block at a time. Two users lost the GPU that way on
+//! 2026-09-25 and 26, and neither could say how long their card took. This
+//! measures it, and turns it into a plain answer: how many voices this card
+//! can take at the default block before a block nears the limit.
+//!
+//! **What it renders.** A synthetic worst case: every voice sounding at once,
+//! looped, reading a 128 MiB sample pool, which is too big to sit in cache,
+//! as a real piano library is. It starts at 16,384 voices and doubles. It
+//! stops once a block takes over [`STOP_MS`], so the next step, twice the
+//! voices, stays near 0.5 s. The test itself never comes near the 2 s limit.
+
+[2] src/falconeye/selftest.rs:29
+/// The first step. Small, because an integrated GPU is slow: this laptop's
+/// Intel iGPU took 254 ms a block at 16,384 voices (2026-09-26), about 140
+/// times the RTX 5060 beside it, and a slower one must not near the limit on
+/// its first step.
+
+[3] src/falconeye/selftest.rs:34
+/// Stop once a block takes this long: the next step, twice the voices, then
+/// comes to about 0.5 s.
+
+[4] src/falconeye/selftest.rs:40
+/// Blocks rendered at each step: the one that spawns every voice, then the
+/// ones that only render them.
+
+[5] src/falconeye/selftest.rs:53
+    /// The block that spawned them all, and the slowest and the middle of
+    /// the blocks after it, in ms. The GPU's own time where it keeps
+    /// timestamps, the host's wait otherwise; see `timed_on_gpu`.
+
+[6] src/falconeye/selftest.rs:71
+    /// The same, as numbers: ms per block at the default 1,048,576 voices,
+    /// and the voices a block could take before it reached 1 s.
+
+[7] src/falconeye/selftest.rs:77
+/// Write the self-test's soundfont into `dir` and load it. Shared by every
+/// adapter the report tests.
+
+[8] src/falconeye/selftest.rs:87
+/// Run the self-test on one adapter and backend, as `gpu::survey` names
+/// them, up to `max_voices`. `say` hears each step as it finishes.
+
+[9] src/falconeye/selftest.rs:180
+/// The answer, from the biggest step that filled its pool at least halfway:
+/// time grows with the voices sounding, so that step's ms per voice scales
+/// to any count.

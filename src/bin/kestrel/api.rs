@@ -95,18 +95,26 @@ struct ApiLog;
 static LOGGER: ApiLog = ApiLog;
 static LOG_ID: Mutex<Option<Value>> = Mutex::new(None);
 
-impl Log for ApiLog {
-    fn enabled(&self, m: &Metadata) -> bool {
-        // [7]
+impl ApiLog {
+    /// What the protocol carries. As the guided renderer filters: Kestrel's \[7\]
+    fn sends(&self, m: &Metadata) -> bool {
         if m.target().starts_with("kestrel") {
             m.level() <= Level::Info
         } else {
             m.level() <= Level::Error
         }
     }
+}
+
+impl Log for ApiLog {
+    fn enabled(&self, m: &Metadata) -> bool {
+        self.sends(m) || kestrel::falconeye::renderlog::wants(m.level(), m.target())
+    }
 
     fn log(&self, r: &Record) {
-        if !self.enabled(r.metadata()) {
+        // The render log keeps its own filter, the same for every front end.
+        kestrel::falconeye::renderlog::record(r.level(), r.target(), r.args());
+        if !self.sends(r.metadata()) {
             return;
         }
         let level = match r.level() {
@@ -178,6 +186,7 @@ pub fn run() -> Result<()> {
     if log::set_logger(&LOGGER).is_ok() {
         log::set_max_level(LevelFilter::Info);
     }
+    crate::start_falconeye("api");
     send(&json!({
         "type": "ready",
         "api": API,
@@ -490,6 +499,7 @@ fn prepare_render(req: &Map<String, Value>, state: &Shared) -> Result<RenderJob>
     };
 
     let argv = render_argv(&midi, &soundfonts, sf_programs.as_deref(), &out, &flags);
+    kestrel::falconeye::renderlog::set_args(&argv);
     let job = parse_render(argv)?.to_job()?;
     let plan = session::plan(&job)?;
     let interval_ms = match req.get("progress_interval_ms") {

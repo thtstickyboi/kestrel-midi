@@ -1,0 +1,18 @@
+# Comments extracted from src/falconeye/zip.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/falconeye/zip.rs:5
+//! Just enough ZIP to hand a user one file to send: entries stored as they
+//! are, no compression, no ZIP64. A machine report is a few text files and
+//! at most a small minidump, well inside what that covers, and Explorer,
+//! macOS and every archiver open it. Written here rather than pulling in a
+//! crate for it.
+
+[2] src/falconeye/zip.rs:34
+    /// Add `data` as `name`, a path inside the archive with `/` between
+    /// folders.

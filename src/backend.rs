@@ -65,4 +65,8 @@ pub trait Backend {
     fn timings(&self) -> Vec<(&'static str, f64)> {
         Vec::new()
     }
+
+    /// Lose the device on purpose, for testing what a render does when the \[12\]
+    #[cfg(feature = "dev")]
+    fn lose_device(&mut self) {}
 }

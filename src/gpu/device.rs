@@ -96,6 +96,17 @@ pub fn create(
 
     let info = adapter.get_info();
     let adapter_limits = adapter.limits();
+    // The driver is the first thing a crash report is read for.
+    log::info!(
+        "adapter: {} | {:?} {:?} | vendor {:#06x} device {:#06x} | driver {} {}",
+        info.name,
+        info.backend,
+        info.device_type,
+        info.vendor,
+        info.device,
+        info.driver,
+        info.driver_info
+    );
 
     let has_timestamps = adapter
         .features()
@@ -120,10 +131,50 @@ pub fn create(
         panic!("wgpu device error: {e}");
     }));
 
+    // [6]
+    *LOST.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    device.set_device_lost_callback(|reason, message| {
+        // `Destroyed` is the device being dropped at the end of a render.
+        if reason != wgpu::DeviceLostReason::Destroyed {
+            log::error!("gpu device lost: {message}");
+            *LOST.lock().unwrap_or_else(|p| p.into_inner()) = Some(message);
+        }
+    });
+
     Ok((device, queue, info, adapter_limits, has_timestamps))
 }
 
-/// Compute-only bind group layout. `read_only[i]` says whether binding i is a \[6\]
+/// What the device-lost callback last said, if the device was lost.
+static LOST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The error for a poll or a map that failed, which is how a lost device \[7\]
+pub(super) fn lost(device: Option<&wgpu::Device>, detail: impl std::fmt::Display) -> anyhow::Error {
+    let reason = LOST
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+        .map(|m| format!(": {m}"))
+        .unwrap_or_default();
+    // On DX12, Windows can say why: a timeout, a reset, or the driver.
+    let dx12 = match device.and_then(crate::falconeye::winsys::dx12_removed_reason) {
+        Some((code, text)) => {
+            log::error!("DX12 device removed reason: {code:#010x}, {text}");
+            format!(" DX12's reason: {text} ({code:#010x}).")
+        }
+        None => String::new(),
+    };
+    anyhow::anyhow!(
+        "the GPU stopped responding and was lost{reason}.{dx12} On Windows this is \
+         usually the graphics driver being reset because one piece of GPU work \
+         ran past its 2-second limit, which a slower GPU can reach on a dense \
+         passage. Render again with --block 1024, which gives the GPU shorter \
+         pieces of work; if it still stops, lower --max-voices as well. \
+         Closing other programs that use the GPU and updating the graphics \
+         driver can also help. (wgpu: {detail})"
+    )
+}
+
+/// Compute-only bind group layout. `read_only[i]` says whether binding i is a \[8\]
 pub fn bind_layout(
     device: &wgpu::Device,
     label: &str,
@@ -178,7 +229,7 @@ pub fn bind(
     })
 }
 
-/// List every adapter wgpu can reach, for working out which device a render \[7\]
+/// List every adapter wgpu can reach, for working out which device a render \[9\]
 pub fn print_adapters() -> Result<()> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
     for a in instance.enumerate_adapters(wgpu::Backends::all()) {
@@ -196,7 +247,7 @@ pub fn print_adapters() -> Result<()> {
             l.max_compute_invocations_per_workgroup,
             l.max_compute_workgroups_per_dimension
         );
-        // [8]
+        // [10]
         let steal = Config::default().max_steal_percent;
         let binding = (l.max_storage_buffer_binding_size as u64).min(l.max_buffer_size);
         println!(
@@ -221,9 +272,9 @@ pub struct AdapterSummary {
     pub name: String,
     pub backend: wgpu::Backend,
     pub device_type: wgpu::DeviceType,
-    /// The most of one buffer the adapter will bind to a shader, which is \[9\]
+    /// The most of one buffer the adapter will bind to a shader, which is \[11\]
     pub binding_bytes: u64,
-    /// The largest `--max-voices` that binding takes at the configured \[10\]
+    /// The largest `--max-voices` that binding takes at the configured \[12\]
     pub max_voices: u32,
 }
 
@@ -234,7 +285,7 @@ impl AdapterSummary {
     }
 }
 
-/// Every adapter wgpu can reach, best first, and the index of the one \[11\]
+/// Every adapter wgpu can reach, best first, and the index of the one \[13\]
 pub fn survey(cfg: &Config) -> Result<(Vec<AdapterSummary>, Option<usize>)> {
     let backends = match &cfg.gpu_backend {
         Some(b) => parse_backends(b)

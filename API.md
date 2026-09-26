@@ -98,6 +98,8 @@ While it runs, a render sends these lines, each with its `id`:
 | `log` | as they happen | `level` (`info`, `warn`, `error`), `message` |
 | `summary` or `failed` | the end, after the last `progress` | the summary, or `message` |
 
+Each render also writes a log file of its own, with the PC's and the account's names left out; see "FalconEye" in the README and [docs/falconeye.md](docs/falconeye.md). The `log` lines here are not affected.
+
 Then the `response`. Log lines are written the moment they happen and the other lines within a tenth of a second, so a log line can arrive just ahead of the phase it belongs to.
 
 **`progress`** carries: `phase`, `phase_secs`, `wall_secs`, `render_secs`, `audio_secs` (audio rendered so far), `notes` (note-ons read so far), `voices` (sounding now), `max_voices`, `peak_voices`, `stolen`, `dropped`, `peak_level` (before the limiter), `clipped`, `blocks`, `bytes_read`, `bytes_total`, `tracks`, `backend`, `adapter`, `device_bytes` (Kestrel's own GPU buffers), `gpu_memory` (the whole GPU's, Windows only: `dedicated_total`, `dedicated_used`, `shared_used`, `process_used`, `process_budget`), `host_rss_bytes`, `host_rss_peak_bytes`, and three figures worked out for you:

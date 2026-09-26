@@ -49,70 +49,71 @@
 /// Log records as `log` lines, marked with the request running when they were
 /// logged, so a GUI can show a load's warnings beside that load.
 
-[7] src/bin/kestrel/api.rs:125
-        // As the guided renderer filters: Kestrel's own information is worth
-        // having, a dependency only when something is actually wrong.
+[7] src/bin/kestrel/api.rs:124
+    /// What the protocol carries. As the guided renderer filters: Kestrel's
+    /// own information is worth having, a dependency only when something is
+    /// actually wrong.
 
-[8] src/bin/kestrel/api.rs:162
+[8] src/bin/kestrel/api.rs:171
 /// What makes one loaded bank the bank another request would build: the same
 /// soundfonts in the same order, the same programs, and the same value for
 /// every option a loader reads.
 
-[9] src/bin/kestrel/api.rs:179
+[9] src/bin/kestrel/api.rs:188
 /// The one long request that may run at a time. A GPU render wants the GPU
 /// to itself, and a soundfont load wants the memory.
 
-[10] src/bin/kestrel/api.rs:192
+[10] src/bin/kestrel/api.rs:201
     /// Milliseconds between `progress` lines for the next render, and the
     /// interval `scan_midi` reports at.
 
-[11] src/bin/kestrel/api.rs:200
+[11] src/bin/kestrel/api.rs:209
     // A panic while holding this is caught and reported where it happened;
     // the state it leaves is still the best there is.
 
-[12] src/bin/kestrel/api.rs:216
+[12] src/bin/kestrel/api.rs:226
         // `release` for the downloadable zips, `dev` for a build with the
         // developer options; `options` lists what this one takes.
 
-[13] src/bin/kestrel/api.rs:228
+[13] src/bin/kestrel/api.rs:238
     // Quick requests still answering. Every request gets its response, so the
     // session waits for these before it ends.
 
-[14] src/bin/kestrel/api.rs:273
+[14] src/bin/kestrel/api.rs:283
             // Quick, and free to run beside a render: each on a thread of its
             // own, so none of them holds up a cancel behind it.
 
-[15] src/bin/kestrel/api.rs:299
+[15] src/bin/kestrel/api.rs:309
     // Stdin closed: the program driving this has gone, so nothing it started
     // should go on using the GPU without it.
 
-[16] src/bin/kestrel/api.rs:305
+[16] src/bin/kestrel/api.rs:315
 /// Cancel whatever is running, and wait for it and every quick request to
 /// send its response.
 
-[17] src/bin/kestrel/api.rs:369
+[17] src/bin/kestrel/api.rs:379
     // Everything that can be refused is refused here, before anything starts,
     // so a bad request gets its answer at once.
 
-[18] src/bin/kestrel/api.rs:430
+[18] src/bin/kestrel/api.rs:440
         // Free before answering, so a request sent the moment the response
         // arrives is not told the session is busy.
 
-[19] src/bin/kestrel/api.rs:768
+[19] src/bin/kestrel/api.rs:779
 /// The guided renderer's update check, on the person's update ring from
 /// `ktrl.ini`. `KESTREL_NO_UPDATE_CHECK` is honoured, so a machine with checks
 /// turned off is not contacted through a GUI either.
 
-[20] src/bin/kestrel/api.rs:830
+[20] src/bin/kestrel/api.rs:841
             // Called `notes` in the guided renderer, which is ambiguous in a
             // response a GUI puts beside a note count.
 
-[21] src/bin/kestrel/api.rs:862
+[21] src/bin/kestrel/api.rs:873
 /// Every option `render` takes that a request passes in `options`, read off
 /// the command line's own definition, so a GUI built from this list cannot
 /// drift from the command line.
 
-[22] src/bin/kestrel/api.rs:934
+[22] src/bin/kestrel/api.rs:945
 /// Turn `options` into the arguments the command line would have been given.
 ///
 /// Keys are option names with or without the dashes, in either `max_voices`
@@ -120,10 +121,10 @@
 /// a string or a number, and null leaves the option at its default. Values are
 /// joined with `=`, so a negative number is never read as another flag.
 
-[23] src/bin/kestrel/api.rs:972
+[23] src/bin/kestrel/api.rs:983
             // A whole number sent as a float -- which is how many languages
             // serialise one -- is written as the integer the option parses.
 
-[24] src/bin/kestrel/api.rs:1052
+[24] src/bin/kestrel/api.rs:1063
             // clap's message without its usage block, which describes the
             // command line rather than this request.

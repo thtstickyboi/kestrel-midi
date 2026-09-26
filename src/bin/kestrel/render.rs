@@ -87,6 +87,10 @@ impl Observer for LogObserver {
 
 /// `kestrel --force-cli render`, or the JSON feed when `--progress` asks for it.
 pub fn render_cli(args: RenderArgs) -> Result<()> {
+    if args.log {
+        crate::start_falconeye("command line");
+        kestrel::falconeye::renderlog::set_args(std::env::args_os());
+    }
     if args.progress.is_some() {
         return crate::feed::run(&args);
     }

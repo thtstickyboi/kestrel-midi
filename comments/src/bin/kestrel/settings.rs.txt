@@ -43,20 +43,24 @@
     /// valid Unicode, or has a line break in it -- is not remembered.
 
 [6] src/bin/kestrel/settings.rs:107
+/// The settings file as it is, for FalconEye's machine report: which update
+/// ring, and the folders the pickers open in.
+
+[7] src/bin/kestrel/settings.rs:118
 /// The settings, and anything in the file that could not be used. A missing
 /// or unreadable file is every default and no problems: a first run is not a
 /// fault.
 
-[7] src/bin/kestrel/settings.rs:117
+[8] src/bin/kestrel/settings.rs:128
 /// Change the settings and save them. Read afresh first, so a change made
 /// meanwhile by another Kestrel window -- Extras runs as its own process --
 /// survives this one.
 
-[8] src/bin/kestrel/settings.rs:138
+[9] src/bin/kestrel/settings.rs:149
     // Written beside and renamed over, so a crash part way leaves the old file
     // rather than half of a new one.
 
-[9] src/bin/kestrel/settings.rs:146
+[10] src/bin/kestrel/settings.rs:157
 /// Lenient on purpose. Keys and sections it does not know are skipped without
 /// complaint, so a file written by a later Kestrel still loads in this one;
 /// only a value it knows the key of and cannot use is reported.

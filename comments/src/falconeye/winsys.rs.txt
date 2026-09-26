@@ -1,0 +1,179 @@
+# Comments extracted from src/falconeye/winsys.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/falconeye/winsys.rs:5
+//! The raw system calls the watcher needs to tell one way of dying from
+//! another, where no safe route can.
+//!
+//! **Allowed `unsafe` by the user's decision of 2026-09-26** ("do unsafe if
+//! you think that would get more accurate statistics"), and only for that
+//! purpose; see CLAUDE.md. Every `unsafe` block says what makes it sound.
+//! Other platforms get stubs that know nothing, and the watcher says so
+//! rather than guessing.
+
+[2] src/falconeye/winsys.rs:16
+/// Another process, held open so that its exit code can still be read after
+/// it has died: Windows keeps a process's record while any handle to it is
+/// open, and the ID cannot be reused under us meanwhile.
+
+[3] src/falconeye/winsys.rs:24
+// SAFETY: a process handle is a kernel object reference, usable from any
+// thread; nothing here depends on the thread that opened it.
+
+[4] src/falconeye/winsys.rs:31
+    /// Open process `pid` to wait on it and read its exit code, and to read
+    /// its memory for a minidump.
+
+[5] src/falconeye/winsys.rs:37
+        // SAFETY: OpenProcess takes plain values and returns a new handle or
+        // an error; the handle is owned by the returned `Process` and closed
+        // exactly once, in `Drop`.
+
+[6] src/falconeye/winsys.rs:52
+        // SAFETY: `self.handle` is a valid process handle with SYNCHRONIZE
+        // access until `Drop`, and waiting on it has no other effect.
+
+[7] src/falconeye/winsys.rs:57
+    /// The exit code, once the process has ended: for a crash, the Windows
+    /// exception code it died of. `None` while it runs.
+
+[8] src/falconeye/winsys.rs:61
+        // Asked only once it has ended, so the code is final: a process can
+        // exit with 259, which is also what a running one reports.
+
+[9] src/falconeye/winsys.rs:67
+        // SAFETY: the handle is valid with query access, and `code` is a live
+        // local the call writes one u32 to.
+
+[10] src/falconeye/winsys.rs:97
+// ---- A native crash: caught in the render, dumped by the watcher ---------
+//
+// Microsoft's advice is to write a crashing process's dump from another
+// process, because the crashing one may have its heap or loader lock held by
+// the thread that faulted. So the render's filter only tells the watcher --
+// one `WriteFile` of a line built on the stack, no allocation -- and waits
+// while the watcher writes the dump from outside, then lets Windows' own
+// handling go on, so the exit code and Windows' error record are the ones the
+// crash would have had anyway.
+
+[11] src/falconeye/winsys.rs:107
+/// The dump the watcher writes. The threads, their stacks and the memory
+/// those point at, unloaded modules, and thread times: a few MB, enough to
+/// see what every thread was doing, and not the whole heap.
+
+[12] src/falconeye/winsys.rs:129
+        // SAFETY: SetUnhandledExceptionFilter swaps one process-wide function
+        // pointer. `on_crash` has the signature Windows calls it with, and is
+        // a plain function that lives as long as the process.
+
+[13] src/falconeye/winsys.rs:138
+    /// Called by Windows on the faulting thread, for an exception nothing
+    /// handled.
+
+[14] src/falconeye/winsys.rs:144
+            // SAFETY: Windows passes a valid EXCEPTION_POINTERS for the
+            // duration of this call, and checks its record pointer non-null
+            // before reading it.
+
+[15] src/falconeye/winsys.rs:159
+            // SAFETY: `pipe` is the watcher's stdin handle, stored while the
+            // `ChildStdin` that owns it is alive and cleared before it is
+            // dropped; `line[..n]` is a live stack buffer.
+
+[16] src/falconeye/winsys.rs:172
+                // SAFETY: the event handle is created once and never closed.
+                // Waiting keeps the process whole while the dump is written;
+                // 30 s bounds it if the watcher cannot.
+
+[17] src/falconeye/winsys.rs:182
+            // SAFETY: `previous` came from SetUnhandledExceptionFilter above
+            // as a valid filter function pointer.
+
+[18] src/falconeye/winsys.rs:186
+                // SAFETY: the same arguments Windows gave us, for the filter
+                // that was there before.
+
+[19] src/falconeye/winsys.rs:195
+/// `crash <code> <address> <thread> <pointers>\n`, in hex but the thread,
+/// written into `buf` without allocating, as a crashing process must.
+/// Returns its length.
+
+[20] src/falconeye/winsys.rs:235
+/// Catch native crashes from now on. Harmless while no render is watched:
+/// the filter then passes straight on to Windows' own handling.
+
+[21] src/falconeye/winsys.rs:254
+        // SAFETY: CreateEventW takes plain values and a name that outlives
+        // the call. The handle is kept for the life of the process, which is
+        // what the filter needs, and never closed.
+
+[22] src/falconeye/winsys.rs:301
+    /// Write a minidump of the process to `path`: at the crash the filter
+    /// reported, or of every thread as it is now, for a hang. The render's
+    /// filter is waiting for [`Process::release`] meanwhile.
+
+[23] src/falconeye/winsys.rs:317
+        // SAFETY: the process handle has query and VM-read access; the file
+        // handle is owned by `file`, alive for the call; `exception`, when
+        // present, is a live local whose pointers MiniDumpWriteDump reads in
+        // the target process, as ClientPointers says.
+
+[24] src/falconeye/winsys.rs:342
+        // SAFETY: OpenEventW takes plain values and a name that outlives the
+        // call; the handle is set and closed here, once.
+
+[25] src/falconeye/winsys.rs:361
+// ---- Facts about the machine, read without PowerShell ----------------------
+//
+// The machine report first read these through a PowerShell script passed as
+// `-EncodedCommand`. That is how a great deal of malware runs its scripts,
+// and antivirus watches for it -- the user's concern, 2026-09-26 -- so they
+// are read directly: the registry, and two kernel32 calls.
+
+[26] src/falconeye/winsys.rs:381
+    // SAFETY: `buf` holds `bytes` bytes, which is what the call is told it
+    // may write; RRF_RT_REG_SZ guarantees a terminated string within it.
+
+[27] src/falconeye/winsys.rs:462
+/// Plugged in or not, and the battery's charge; `battery` is `None` with no
+/// battery.
+
+[28] src/falconeye/winsys.rs:504
+/// Run `exe args` as administrator, through Windows' own permission prompt
+/// -- the API installers use -- and wait up to `timeout` for it.
+
+[29] src/falconeye/winsys.rs:522
+    // SAFETY: `info` is a live, sized SHELLEXECUTEINFOW whose strings are
+    // HSTRINGs that outlive the call. With NOCLOSEPROCESS it returns the
+    // process handle, closed below exactly once.
+
+[30] src/falconeye/winsys.rs:533
+    // SAFETY: `info.hProcess` is the valid handle ShellExecuteExW returned;
+    // it is waited on, read, and closed once.
+
+[31] src/falconeye/winsys.rs:555
+/// Why DX12 removed `device`, when it is a DX12 device: the one thing that
+/// tells a timeout (`DEVICE_HUNG`, Windows' 2 s limit) from a driver fault or
+/// a reset. wgpu reports a lost device without it. `None` on other backends.
+
+[32] src/falconeye/winsys.rs:560
+    // SAFETY: `as_hal` hands out the DX12 device only when this is one, and
+    // the guard lives only to the end of this function. The one call made on
+    // it, GetDeviceRemovedReason, reads the device's state and is documented
+    // for exactly this use on a removed device; nothing is created,
+    // destroyed or submitted.
+
+[33] src/falconeye/winsys.rs:594
+/// Crash with an access violation, for `KESTREL_CRASH_TEST=segv`: the native
+/// crash a graphics driver's own fault looks like from here. Dev builds only.
+
+[34] src/falconeye/winsys.rs:598
+    // SAFETY: none, on purpose; this exists to crash. The address is in the
+    // first page, which Windows and Linux never map, and the write is
+    // volatile so the compiler cannot drop it. It runs only when a developer
+    // names it in KESTREL_CRASH_TEST.

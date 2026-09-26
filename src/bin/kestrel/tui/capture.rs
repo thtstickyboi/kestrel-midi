@@ -31,6 +31,8 @@ impl Log for Capture {
                 held.push((r.level(), r.args().to_string()));
             }
         }
+        // The render log keeps its own filter, the same for every front end.
+        kestrel::falconeye::renderlog::record(r.level(), r.target(), r.args());
     }
 
     fn flush(&self) {}

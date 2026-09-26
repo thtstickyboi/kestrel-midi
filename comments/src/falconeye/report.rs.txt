@@ -1,0 +1,69 @@
+# Comments extracted from src/falconeye/report.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/falconeye/report.rs:5
+//! The machine report: one file a user can send, holding what it takes to
+//! chase a problem on a machine nobody here can reach.
+//!
+//! Asked for by the user 2026-09-26: "profile everything from the machine to
+//! report, that the user can send to me". It collects a fixed list, not
+//! "everything accessible".
+//! What is in it is said in [`HEADER`], before anything is collected, and
+//! what is left out as well: files, other programs' names, network details,
+//! serial numbers, environment variables.
+//!
+//! Every line goes through [`Redactor`]: the PC's and the account's names
+//! become `<pc>` and `<user>`; the MIDIs', soundfonts' and tracks' names are
+//! kept. The result is `kestrel-report-<time>.zip`, holding `report.txt` to
+//! read, `report.json` for tooling, and the recent render logs and
+//! FalconEye reports.
+
+[2] src/falconeye/report.rs:69
+    /// The administrator step, once the user has agreed to it: this
+    /// executable is run as administrator with `--force-cli
+    /// falconeye-system`. See [`super::system`].
+
+[3] src/falconeye/report.rs:75
+/// Collect the report and write it. `say` hears each step as it starts.
+/// Returns the report's path.
+
+[4] src/falconeye/report.rs:107
+        // A render's device setup reports at info; a self-test sets up a
+        // dozen, and those lines would bury its own.
+
+[5] src/falconeye/report.rs:162
+        // Render logs go under logs/; anything that names its own folder,
+        // the administrator step's wer/, keeps it.
+
+[6] src/falconeye/report.rs:187
+/// `reports` beside the logs: beside the executable, or in local app data
+/// where that cannot be written.
+
+[7] src/falconeye/report.rs:215
+/// Windows' facts, read from the registry and kernel32 directly -- not
+/// through PowerShell, which antivirus watches. Nothing read names the PC.
+
+[8] src/falconeye/report.rs:295
+/// Every adapter on every backend, and which of them the self-test runs on:
+/// the hardware ones, on Vulkan and DX12.
+
+[9] src/falconeye/report.rs:359
+/// `nvidia-smi`, where NVIDIA's driver is installed: the state now, the link,
+/// the limits, and how many programs use the GPU. Their names are left out.
+
+[10] src/falconeye/report.rs:397
+/// Windows' timeout settings and GPU scheduling. Absent means Windows'
+/// default: `TdrDelay` 2 s.
+
+[11] src/falconeye/report.rs:423
+/// The render logs and FalconEye's reports: listed, and the recent ones added
+/// to the archive. Returns the MIDI names they carry, which stay visible.
+
+[12] src/falconeye/report.rs:481
+/// Run the administrator step and take in what it read: its listing as the
+/// section, its `.wer` texts into the archive.

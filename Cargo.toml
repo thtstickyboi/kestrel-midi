@@ -1,6 +1,6 @@
 [package]
 name = "kestrel"
-version = "1.2.1"
+version = "1.2.2"
 edition = "2021"
 rust-version = "1.88"
 authors = ["thtstickyboi"]
@@ -75,12 +75,15 @@ unicode-width = "0.2"
 # FXC, cannot compile these shaders.
 wgpu = { version = "27", features = ["static-dxc"] }
 
-# The VRAM fetcher, `src/gpu/vram.rs`: DXGI for an adapter's total memory and
-# this process's budget, the performance counters for what every process on
-# the adapter uses. The same crate and version wgpu already builds, and that
-# module is its only user.
+# Two users, the only two modules with `unsafe` besides the GPU buffer
+# mapping: the VRAM fetcher, `src/gpu/vram.rs` (DXGI for an adapter's memory
+# and this process's budget, the performance counters for what every process
+# on it uses), and FalconEye's `src/falconeye/winsys.rs` (a crashed render's
+# exit code and minidump, DX12's reason for a lost device, the registry,
+# memory and power, and the administrator prompt). The same crate and version
+# wgpu already builds.
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_Performance"] }
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_Performance", "Win32_System_Threading", "Win32_System_Diagnostics_Debug", "Win32_System_Kernel", "Win32_System_Memory", "Win32_Storage_FileSystem", "Win32_Security", "Win32_System_IO", "Win32_Graphics_Direct3D12", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Power", "Win32_UI_Shell"] }
 
 [profile.release]
 opt-level = 3

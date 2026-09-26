@@ -193,7 +193,7 @@ fn upload_in_pieces(
         queue.submit(std::iter::empty());
         device
             .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| anyhow::anyhow!("device poll failed: {e:?}"))?;
+            .map_err(|e| device::lost(Some(device), format_args!("device poll failed: {e:?}")))?;
     }
     Ok(())
 }
@@ -551,7 +551,7 @@ last_submission: Option<wgpu::SubmissionIndex>,
         loop {
             device
                 .poll(wgpu::PollType::Poll)
-                .map_err(|e| anyhow::anyhow!("device poll failed: {e:?}"))?;
+                .map_err(|e| device::lost(Some(device), format_args!("device poll failed: {e:?}")))?;
             for (slot, rx) in mapped.iter_mut().zip(&rxs) {
                 if slot.is_none() {
                     match rx.try_recv() {
@@ -579,7 +579,7 @@ last_submission: Option<wgpu::SubmissionIndex>,
                 submission_index: last_submission.clone(),
                 timeout: None,
             })
-            .map_err(|e| anyhow::anyhow!("device poll failed: {e:?}"))?;
+            .map_err(|e| device::lost(Some(device), format_args!("device poll failed: {e:?}")))?;
         for (slot, rx) in mapped.iter_mut().zip(&rxs) {
             *slot = Some(rx.recv().context("readback channel closed")?);
         }
@@ -587,7 +587,7 @@ last_submission: Option<wgpu::SubmissionIndex>,
     let mut out = Vec::with_capacity(bufs.len());
     for (&(buf, len), r) in bufs.iter().zip(mapped) {
         r.expect("every read was waited for")
-            .map_err(|e| anyhow::anyhow!("buffer map failed: {e:?}"))?;
+            .map_err(|e| device::lost(Some(device), format_args!("buffer map failed: {e:?}")))?;
         // The view borrows the buffer, so it has to be gone before unmap.
         out.push(buf.slice(..len).get_mapped_range().to_vec());
         buf.unmap();
@@ -1547,6 +1547,11 @@ fn gates_capacity(runs: u64, held: u64, meta_words: u64, binding_cap: u64) -> Re
 }
 
 impl Backend for GpuSynth {
+    #[cfg(feature = "dev")]
+    fn lose_device(&mut self) {
+        self.device.destroy();
+    }
+
     fn set_params_variant(
         &mut self,
         index: u32,
@@ -1925,5 +1930,13 @@ mod tests {
         let e = gates_capacity(2_452_415_145, 32768, META, 2 * GIB).unwrap_err().to_string();
         assert!(e.contains("2452415145 note-off runs"), "{e}");
         assert!(e.contains("lower --block"), "{e}");
+    }
+
+    /// The lost-device message is one paragraph. Its first version left runs \[94\]
+    #[test]
+    fn the_lost_device_message_reads_as_one_paragraph() {
+        let m = super::device::lost(None, "device poll failed: WrongSubmissionIndex(324, 323)").to_string();
+        assert!(!m.contains("  "), "{m}");
+        assert!(m.contains("--block 1024") && m.ends_with("(wgpu: device poll failed: WrongSubmissionIndex(324, 323))"), "{m}");
     }
 }

@@ -1,0 +1,30 @@
+# Comments extracted from src/falconeye/mod.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/falconeye/mod.rs:5
+//! **FalconEye**: Kestrel's error catching and logging, kept apart from the
+//! engine it watches. Named by the user, 2026-09-26.
+//!
+//! Built for 1.2.2, after users lost the GPU mid-render on machines nobody
+//! here could reach, and could not say when it stopped, with what settings,
+//! or what Windows logged.
+//!
+//! - [`renderlog`]: a log file for every render, written as it goes.
+//! - [`observe`]: what `session` hands the log -- its header, a breadcrumb
+//!   about once a second -- and the dev-only failures on purpose.
+//! - [`watch`]: a second process that watches each logged render, and
+//!   reports a death or a hang the render cannot report itself.
+//! - [`winsys`]: the Windows calls that needs. The only `unsafe` here, by the
+//!   user's decision; see CLAUDE.md.
+//! - [`redact`]: the privacy rule every file FalconEye writes goes through.
+//!   The PC's and the account's names are hidden; the MIDI's, the
+//!   soundfonts' and the tracks' are not.
+//!
+//! The engine calls in at two places only: `session::run` opens a log and
+//! wraps the front end's observer, and `gpu::device` asks [`winsys`] for
+//! DX12's reason when the device is lost.

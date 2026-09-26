@@ -20,12 +20,12 @@
         // dependency is only interesting when something is actually wrong,
         // and wgpu's warnings about absent Vulkan extensions are not that.
 
-[3] src/bin/kestrel/tui/capture.rs:53
+[3] src/bin/kestrel/tui/capture.rs:55
 /// The last panic and where it was raised, held for the same reason the
 /// records are: the default printer writes into whatever the screen is
 /// drawing. On 2026-09-13 the progress screen redrew over the start of one
 /// and a prompt landed on its end, so the error could not be read.
 
-[4] src/bin/kestrel/tui/capture.rs:59
+[4] src/bin/kestrel/tui/capture.rs:61
 /// Hold panics here instead of printing them. Whatever catches one shows the
 /// message where it can be read; see [`panic_message`].

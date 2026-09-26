@@ -1,0 +1,83 @@
+# Comments extracted from src/falconeye/watch.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/falconeye/watch.rs:5
+//! FalconEye's watcher: a second Kestrel process that watches a render from
+//! outside, for the deaths nothing inside the render can report.
+//!
+//! A user's render on Vulkan "keeps crashing suddenly (no 'render
+//! failed' error)" (2026-09-26): the process was gone, and so was anything it
+//! might have said. [`super::renderlog`] starts this process with each render
+//! log, as `kestrel --force-cli falconeye --log <log> --pid <render>`, detached
+//! from the console so that closing the window does not take it too, and
+//! talks to it over its stdin:
+//!
+//! - `beat <rendering> <blocks>` about once a second, from a thread of its
+//!   own, so a render stuck on the device still beats;
+//! - `end <how>` when the render's log closes, clean or after a panic the
+//!   log already holds. The watcher then leaves without a word.
+//!
+//! **If the pipe closes without `end`,** the render is gone. The watcher
+//! reads its exit code -- which is the Windows exception it died of, for a
+//! crash -- and appends a line saying so to the render's log. For a crash, or
+//! anything it cannot account for, it also writes `<log> CRASH.txt`, holding
+//! the log's last lines, Windows' own records from the render's time (a
+//! driver reset, the application error with its faulting module), and the
+//! GPU's state afterwards. A window closed or Ctrl+C is not a crash, and gets
+//! the line only.
+//!
+//! **If the beats go on but no block finishes** for [`HANG_SECS`] while
+//! rendering, it writes `<log> HANG.txt` in the same way and keeps watching.
+//!
+//! Everything it writes goes through [`Redactor`], as the render log does.
+
+[2] src/falconeye/watch.rs:43
+/// No block finished for this long while rendering: hung. Windows resets a
+/// GPU that runs one job past 2 s, so a minute is far past anything that is
+/// only slow.
+
+[3] src/falconeye/watch.rs:47
+/// No heartbeat for this long with the pipe still open: the whole process has
+/// stopped, not only its render.
+
+[4] src/falconeye/watch.rs:60
+    // Opened first, while the render is certainly alive, so its exit code can
+    // still be read after it dies.
+
+[5] src/falconeye/watch.rs:178
+            // Windows writes its own record of a crash a moment after the
+            // process is gone; give it that moment before reading it.
+
+[6] src/falconeye/watch.rs:194
+/// Write `<log> <kind>.dmp` of the render and overwrite this machine's names
+/// in it. See `winsys::Process::dump`.
+
+[7] src/falconeye/watch.rs:220
+/// The redactor for what the watcher writes: this machine's names, keeping
+/// the MIDI's, which the log is named after.
+
+[8] src/falconeye/watch.rs:230
+/// The MIDI's name, from the log's: `<midi> <MM-DD-YYYY HH.MM.SS>.log`, or
+/// with ` (n)` after it when two logs started in the same second.
+
+[9] src/falconeye/watch.rs:244
+/// Add a line to the end of the render's log, which its own process no
+/// longer writes to.
+
+[10] src/falconeye/watch.rs:257
+/// `<log> <kind>.txt` beside the log: what happened, the log's last lines,
+/// Windows' records from the render's time, and the GPU now.
+
+[11] src/falconeye/watch.rs:344
+/// Windows' own records from the last `window_ms`: GPU driver events from
+/// the System log, and from the Application log the errors and hangs of
+/// kestrel.exe and Windows' reports of a GPU reset (LiveKernelEvent).
+
+[12] src/falconeye/watch.rs:390
+/// `wevtutil /f:text` output, one string per event, each cut to its first 40
+/// lines.

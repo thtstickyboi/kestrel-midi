@@ -9,6 +9,7 @@ pub mod bank;
 pub mod config;
 pub mod cpu;
 pub mod driver;
+pub mod falconeye;
 pub mod ffmpeg;
 pub mod fixed;
 pub mod gpu;

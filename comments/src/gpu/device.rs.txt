@@ -38,31 +38,42 @@
 /// On DX12 the shaders are compiled by DXC, linked into the executable, not by
 /// wgpu's default FXC. See `dx12_compiler`.
 
-[5] src/gpu/device.rs:137
+[5] src/gpu/device.rs:148
     // A device error that arrives asynchronously would otherwise show up as
     // silently wrong audio.
 
-[6] src/gpu/device.rs:147
+[6] src/gpu/device.rs:155
+    // wgpu drops a lost device's error on the floor unless this is set (27:
+    // `ErrorType::DeviceLost => return, // will be surfaced via callback`),
+    // and it surfaces later as a poll or a map failing with no cause named:
+    // `WrongSubmissionIndex`, `BufferAsyncError`. Kept so `lost` can name it.
+
+[7] src/gpu/device.rs:174
+/// The error for a poll or a map that failed, which is how a lost device
+/// shows itself: `detail` is wgpu's own error, and the callback's reason is
+/// added when it came.
+
+[8] src/gpu/device.rs:203
 /// Compute-only bind group layout. `read_only[i]` says whether binding i is a
 /// read-only storage buffer; binding 0 is always the uniform block.
 
-[7] src/gpu/device.rs:203
+[9] src/gpu/device.rs:259
 /// List every adapter wgpu can reach, for working out which device a render
 /// will land on.
 
-[8] src/gpu/device.rs:222
+[10] src/gpu/device.rs:278
         // The number people actually want off this listing. `gpu-info` used to
         // print the binding size and leave the division to the reader.
 
-[9] src/gpu/device.rs:248
+[11] src/gpu/device.rs:304
     /// The most of one buffer the adapter will bind to a shader, which is
     /// what caps the voice pool.
 
-[10] src/gpu/device.rs:251
+[12] src/gpu/device.rs:307
     /// The largest `--max-voices` that binding takes at the configured
     /// `--steal-percent`: the same figure `gpu-info` prints.
 
-[11] src/gpu/device.rs:263
+[13] src/gpu/device.rs:319
 /// Every adapter wgpu can reach, best first, and the index of the one
 /// `create` would open for `cfg` -- `None` when nothing is eligible.
 ///

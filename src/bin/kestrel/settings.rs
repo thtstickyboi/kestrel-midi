@@ -83,7 +83,17 @@ pub fn path() -> Result<PathBuf> {
     Ok(dir.join(FILE))
 }
 
-/// The settings, and anything in the file that could not be used. A missing \[6\]
+/// The settings file as it is, for FalconEye's machine report: which update \[6\]
+pub fn report_section() -> kestrel::falconeye::report::Section {
+    let mut s = kestrel::falconeye::report::Section::new(&format!("Kestrel's settings ({FILE})"));
+    s.text = Some(match path().and_then(|p| Ok(std::fs::read_to_string(p)?)) {
+        Ok(text) => text,
+        Err(_) => "(none saved yet)".into(),
+    });
+    s
+}
+
+/// The settings, and anything in the file that could not be used. A missing \[7\]
 pub fn load() -> (Settings, Vec<String>) {
     match path() {
         Ok(p) => load_from(&p),
@@ -91,7 +101,7 @@ pub fn load() -> (Settings, Vec<String>) {
     }
 }
 
-/// Change the settings and save them. Read afresh first, so a change made \[7\]
+/// Change the settings and save them. Read afresh first, so a change made \[8\]
 pub fn update(change: impl FnOnce(&mut Settings)) -> Result<()> {
     update_at(&path()?, change)
 }
@@ -110,14 +120,14 @@ fn update_at(path: &Path, change: impl FnOnce(&mut Settings)) -> Result<()> {
     if cfg!(windows) {
         text = text.replace('\n', "\r\n");
     }
-    // [8]
+    // [9]
     let tmp = path.with_extension("ini.tmp");
     std::fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
     std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
     Ok(())
 }
 
-/// Lenient on purpose. Keys and sections it does not know are skipped without \[9\]
+/// Lenient on purpose. Keys and sections it does not know are skipped without \[10\]
 fn parse(text: &str) -> (Settings, Vec<String>) {
     let mut settings = Settings::default();
     let mut problems = Vec::new();

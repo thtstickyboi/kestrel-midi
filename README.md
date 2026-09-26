@@ -41,7 +41,7 @@ Ready-made builds are attached to each [release](https://github.com/thtstickyboi
 - **macOS:** open the dmg and copy `kestrel` out of it. It is not signed or notarised, so macOS refuses it the first time: go to **System Settings -> Privacy & Security** and press **Open Anyway**, or run `xattr -dr com.apple.quarantine kestrel` in Terminal.
 - **Linux:** `tar xzf` the archive and run `./kestrel` from a terminal. It needs a Vulkan driver, and the file pickers go through the desktop portal (`xdg-desktop-portal`).
 
-The macOS build is compiled by GitHub Actions and nobody has run it yet. If you are first, please open an issue either way. `SHA256SUMS.txt` beside the downloads holds each file's checksum.
+The macOS build is compiled by GitHub Actions and nobody has run it yet. If you are first, please open an issue either way. `SHA256SUMS.txt` beside the downloads holds each file's checksum, and from 1.2.2 each download also carries a GitHub attestation, a signed record that it was built from this repository by its release workflow: `gh attestation verify <file> --repo thtstickyboi/kestrel-midi` checks it.
 
 **Building from source** needs Rust 1.88 or newer from [rustup.rs](https://rustup.rs):
 
@@ -116,6 +116,7 @@ kestrel --force-cli render input.mid -s soundfont.sfz -o output.wav
 | `--gpu-backend NAME` | automatic | `vulkan`, `dx12`, `metal` or `gl`. Kestrel prefers Vulkan, which is also the faster one on Windows. |
 | `--gpu-adapter TEXT` | automatic | Which card, by any part of its name: `--gpu-adapter intel`. In the guided renderer, `--adapter N` picks card N from its list. |
 | `--nan-guard` | off | Check every block for NaN and Inf. |
+| `--log` | off | Write a log of the render beside `kestrel.exe`, in `logs`. The guided renderer and the API always do; see *FalconEye*. |
 | `--profile` | off | Per-pass GPU timings and the host/device split. |
 | `--progress json` | off | Machine-readable progress for one render; see *Building a GUI on Kestrel*. |
 
@@ -131,6 +132,7 @@ kestrel --force-cli tracks file.mid       # what each track holds, for per-track
 kestrel --force-cli ffmpeg-info           # the ffmpeg encoded output would use
 kestrel --force-cli get-ffmpeg            # fetch one
 kestrel --force-cli check-update          # is a newer Kestrel out? downloads nothing
+kestrel --force-cli report                # a machine report to send with a bug report; see FalconEye
 kestrel --force-cli api                   # a session another program drives; see API.md
 ```
 
@@ -174,6 +176,16 @@ Known to differ from a reference GM synth:
 - Only the GS rhythm-part, GS Reset and GM System On/Off SysEx messages are acted on.
 - Rapid CC11 gating reaches digital silence where the reference does not.
 
+### FalconEye: logs and crash reports
+
+FalconEye is Kestrel's error catching and logging, new in 1.2.2. Nothing it writes leaves your computer unless you send it, and your PC's and Windows account's names are left out of all of it.
+
+- **Every render leaves a log** in `logs` beside `kestrel.exe` (guided renderer and API; `--log` on the command line). If a render fails, the guided renderer shows the log's path: that's the file to send with a bug report.
+- **If a render crashes or hangs**, a second, windowless `kestrel.exe` that watched it writes `<log> CRASH.txt` or `HANG.txt` beside the log, with what Windows recorded about it. A crash inside a graphics driver also gets a small minidump.
+- **Extras → Machine report** (or `kestrel --force-cli report`) writes one zip with your hardware, drivers, graphics settings, recent logs and a GPU self-test that says how close your GPU runs to Windows' 2-second reset. It asks before the self-test, and separately before an optional step that needs administrator permission.
+
+**[docs/falconeye.md](docs/falconeye.md)** is the transparency report: exactly what FalconEye writes, reads and hides, and what it does that antivirus might notice.
+
 ## Known limitations
 
 - **No effects.** No reverb or chorus; CC91 and CC93 do nothing.
@@ -184,13 +196,13 @@ Known to differ from a reference GM synth:
 - **SFZ support is almost complete.** Not applied: `fillfo_depth`, the LFO `*_fade` opcodes, controller-driven LFOs, SFZ v2's `lfoN_*`, `note_selfmask`, and the per-stage envelope velocity-tracking opcodes. Kestrel warns about every opcode it does not apply.
 - **SF2's modulation LFO to filter** (`modLfoToFilterFc`) is not implemented.
 - **VRAM figures** in the progress screen and the JSON feed are Windows only. **NaN checking is off** unless you pass `--nan-guard`.
+- **FalconEye is fullest on Windows.** On Linux and macOS a render still writes its log, but the watcher can't read how a render ended, and the machine report is shorter.
 
 ## Planned
 
 - **A faster per-track render**, for files with hundreds of tracks playing at once.
 - **A de-click fade at note boundaries.** Measured and understood; the fade length is what is left to settle.
 - **A faster host**, with MIDI reading spread across cores.
-- **A log file per render**, so a failure leaves its settings and its point of failure behind.
 
 Effects, a host C ABI and realtime playback remain out of scope.
 

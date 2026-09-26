@@ -35,10 +35,14 @@
     // These are the command-line tools, and they report the way the command
     // line does.
 
-[6] src/bin/kestrel/tui/extras.rs:135
+[6] src/bin/kestrel/tui/extras.rs:136
 /// What the Extras menu offers, in the order shown and numbered from 1. Built
 /// per build, so a release build numbers its entries without a gap.
 
-[7] src/bin/kestrel/tui/extras.rs:342
+[7] src/bin/kestrel/tui/extras.rs:306
+/// FalconEye's machine report. What it holds is shown before anything is
+/// collected, and the GPU self-test is asked for, since it loads the GPU.
+
+[8] src/bin/kestrel/tui/extras.rs:392
 /// Every public subcommand's flags, straight from the clap definitions that
 /// parse them, so this can never describe a flag that does not exist.

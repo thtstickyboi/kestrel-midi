@@ -575,6 +575,8 @@ pub fn run() -> Result<()> {
     style::init();
     capture::install();
     capture::hold_panics();
+    // After `hold_panics`, which replaces the hook: the log's chains to it.
+    crate::start_falconeye("guided");
     if std::io::stdout().is_tty() {
         let _ = execute!(std::io::stdout(), terminal::SetTitle("Kestrel"));
     }
@@ -1757,6 +1759,16 @@ fn joined(flag: &str, path: &Path) -> OsString {
 
 /// clap's message without its usage block, which describes `kestrel render`
 /// positionals the guided renderer fills in itself.
+/// A word in the typed flags that is neither a flag nor a flag's value, such
+/// as the "on" in `--dc-blocker on`. clap takes it as the MIDI, and then names
+/// the real MIDI, which comes last, as the unexpected argument (reported
+/// against 1.2.1, 2026-09-26). `argv` ends in `-- <midi>`; parsed without it,
+/// a stray word is what fills the MIDI's place.
+fn stray_word(argv: &[OsString]) -> Option<String> {
+    let head = argv[..argv.len().checked_sub(2)?].to_vec();
+    parse_render(head).ok().map(|a| a.midi.to_string_lossy().into_owned())
+}
+
 fn clap_message(e: &clap::Error) -> String {
     let text = e.render().to_string();
     let kept: Vec<&str> = text
@@ -1832,10 +1844,19 @@ fn step_flags(
         argv.push("--".into());
         argv.push(midi.path.clone().into_os_string());
 
-        let args = match parse_render(argv) {
-            Ok(a) => a,
+        let args = match parse_render(argv.clone()) {
+            Ok(a) => {
+                kestrel::falconeye::renderlog::set_args(&argv);
+                a
+            }
             Err(e) => {
-                style::error(clap_message(&e));
+                match stray_word(&argv) {
+                    Some(w) => style::error(format!(
+                        "\"{w}\" is not a flag or a value for one. Switches such as \
+                         --dc-blocker take no value: type them on their own."
+                    )),
+                    None => style::error(clap_message(&e)),
+                }
                 continue;
             }
         };
@@ -2059,13 +2080,21 @@ fn show_outcome(
                 body.push(vec![label("Device"), s(a.to_string())]);
             }
             body.extend(flag_lines(flags, inner));
+            if let Some(log) = kestrel::falconeye::renderlog::last_path() {
+                body.push(vec![label("Log"), c(log.display().to_string(), DIM)]);
+            }
             style::panel(vec![b("Done", OK)], &body, inner, None)
         }
         Err(message) => {
-            let body: Vec<Line> = style::wrap(message, inner)
+            let mut body: Vec<Line> = style::wrap(message, inner)
                 .into_iter()
                 .map(|l| vec![c(l, ERR)])
                 .collect();
+            if let Some(log) = kestrel::falconeye::renderlog::last_path() {
+                body.push(Vec::new());
+                let text = format!("The render's log, to send with a report: {}", log.display());
+                body.extend(style::wrap(&text, inner).into_iter().map(|l| vec![c(l, DIM)]));
+            }
             style::panel(vec![b("Render failed", ERR)], &body, inner, None)
         }
     };
@@ -2309,6 +2338,22 @@ mod tests {
         assert_eq!(quote("render"), "render");
         assert_eq!(quote("D:\\midis\\Song Title.mid"), "\"D:\\midis\\Song Title.mid\"");
         assert_eq!(quote(""), "\"\"");
+    }
+
+    #[test]
+    fn a_value_after_a_switch_is_named_not_the_midi() {
+        let argv = |extra: &[&str]| {
+            let mut v: Vec<OsString> = ["kestrel", "render", "--soundfont=a.sf2", "--out=b.wav"].map(OsString::from).to_vec();
+            v.extend(extra.iter().map(OsString::from));
+            v.extend(["--", "D:\\midis\\song.mid"].map(OsString::from));
+            v
+        };
+        let with_on = argv(&["--dc-blocker", "on"]);
+        assert!(parse_render(with_on.clone()).is_err());
+        assert_eq!(stray_word(&with_on).as_deref(), Some("on"));
+        // A flag's own value is not stray, and a line with none has nothing to name.
+        assert_eq!(stray_word(&argv(&["--dc-blocker", "--volume", "50"])), None);
+        assert!(parse_render(argv(&["--dc-blocker", "--volume", "50"])).is_ok());
     }
 
     /// The whole promise of the guided renderer: it is a front end, so what it

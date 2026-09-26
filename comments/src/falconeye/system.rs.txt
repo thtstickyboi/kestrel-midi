@@ -1,0 +1,39 @@
+# Comments extracted from src/falconeye/system.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/falconeye/system.rs:5
+//! The administrator step: what only an administrator can read about the
+//! GPU's crashes, read and nothing else.
+//!
+//! Part 4 of FalconEye, opt-in and separate, as decided 2026-09-26. The
+//! machine report asks first, then runs `kestrel --force-cli falconeye-system
+//! --out <dir>` through Windows' own permission prompt
+//! ([`super::winsys::run_elevated`]). That process only reads:
+//!
+//! - `%SystemRoot%\LiveKernelReports`, where Windows keeps a dump of each GPU
+//!   reset (`WATCHDOG`) and other live kernel events;
+//! - `%SystemRoot%\Minidump`, the blue screens;
+//! - Windows Error Reporting's archive and queue under `%ProgramData%`: the
+//!   short `Report.wer` texts for GPU resets and for kestrel.exe's crashes.
+//!
+//! **The dumps are listed, not copied**: name, size, date. They hold raw
+//! kernel memory, which may hold anything, and nothing can check it for
+//! personal data. The dates alone say when the GPU was reset. The `.wer`
+//! texts are copied with names hidden.
+//!
+//! **It never** runs a render elevated, or changes a setting: not
+//! `TdrDelay`, and not `LocalDumps`, which would make Windows keep full dumps
+//! of kestrel.exe. Both are the user's to set, and the report says how.
+
+[2] src/falconeye/system.rs:103
+/// Every file in `dir` and one level of folders below it, newest first:
+/// name, size, date.
+
+[3] src/falconeye/system.rs:143
+/// A `Report.wer` is UTF-16LE with a byte-order mark; read anything else as
+/// UTF-8.

@@ -1,0 +1,121 @@
+# Comments extracted from src/falconeye/renderlog.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/falconeye/renderlog.rs:5
+//! A log file for every render, written as it goes.
+//!
+//! Asked for 2026-09-13, after a render failed with `BufferAsyncError` and
+//! nothing recorded the settings, the files or where it stopped, and again on
+//! 2026-09-26, after two users lost the GPU mid-render and could not say when.
+//! Every line is written and flushed as it happens, so the file survives the
+//! process dying; a driver reset or a crash leaves the log up to its last
+//! second.
+//!
+//! A front end turns logging on once, with [`enable`], and [`crate::session`]
+//! opens a log for each render. Each front end's `log` implementation passes
+//! its records to [`record`] as well as showing them its own way. The guided
+//! renderer and the API always log; the command line logs with `--log`,
+//! because scripts and benchmarks render many times.
+//!
+//! **Names.** Every line goes through [`Redactor`]: the PC's and the account's
+//! names are hidden, the MIDI's, the soundfonts' and the tracks' are not. The
+//! user's rule, 2026-09-26.
+//!
+//! **What a log holds:** a header with the build, the arguments, the files and
+//! the whole `Config`; every log record from Kestrel at info and above, and
+//! from its dependencies at warn and above; a breadcrumb about once a second
+//! (see `session`); a panic's message and backtrace, written from the panic
+//! hook before unwinding starts; and the summary, or the error.
+
+[2] src/falconeye/renderlog.rs:41
+/// The environment variable that moves the folder, for tests and for anyone
+/// running Kestrel from somewhere it cannot write.
+
+[3] src/falconeye/renderlog.rs:61
+/// What the heartbeat says: whether the render is in its block loop, and how
+/// many blocks it has finished. See `crate::falconeye::watch`.
+
+[4] src/falconeye/renderlog.rs:70
+/// Log every render from now on, into `logs/` beside the executable, or the
+/// folder [`DIR_VAR`] names. `front_end` goes in each header.
+
+[5] src/falconeye/renderlog.rs:82
+/// Start a watcher with every log from now on, as `exe --force-cli falconeye`.
+/// Only a front end knows that its executable has that command.
+
+[6] src/falconeye/renderlog.rs:90
+/// Where the render is, for the watcher's heartbeat: in the block loop or
+/// not, and the blocks it has finished. A block count that stops moving
+/// while rendering is how a hang shows.
+
+[7] src/falconeye/renderlog.rs:102
+/// The arguments the next render was started with, as the user would type
+/// them. Recorded in its header. Call it before each render.
+
+[8] src/falconeye/renderlog.rs:111
+    // A new render: until it opens a log of its own, there is none to point
+    // at, and a failure before that must not point at the last render's.
+
+[9] src/falconeye/renderlog.rs:121
+/// A log record, from a front end's logger. Written only while a render's log
+/// is open: Kestrel's own at info and above, a dependency's at warn and above.
+
+[10] src/falconeye/renderlog.rs:137
+/// Whether a logger should pass a record at this level and target on to
+/// [`record`]: what a front end's `Log::enabled` adds to its own filter.
+
+[11] src/falconeye/renderlog.rs:185
+        // Unbuffered, so every line is with the OS the moment it is written
+        // and survives this process dying. A failed write is dropped: a log
+        // is never a reason to stop a render.
+
+[12] src/falconeye/renderlog.rs:192
+/// An open render log. Dropping it closes the log, noting a panic if one is
+/// unwinding through it.
+
+[13] src/falconeye/renderlog.rs:241
+            // No console, so closing the render's window does not close the
+            // watcher too, and Ctrl+C there does not reach it.
+
+[14] src/falconeye/renderlog.rs:257
+        // A thread of its own, so a render stuck waiting on the device still
+        // beats, and the watcher can tell stuck from gone.
+
+[15] src/falconeye/renderlog.rs:285
+        // Before the pipe closes: the filter must never write to a handle
+        // that is gone.
+
+[16] src/falconeye/renderlog.rs:299
+/// Open a log for the render `midi` names, if logging is on. `header` is
+/// written first, one line at a time; see `session`.
+
+[17] src/falconeye/renderlog.rs:358
+/// Where this function was loaded. A backtrace's addresses are only useful
+/// against the build's .pdb once the module's base is known; this function's
+/// address in the .pdb, subtracted from this, gives it, with no system call.
+
+[18] src/falconeye/renderlog.rs:375
+/// Where logs go by default: `logs/` beside the executable, or, where that
+/// cannot be written, the user's local application data.
+
+[19] src/falconeye/renderlog.rs:422
+/// Delete all but the newest `keep` render logs in `dir`. Only `.log` files:
+/// nothing else in the folder is touched.
+
+[20] src/falconeye/renderlog.rs:441
+/// Delete all but the newest watcher reports in `dir`: `KEEP` of the crash
+/// and hang reports, and five minidumps, which can be large.
+
+[21] src/falconeye/renderlog.rs:467
+/// Write a panic to the open log from the panic hook, with a backtrace,
+/// before unwinding reaches anything that might fail on the way out. Chained
+/// ahead of whatever hook the front end set, which still runs.
+
+[22] src/falconeye/renderlog.rs:491
+        // `{:#}` prints each frame's address as well as its symbol, which is
+        // what a release build without its .pdb has to go on.

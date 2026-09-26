@@ -151,6 +151,42 @@ enum Cmd {
     /// The guided renderer does the same check when it starts, unless the
     /// KESTREL_NO_UPDATE_CHECK environment variable is set.
     CheckUpdate,
+    /// Write a machine report to send with a bug report: this machine's
+    /// hardware, drivers and graphics settings, Windows' records of driver
+    /// resets and crashes, recent render logs, and a GPU self-test. The PC's
+    /// and the account's names are left out. Also under Extras.
+    Report {
+        /// Skip the GPU self-test, which loads each GPU for up to a minute.
+        #[arg(long = "no-self-test")]
+        no_self_test: bool,
+        /// Write the report into this folder instead of `reports` beside kestrel.
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+        /// Also list Windows' own GPU crash dumps and read its reports of GPU
+        /// resets. Windows asks for administrator permission; Kestrel only
+        /// reads, and copies no dump.
+        #[arg(long)]
+        system: bool,
+    },
+    /// The machine report's administrator step, run elevated by `report
+    /// --system`; never by hand. See `kestrel::falconeye::system`.
+    #[command(hide = true)]
+    FalconeyeSystem {
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Watch a render from outside and report how it ended, if it did not end
+    /// cleanly. Started by a render with its log, never by hand; see
+    /// `kestrel::falconeye::watch`.
+    #[command(hide = true)]
+    Falconeye {
+        /// The render's process.
+        #[arg(long)]
+        pid: u32,
+        /// The render's log.
+        #[arg(long)]
+        log: PathBuf,
+    },
     /// Download an ffmpeg into an `ffmpeg/` directory beside this executable.
     ///
     /// Deliberately a separate command and never part of a render: a flag on
@@ -384,6 +420,12 @@ struct RenderArgs {
     /// Check every block for NaN and Inf even in release builds.
     #[arg(long = "nan-guard")]
     nan_guard: bool,
+    /// Write a log of this render into the logs folder beside kestrel: the
+    /// settings, where it is every second, and the summary or the error. The
+    /// guided renderer and the API always write one. The PC's and the
+    /// account's names are left out of it.
+    #[arg(long = "log")]
+    log: bool,
 
     /// Report the render to another program instead of the terminal. `json`
     /// writes one JSON object per line on stdout -- the phases, the device,
@@ -708,6 +750,37 @@ fn route(args: &[OsString]) -> Route {
     Route::Notice
 }
 
+/// Log every render from here on, each with a watcher, and chain the log's
+/// panic hook ahead of whatever hook is set now: call it after a front end
+/// sets its own.
+pub(crate) fn start_falconeye(front_end: &'static str) {
+    kestrel::falconeye::renderlog::enable(front_end);
+    if let Ok(exe) = std::env::current_exe() {
+        kestrel::falconeye::renderlog::enable_watch(exe);
+    }
+    kestrel::falconeye::renderlog::install_panic_hook();
+}
+
+/// The command line's logger: stderr as `RUST_LOG` filters it, and the render
+/// log, which keeps Kestrel's info whatever stderr shows.
+struct Tee(env_logger::Logger);
+
+impl log::Log for Tee {
+    fn enabled(&self, m: &log::Metadata) -> bool {
+        self.0.enabled(m) || kestrel::falconeye::renderlog::wants(m.level(), m.target())
+    }
+
+    fn log(&self, r: &log::Record) {
+        // `env_logger` applies its own filter here.
+        self.0.log(r);
+        kestrel::falconeye::renderlog::record(r.level(), r.target(), r.args());
+    }
+
+    fn flush(&self) {
+        self.0.flush();
+    }
+}
+
 fn main() -> Result<()> {
     let raw: Vec<OsString> = std::env::args_os().skip(1).collect();
     match route(&raw) {
@@ -726,9 +799,13 @@ fn main() -> Result<()> {
     if matches!(cli.cmd, Cmd::Api) {
         return api::run();
     }
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(LOG_FILTER))
+    let inner = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(LOG_FILTER))
         .format_timestamp(None)
-        .init();
+        .build();
+    let max = inner.filter().max(log::LevelFilter::Info);
+    if log::set_boxed_logger(Box::new(Tee(inner))).is_ok() {
+        log::set_max_level(max);
+    }
 
     match cli.cmd {
         Cmd::Api => unreachable!("handled above, before the logger"),
@@ -758,6 +835,22 @@ fn main() -> Result<()> {
             accept_hash,
             dir,
         } => get_ffmpeg(dry_run, yes, accept_hash, dir),
+        Cmd::Falconeye { pid, log } => kestrel::falconeye::watch::run(&log, pid),
+        Cmd::FalconeyeSystem { out } => kestrel::falconeye::system::collect(&out),
+        Cmd::Report { no_self_test, out, system } => {
+            eprintln!("{}\n", kestrel::falconeye::report::HEADER);
+            let path = kestrel::falconeye::report::build(
+                kestrel::falconeye::report::Options {
+                    self_test: !no_self_test,
+                    extra: vec![settings::report_section()],
+                    out_dir: out,
+                    elevate_with: if system { Some(std::env::current_exe()?) } else { None },
+                },
+                &mut |l| eprintln!("{l}"),
+            )?;
+            println!("{}", path.display());
+            Ok(())
+        }
         #[cfg(feature = "dev")]
         Cmd::GenAssets {
             dir,

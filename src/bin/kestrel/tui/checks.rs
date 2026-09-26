@@ -433,6 +433,8 @@ pub(crate) const LOAD_NEUTRAL: &[&str] = &[
     "--limiter",
     "--limiter-release-ms",
     "--limiter-sustain-ms",
+    // The guided renderer and the API log every render anyway.
+    "--log",
     "--lookahead-ms",
     "--max-voices",
     "--min-velocity",
