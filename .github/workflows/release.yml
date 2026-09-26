@@ -126,6 +126,12 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      # The draft release.
+      contents: write
+      # The attestations: a signing certificate for them, and storing them.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -140,6 +146,20 @@ jobs:
 
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      # A signed statement from GitHub that each download was built by this
+      # workflow, from this repository, at the tagged commit. Anyone can check
+      # one with
+      #   gh attestation verify <file> --repo thtstickyboi/kestrel-midi
+      # It proves where a file came from. It is not a code signature, so
+      # SmartScreen, Gatekeeper and antivirus do not read it.
+      - name: Attest the downloads
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            dist/kestrel-*.zip
+            dist/kestrel-*.tar.gz
+            dist/kestrel-*.dmg
 
       # The notes end with a link to the "Release X.Y.Z" commit, whose message
       # is the full changelog. The tag is not always on that commit (1.2.0's
