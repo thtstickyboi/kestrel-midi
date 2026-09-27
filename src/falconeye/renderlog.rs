@@ -207,6 +207,12 @@ impl Watch {
             const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
             cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
         }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // [14]
+            cmd.process_group(0);
+        }
         let mut child = cmd.spawn()?;
         let pid = child.id();
         if let Some(pipe) = &child.stdin {
@@ -217,7 +223,7 @@ impl Watch {
         RENDERING.store(false, Ordering::Relaxed);
         BLOCKS.store(0, Ordering::Relaxed);
         let (pipe, stopped) = (Arc::clone(&stdin), Arc::clone(&stop));
-        // [14]
+        // [15]
         std::thread::Builder::new().name("falconeye-heartbeat".into()).spawn(move || {
             while !stopped.load(Ordering::Relaxed) {
                 let beat = format!(
@@ -244,7 +250,7 @@ impl Watch {
 
     /// Tell the watcher the log closed normally, and let it go.
     fn finish(self, how: &str) {
-        // [15]
+        // [16]
         crate::falconeye::winsys::disarm_crash_filter();
         self.stop.store(true, Ordering::Relaxed);
         if let Some(mut w) = lock(&self.stdin).take() {
@@ -257,7 +263,7 @@ impl Watch {
 /// Writes one header line: a tag, and its text.
 pub type HeaderLine<'a> = dyn FnMut(&str, &str) + 'a;
 
-/// Open a log for the render `midi` names, if logging is on. `header` is \[16\]
+/// Open a log for the render `midi` names, if logging is on. `header` is \[17\]
 pub fn open(midi: &Path, keep: &[&str], header: &dyn Fn(&mut HeaderLine)) -> Option<Guard> {
     let (front_end, dir) = {
         let s = lock(&SETTINGS);
@@ -315,7 +321,7 @@ pub fn open(midi: &Path, keep: &[&str], header: &dyn Fn(&mut HeaderLine)) -> Opt
     Some(Guard { path })
 }
 
-/// Where this function was loaded. A backtrace's addresses are only useful \[17\]
+/// Where this function was loaded. A backtrace's addresses are only useful \[18\]
 #[inline(never)]
 pub fn anchor() -> usize {
     anchor as fn() -> usize as usize
@@ -330,7 +336,7 @@ fn quote(a: &str) -> String {
     }
 }
 
-/// Where logs go by default: `logs/` beside the executable, or, where that \[18\]
+/// Where logs go by default: `logs/` beside the executable, or, where that \[19\]
 pub(crate) fn default_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(exe_dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
@@ -376,7 +382,7 @@ fn create(dir: Option<&Path>, stem: &str) -> anyhow::Result<(PathBuf, File)> {
     Err(last_err)
 }
 
-/// Delete all but the newest `keep` render logs in `dir`. Only `.log` files: \[19\]
+/// Delete all but the newest `keep` render logs in `dir`. Only `.log` files: \[20\]
 pub fn prune(dir: &Path, keep: usize) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     let mut logs: Vec<(std::time::SystemTime, PathBuf)> = entries
@@ -394,7 +400,7 @@ pub fn prune(dir: &Path, keep: usize) {
     }
 }
 
-/// Delete all but the newest watcher reports in `dir`: `KEEP` of the crash \[20\]
+/// Delete all but the newest watcher reports in `dir`: `KEEP` of the crash \[21\]
 pub fn prune_reports(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     let mut reports = Vec::new();
@@ -419,7 +425,7 @@ pub fn prune_reports(dir: &Path) {
     }
 }
 
-/// Write a panic to the open log from the panic hook, with a backtrace, \[21\]
+/// Write a panic to the open log from the panic hook, with a backtrace, \[22\]
 pub fn install_panic_hook() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -441,7 +447,7 @@ fn write_panic(info: &std::panic::PanicHookInfo) {
     if let Some(open) = sink.as_mut() {
         let thread = std::thread::current();
         let bt = std::backtrace::Backtrace::force_capture();
-        // [22]
+        // [23]
         open.line("PANIC", &format!(
             "on thread {}: {info}\nbacktrace:\n{bt:#}",
             thread.name().unwrap_or("unnamed")

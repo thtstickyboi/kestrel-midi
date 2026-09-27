@@ -32,7 +32,7 @@ pub(crate) fn open_log(job: &Job, plan: &Plan) -> Option<renderlog::Guard> {
     renderlog::open(&job.midi, &keep, &|w| {
         w("FILE", &format!("midi: {} ({})", job.midi.display(), size(&job.midi)));
         for (i, sf) in job.soundfonts.iter().enumerate() {
-            w("FILE", &format!("soundfont {}: {} ({})", i + 1, sf.display(), size(sf)));
+            w("FILE", &format!("soundfont {}: {} ({}{})", i + 1, sf.display(), size(sf), sfz_samples(sf)));
         }
         if let Some(p) = &job.sf_programs {
             w("FILE", &format!("programs the last soundfont takes: {p}"));
@@ -55,7 +55,32 @@ pub(crate) fn open_log(job: &Job, plan: &Plan) -> Option<renderlog::Guard> {
     })
 }
 
-/// Passes everything to the front end's observer, and writes the render log's \[3\]
+/// What an `.sfz`'s samples come to on disk, to follow its own size in the \[3\]
+fn sfz_samples(sf: &Path) -> String {
+    if !sf.extension().is_some_and(|e| e.eq_ignore_ascii_case("sfz")) {
+        return String::new();
+    }
+    let files = match crate::sfz::sample_files(sf) {
+        Ok(files) => files,
+        Err(e) => return format!("; its samples could not be listed: {e:#}"),
+    };
+    let (mut bytes, mut missing) = (0u64, 0usize);
+    for f in &files {
+        match std::fs::metadata(f) {
+            Ok(m) => bytes += m.len(),
+            Err(_) => missing += 1,
+        }
+    }
+    format!(
+        "; its samples {:.1} MiB in {} file{}{}",
+        bytes as f64 / 1048576.0,
+        files.len() - missing,
+        if files.len() - missing == 1 { "" } else { "s" },
+        if missing > 0 { format!(", and {missing} named that are not there") } else { String::new() }
+    )
+}
+
+/// Passes everything to the front end's observer, and writes the render log's \[4\]
 pub(crate) struct Logged<'a> {
     inner: &'a mut dyn Observer,
     last: Instant,
@@ -125,6 +150,7 @@ impl Observer for Logged<'_> {
 
     fn tracks(&mut self, p: &TrackProgress) {
         renderlog::set_progress(true, p.blocks);
+        self.max_wait_us = self.max_wait_us.max(p.longest_wait_us);
         if self.last.elapsed().as_secs_f64() >= 1.0 {
             let now: Vec<String> = p
                 .now
@@ -137,7 +163,7 @@ impl Observer for Logged<'_> {
                 })
                 .collect();
             renderlog::note("AT", &format!(
-                "tracks {} of {} done, {} running | {:.1}s audio over all tracks | {} of {} blocks | {} notes, {} stolen, {} dropped | now: {}{}",
+                "tracks {} of {} done, {} running | {:.1}s audio over all tracks | {} of {} blocks | {} notes, {} stolen, {} dropped | longest batch {:.1} ms | now: {}{}",
                 p.done,
                 p.total,
                 p.running,
@@ -147,9 +173,11 @@ impl Observer for Logged<'_> {
                 p.notes,
                 p.stolen,
                 p.dropped,
+                self.max_wait_us as f64 / 1000.0,
                 if now.is_empty() { "-".to_string() } else { now.join(", ") },
                 self.vram_text(),
             ));
+            self.max_wait_us = 0;
             self.last = Instant::now();
         }
         self.inner.tracks(p);
@@ -160,7 +188,7 @@ impl Observer for Logged<'_> {
     }
 }
 
-/// Fail on purpose partway through a render, to see what each kind of failure \[4\]
+/// Fail on purpose partway through a render, to see what each kind of failure \[5\]
 #[cfg(feature = "dev")]
 pub(crate) fn crash_test(block: u64, backend: &mut dyn Backend) {
     static SPEC: std::sync::OnceLock<Option<(String, u64)>> = std::sync::OnceLock::new();
@@ -180,7 +208,7 @@ pub(crate) fn crash_test(block: u64, backend: &mut dyn Backend) {
         "abort" => std::process::abort(),
         "exit" => std::process::exit(0),
         "segv" => super::winsys::access_violation(),
-        // [5]
+        // [6]
         "hang" => loop {
             std::thread::sleep(Duration::from_secs(1));
         },

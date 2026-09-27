@@ -81,11 +81,13 @@ struct Progress {
     /// The loudest track's peak, as f32 bits: magnitudes are never negative, \[6\]
     peak: AtomicU32,
     stole: AtomicUsize,
-    /// Per lane or job: one more than the rank of the track in it, 0 when \[7\]
+    /// The longest a batch took from `flush` to `wait` returning since the \[7\]
+    wait_us: AtomicU64,
+    /// Per lane or job: one more than the rank of the track in it, 0 when \[8\]
     slots: Vec<(AtomicUsize, AtomicU64)>,
 }
 
-/// What a track has already added to `Progress`, so each block adds only \[8\]
+/// What a track has already added to `Progress`, so each block adds only \[9\]
 #[derive(Default)]
 struct Seen {
     notes: u64,
@@ -105,6 +107,7 @@ impl Progress {
             dropped: AtomicU64::new(0),
             peak: AtomicU32::new(0),
             stole: AtomicUsize::new(0),
+            wait_us: AtomicU64::new(0),
             slots: (0..slots).map(|_| (AtomicUsize::new(0), AtomicU64::new(0))).collect(),
         }
     }
@@ -118,7 +121,7 @@ impl Progress {
         self.slots[slot].0.store(0, Ordering::Relaxed);
     }
 
-    /// The block `driver` just finished for `stem`, `stolen` being its track's \[9\]
+    /// The block `driver` just finished for `stem`, `stolen` being its track's \[10\]
     fn block(&self, slot: usize, seen: &mut Seen, stem: &Stem, driver: &Driver, stolen: u64) {
         let d = &driver.stats;
         let add = |counter: &AtomicU64, now: u64, before: &mut u64| {
@@ -159,7 +162,7 @@ struct Ctx<'a> {
 }
 
 impl<'a> Ctx<'a> {
-    /// The next stem to start, busiest first, with its rank in that order, \[10\]
+    /// The next stem to start, busiest first, with its rank in that order, \[11\]
     fn take(&self) -> Option<(usize, &'a Stem)> {
         if self.cancel.load(Ordering::Relaxed) {
             return None;
@@ -254,11 +257,11 @@ impl<'a> Running<'a> {
     }
 }
 
-/// A GPU job: stems in every lane of `batch`, and a new stem into whichever \[11\]
+/// A GPU job: stems in every lane of `batch`, and a new stem into whichever \[12\]
 fn gpu_job(ctx: &Ctx, batch: &mut GpuBatch, threads: usize) -> Result<()> {
     let mut lanes: Vec<Option<Running>> = (0..batch.lanes()).map(|_| None).collect();
     let threads = threads.clamp(1, lanes.len());
-    // [12]
+    // [13]
     let mut prof = [Duration::ZERO; 4];
     let silent = AtomicU64::new(0);
     let (mut sent, mut sounding) = (0u64, 0u64);
@@ -277,15 +280,17 @@ fn gpu_job(ctx: &Ctx, batch: &mut GpuBatch, threads: usize) -> Result<()> {
                 return Ok(());
             }
             batch.flush()?;
+            let up = Instant::now();
             sent += 1;
             sounding += lanes.iter().flatten().count() as u64;
             lap(1, &mut t);
-            // [13]
+            // [14]
             on_threads(threads, lanes.iter_mut().flatten(), |r| {
                 r.driver.prepare_ahead().with_context(|| track(r.stem))
             })?;
             lap(2, &mut t);
             batch.wait()?;
+            ctx.progress.wait_us.fetch_max(up.elapsed().as_micros() as u64, Ordering::Relaxed);
             lap(3, &mut t);
         }
     })();
@@ -312,7 +317,7 @@ fn gpu_job(ctx: &Ctx, batch: &mut GpuBatch, threads: usize) -> Result<()> {
     result
 }
 
-/// `f` on every item, on up to `threads` threads, each taking the next item \[14\]
+/// `f` on every item, on up to `threads` threads, each taking the next item \[15\]
 fn on_threads<I, F>(threads: usize, items: I, f: F) -> Result<()>
 where
     I: Iterator + Send,
@@ -341,9 +346,9 @@ where
     }
 }
 
-/// One lane's host work for a round: finish the block the last batch rendered \[15\]
+/// One lane's host work for a round: finish the block the last batch rendered \[16\]
 fn host_round<'a>(ctx: &Ctx<'a>, slot: &mut Option<Running<'a>>, lane: &mut LaneBackend, silent: &AtomicU64) -> Result<()> {
-    // [16]
+    // [17]
     if slot.is_some() {
         step_done(ctx, lane, slot)?;
     }
@@ -358,7 +363,7 @@ fn host_round<'a>(ctx: &Ctx<'a>, slot: &mut Option<Running<'a>>, lane: &mut Lane
         if lane.submitted() {
             return Ok(());
         }
-        // [17]
+        // [18]
         r.driver.prepare_ahead().with_context(|| track(r.stem))?;
         silent.fetch_add(1, Ordering::Relaxed);
         step_done(ctx, lane, slot)?;
@@ -369,7 +374,7 @@ fn track(stem: &Stem) -> String {
     format!("rendering track {}", stem.track + 1)
 }
 
-/// Finish the block the lane has in flight, write it, and end the stem if that \[18\]
+/// Finish the block the lane has in flight, write it, and end the stem if that \[19\]
 fn step_done(ctx: &Ctx, lane: &mut LaneBackend, slot: &mut Option<Running>) -> Result<()> {
     let r = slot.as_mut().expect("a lane with a block in flight has a stem");
     let more = r.driver.finish_block(lane, &mut r.block).with_context(|| track(r.stem))?;
@@ -385,7 +390,7 @@ fn step_done(ctx: &Ctx, lane: &mut LaneBackend, slot: &mut Option<Running>) -> R
     Ok(())
 }
 
-/// Where a finished block goes: the stem's own file, or the mix at the block's \[19\]
+/// Where a finished block goes: the stem's own file, or the mix at the block's \[20\]
 fn emit(ctx: &Ctx, out: &mut Option<Sink>, driver: &Driver, block: &[f32]) -> Result<()> {
     match out {
         Some(sink) => sink.write_block(block),
@@ -412,7 +417,7 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
     let Plan { mut cfg, kind, encoder } = plan;
     let started = Instant::now();
 
-    // [20]
+    // [21]
     obs.phase(Phase::OpeningMidi);
     let t0 = Instant::now();
     let scan = match &spec.scanned {
@@ -443,7 +448,7 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
             list(&without)
         );
     }
-    // [21]
+    // [22]
     let min = cfg.min_velocity;
     let (keep, emptied): (Vec<usize>, Vec<usize>) =
         named.into_iter().partition(|&t| scan.tracks[t].notes_from(min) > 0);
@@ -489,7 +494,7 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
             span: (0, 0),
         });
     }
-    // [22]
+    // [23]
     let ends: Vec<u64> = keep
         .iter()
         .flat_map(|&t| {
@@ -514,9 +519,7 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
         None => Arc::new(load_layered(&job.soundfonts, job.sf_programs.as_deref(), &cfg)?),
     };
     fit_to_bank(&mut cfg, &bank);
-    if loaded_here {
-        log::info!(target: TARGET, "loaded {} in {:.2?}", bank.describe(), t0.elapsed());
-    }
+    crate::session::log_bank(&bank, loaded_here.then(|| t0.elapsed()));
     // Baseline, `plan` saw to that, so this prepares nothing.
     let phase = PhaseBank::prepare(&bank, &cfg.phase)?;
 
@@ -549,11 +552,11 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
             at_once = format!("{wanted} at once");
         }
         BackendKind::Gpu => {
-            // [23]
+            // [24]
             let mut probe = cfg.clone();
             probe.max_voices = 1;
             let shared = GpuShared::new(&probe, &bank, &phase)?;
-            // [24]
+            // [25]
             let cap = GpuBatch::max_voices_each(&cfg, &bank, shared.binding_bytes(), 1);
             if cfg.max_voices > cap && cap > 0 {
                 log::warn!(
@@ -565,7 +568,7 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
                 );
                 cfg.max_voices = cap;
             }
-            // [25]
+            // [26]
             let mut lanes = stems.len().min(LANES_MAX);
             // And no more than fits in video memory beside the pool.
             let per_lane = GpuBatch::lane_bytes(&cfg, &bank).max(1);
@@ -583,7 +586,7 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
                     );
                 }
             }
-            // [26]
+            // [27]
             let bind = GpuBatch::lanes_that_bind(&cfg, &bank, shared.binding_bytes(), lanes);
             if bind > 0 && bind < lanes {
                 lanes = bind;
@@ -633,7 +636,7 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
             tracks::SetupTracks::Ignore => "ignored",
         }
     );
-    // [27]
+    // [28]
     let mut stem_cfg = cfg.clone();
     stem_cfg.max_block_candidates = tracks::candidates_each(&stem_cfg);
     // The tracks are already spread over threads; a thread each is enough.
@@ -656,7 +659,7 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
         None
     };
 
-    // [28]
+    // [29]
     let mut order: Vec<usize> = (0..stems.len()).collect();
     order.sort_by_key(|&i| (Reverse(stems[i].notes), stems[i].track));
 
@@ -679,7 +682,7 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
     let per_track = ((max_frames as f64).min(scan.duration(cfg.sample_rate) * cfg.sample_rate as f64)
         / cfg.block_frames as f64)
         .ceil() as u64;
-    // [29]
+    // [30]
     let span_total: u64 = stems
         .iter()
         .filter(|s| s.span.0 < per_track)
@@ -719,6 +722,7 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
             stolen: progress.stolen.load(Ordering::Relaxed),
             dropped: progress.dropped.load(Ordering::Relaxed),
             peak_level: f32::from_bits(progress.peak.load(Ordering::Relaxed)),
+            longest_wait_us: progress.wait_us.swap(0, Ordering::Relaxed),
             now: now
                 .into_iter()
                 .take(3)
@@ -769,7 +773,7 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
                 running.fetch_sub(1, Ordering::Relaxed);
             });
         }
-        // [30]
+        // [31]
         while running.load(Ordering::Relaxed) > 0 {
             std::thread::sleep(Duration::from_millis(50));
             if obs.cancelled() {
@@ -803,7 +807,7 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
         cancelled,
     };
     match mix {
-        // [31]
+        // [32]
         Some(_) if cancelled => {
             log::warn!(target: TARGET, "stopped after {} of {} tracks; no merged file written", done.len(), stems.len());
             summary.bytes = 0;
@@ -889,7 +893,7 @@ fn render_stem(ctx: &Ctx, stem: &Stem, slot: usize) -> Result<Done> {
     let mut peak_voices = 0u64;
     let mut cancelled = false;
     let mut seen = Seen::default();
-    // [32]
+    // [33]
     loop {
         let more = driver.next_block(backend, &mut block)?;
         emit(ctx, &mut out, &driver, &block)?;
@@ -925,7 +929,7 @@ fn render_stem(ctx: &Ctx, stem: &Stem, slot: usize) -> Result<Done> {
     })
 }
 
-/// Say how much the stems will take and refuse to start a WAV render that \[33\]
+/// Say how much the stems will take and refuse to start a WAV render that \[34\]
 fn check_space(folder: &Path, scan: &TrackScan, stems: usize, cfg: &Config, job: &Job, ext: &str) -> Result<()> {
     let secs = tracks::render_secs(scan, cfg.sample_rate, job.seconds);
     let (need, exact) = tracks::output_bytes(stems, secs, cfg.sample_rate, ext, job.wav_format == wav::SampleFormat::Float32);

@@ -63,6 +63,10 @@ the render is gone.
   code. For a crash, that is the Windows error it died of. It adds a line
   to the log saying how the render ended. A closed window or Ctrl+C is
   noted as that and nothing more.
+- **For a crash inside native code,** the line also names the file the
+  crash happened in, such as a graphics driver's DLL or `kestrel.exe`
+  itself, and how far into it. The watcher reads that from the list of
+  files loaded into its render, while the crashed render waits.
 - **For a crash, or a render that stopped finishing blocks for a minute,** it
   also writes `<log> CRASH.txt` or `<log> HANG.txt`. That holds:
   - the log's last lines;
@@ -129,10 +133,52 @@ setting does it; Kestrel leaves that to you.
 
 ### On Linux and macOS
 
-The render log works the same. The watcher runs, but it can't yet read how
-a render ended or the system's logs. The machine report has no operating
-system section there, and there is no administrator step. Everything else
-on this page is as written.
+New in 1.2.3. The render log works the same. There are no minidumps and no
+administrator step.
+
+**The watcher can't read a render's exit code there,** because only the
+process that started the render may. So when a render dies without a word,
+it reads what the system wrote down about it instead:
+- **Linux:**
+  - **systemd's record of the crash** (`coredumpctl info`), where systemd
+    catches crashes. It takes the signal and the crashed thread's stack.
+    It leaves out the hostname, the machine and boot IDs, and the command
+    line.
+  - **The kernel log** (`journalctl -k`, or `dmesg`). It takes the render's
+    own crash line, which names the file it crashed in, and the
+    out-of-memory killer if that stopped the render. It also takes the GPU
+    drivers' errors: NVIDIA's Xid, and amdgpu, i915, xe or nouveau timeouts,
+    resets and hangs.
+  - Some distributions only let certain groups read these. If Kestrel is
+    refused, the report says so.
+- **macOS:**
+  - **Apple's crash report** for the render, from
+    `~/Library/Logs/DiagnosticReports`. It takes the exception and the
+    crashed thread's first frames, and nothing else from it.
+  - **The system log** (`log show`): the render's own errors, and the
+    kernel's GPU messages.
+
+On both, the watcher runs in a process group of its own, so Ctrl+C in the
+render's terminal doesn't stop it too.
+
+**The machine report's operating system section** reads:
+- **Linux:**
+  - the distribution (`/etc/os-release`) and the kernel version;
+  - the machine's maker and model;
+  - the CPU model, RAM and swap (`/proc`);
+  - the display adapters (`lspci`) and NVIDIA's driver version;
+  - whether the session is Wayland or X11, and the desktop;
+  - whether a laptop is plugged in, and its charge.
+- **macOS:**
+  - the macOS version (`sw_vers`);
+  - the Mac's model, CPU and RAM (`sysctl`);
+  - the GPU's lines from `system_profiler`, leaving out the displays'
+    serial numbers;
+  - the power source and charge (`pmset`), without the battery's ID.
+
+Its 30 days of history are the kernel log's GPU errors and
+`coredumpctl`'s list of Kestrel's crashes on Linux, and Kestrel's crash
+reports on macOS. Everything else on this page is as written.
 
 ## What security software might notice, and why it's there
 
@@ -144,6 +190,7 @@ of them happens without a reason:
 |---|---|---|
 | Starts a second copy of itself with no window | The watcher: it has to outlive a render that crashes | One per logged render; exits when the render does |
 | Reads another process's exit code | That's how a crash is told apart from a closed window | Only its own render's |
+| Lists the files loaded into another process | To name the DLL a native crash happened in | Only its own render's, only after a native crash |
 | Writes a minidump of another process | The same way crash reporters in web browsers work: a dump is written from outside the crashed process | Only its own render's, only after a crash or a hang |
 | Installs a crash filter | So a native crash can wait while its dump is written, then carry on to Windows' own handling | Changes no exit code and no Windows behaviour |
 | Reads the registry | Windows' version, the CPU and machine model, display driver dates, GPU timeout settings | Read only; the machine report only |

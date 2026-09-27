@@ -53,6 +53,42 @@ fn rank(i: &wgpu::AdapterInfo) -> (u8, u8) {
 pub fn create(
     cfg: &Config,
 ) -> Result<(wgpu::Device, wgpu::Queue, wgpu::AdapterInfo, wgpu::Limits, bool)> {
+    let adapter = pick_adapter(cfg)?;
+    let info = adapter.get_info();
+    let adapter_limits = adapter.limits();
+    // The driver is the first thing a crash report is read for.
+    log::info!(
+        "adapter: {} | {:?} {:?} | vendor {:#06x} device {:#06x} | driver {} {}",
+        info.name,
+        info.backend,
+        info.device_type,
+        info.vendor,
+        info.device,
+        info.driver,
+        info.driver_info
+    );
+
+    let has_timestamps = adapter
+        .features()
+        .contains(wgpu::Features::TIMESTAMP_QUERY);
+    let mut features = wgpu::Features::empty();
+    if has_timestamps && cfg.profile {
+        features |= wgpu::Features::TIMESTAMP_QUERY;
+    }
+
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("kestrel"),
+        required_features: features,
+        required_limits: adapter_limits.clone(),
+        memory_hints: wgpu::MemoryHints::Performance,
+        trace: wgpu::Trace::Off,
+        experimental_features: wgpu::ExperimentalFeatures::disabled(),
+    }))?;
+    finish_create(device, queue, info, adapter_limits, has_timestamps)
+}
+
+/// The adapter a render with `cfg` runs on, chosen as `create` chooses it, \[5\]
+pub fn pick_adapter(cfg: &Config) -> Result<wgpu::Adapter> {
     let backends = match &cfg.gpu_backend {
         Some(b) => parse_backends(b)
             .ok_or_else(|| anyhow::anyhow!("unknown gpu backend {b:?}"))?,
@@ -87,51 +123,29 @@ pub fn create(
 
     candidates.sort_by_key(|a| rank(&a.get_info()));
 
-    let adapter = candidates.into_iter().next().ok_or_else(|| {
+    candidates.into_iter().next().ok_or_else(|| {
         anyhow::anyhow!(
             "no usable gpu found. wgpu saw no non-software adapter; \
              install or enable a graphics driver, or render with --backend cpu"
         )
-    })?;
+    })
+}
 
-    let info = adapter.get_info();
-    let adapter_limits = adapter.limits();
-    // The driver is the first thing a crash report is read for.
-    log::info!(
-        "adapter: {} | {:?} {:?} | vendor {:#06x} device {:#06x} | driver {} {}",
-        info.name,
-        info.backend,
-        info.device_type,
-        info.vendor,
-        info.device,
-        info.driver,
-        info.driver_info
-    );
-
-    let has_timestamps = adapter
-        .features()
-        .contains(wgpu::Features::TIMESTAMP_QUERY);
-    let mut features = wgpu::Features::empty();
-    if has_timestamps && cfg.profile {
-        features |= wgpu::Features::TIMESTAMP_QUERY;
-    }
-
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        label: Some("kestrel"),
-        required_features: features,
-        required_limits: adapter_limits.clone(),
-        memory_hints: wgpu::MemoryHints::Performance,
-        trace: wgpu::Trace::Off,
-        experimental_features: wgpu::ExperimentalFeatures::disabled(),
-    }))?;
-
-    // [5]
+/// The rest of `create`, once the device is open.
+fn finish_create(
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    info: wgpu::AdapterInfo,
+    adapter_limits: wgpu::Limits,
+    has_timestamps: bool,
+) -> Result<(wgpu::Device, wgpu::Queue, wgpu::AdapterInfo, wgpu::Limits, bool)> {
+    // [6]
     device.on_uncaptured_error(std::sync::Arc::new(|e| {
         log::error!("wgpu device error: {e}");
         panic!("wgpu device error: {e}");
     }));
 
-    // [6]
+    // [7]
     *LOST.lock().unwrap_or_else(|p| p.into_inner()) = None;
     device.set_device_lost_callback(|reason, message| {
         // `Destroyed` is the device being dropped at the end of a render.
@@ -147,7 +161,7 @@ pub fn create(
 /// What the device-lost callback last said, if the device was lost.
 static LOST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-/// The error for a poll or a map that failed, which is how a lost device \[7\]
+/// The error for a poll or a map that failed, which is how a lost device \[8\]
 pub(super) fn lost(device: Option<&wgpu::Device>, detail: impl std::fmt::Display) -> anyhow::Error {
     let reason = LOST
         .lock()
@@ -174,39 +188,54 @@ pub(super) fn lost(device: Option<&wgpu::Device>, detail: impl std::fmt::Display
     )
 }
 
-/// Compute-only bind group layout. `read_only[i]` says whether binding i is a \[8\]
+/// Compute-only bind group layout. `read_only[i]` says whether binding i is a \[9\]
 pub fn bind_layout(
     device: &wgpu::Device,
     label: &str,
     read_only: &[bool],
 ) -> wgpu::BindGroupLayout {
-    let entries: Vec<wgpu::BindGroupLayoutEntry> = read_only
-        .iter()
-        .enumerate()
-        .map(|(i, &ro)| wgpu::BindGroupLayoutEntry {
-            binding: i as u32,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: if i == 0 {
-                wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                }
-            } else {
-                wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: ro },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                }
-            },
-            count: None,
-        })
-        .collect();
-
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some(label),
-        entries: &entries,
+        entries: &layout_entries(read_only),
     })
+}
+
+/// `bind_layout`'s entries: binding 0 the uniforms, and a storage buffer at \[10\]
+pub fn layout_entries(read_only: &[bool]) -> Vec<wgpu::BindGroupLayoutEntry> {
+    read_only
+        .iter()
+        .enumerate()
+        .map(|(i, &ro)| {
+            if i == 0 {
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }
+            } else {
+                storage_entry(i as u32, ro)
+            }
+        })
+        .collect()
+}
+
+/// A compute storage buffer at `binding`.
+pub fn storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
 }
 
 pub fn bind(
@@ -229,7 +258,7 @@ pub fn bind(
     })
 }
 
-/// List every adapter wgpu can reach, for working out which device a render \[9\]
+/// List every adapter wgpu can reach, for working out which device a render \[11\]
 pub fn print_adapters() -> Result<()> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
     for a in instance.enumerate_adapters(wgpu::Backends::all()) {
@@ -247,7 +276,7 @@ pub fn print_adapters() -> Result<()> {
             l.max_compute_invocations_per_workgroup,
             l.max_compute_workgroups_per_dimension
         );
-        // [10]
+        // [12]
         let steal = Config::default().max_steal_percent;
         let binding = (l.max_storage_buffer_binding_size as u64).min(l.max_buffer_size);
         println!(
@@ -272,9 +301,9 @@ pub struct AdapterSummary {
     pub name: String,
     pub backend: wgpu::Backend,
     pub device_type: wgpu::DeviceType,
-    /// The most of one buffer the adapter will bind to a shader, which is \[11\]
+    /// The most of one buffer the adapter will bind to a shader, which is \[13\]
     pub binding_bytes: u64,
-    /// The largest `--max-voices` that binding takes at the configured \[12\]
+    /// The largest `--max-voices` that binding takes at the configured \[14\]
     pub max_voices: u32,
 }
 
@@ -285,7 +314,7 @@ impl AdapterSummary {
     }
 }
 
-/// Every adapter wgpu can reach, best first, and the index of the one \[13\]
+/// Every adapter wgpu can reach, best first, and the index of the one \[15\]
 pub fn survey(cfg: &Config) -> Result<(Vec<AdapterSummary>, Option<usize>)> {
     let backends = match &cfg.gpu_backend {
         Some(b) => parse_backends(b)

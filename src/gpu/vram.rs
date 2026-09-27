@@ -79,7 +79,53 @@ pub fn sample(vendor: u32, device: u32) -> Option<GpuMemory> {
     Probe::open(vendor, device).map(|mut probe| probe.read())
 }
 
-/// The instance-name prefix the performance counters give an adapter, \[9\]
+/// The adapter's dedicated video memory, without opening the performance \[9\]
+pub fn dedicated_total(vendor: u32, device: u32) -> Option<u64> {
+    total(vendor, device)
+}
+
+/// On Linux (1.2.3): the card's own figure in sysfs, which amdgpu and \[10\]
+#[cfg(target_os = "linux")]
+fn total(vendor: u32, device: u32) -> Option<u64> {
+    let id = |p: &std::path::Path| {
+        let t = std::fs::read_to_string(p).ok()?;
+        u32::from_str_radix(t.trim().trim_start_matches("0x"), 16).ok()
+    };
+    if let Ok(cards) = std::fs::read_dir("/sys/class/drm") {
+        for card in cards.flatten() {
+            let dev = card.path().join("device");
+            if id(&dev.join("vendor")) == Some(vendor) && id(&dev.join("device")) == Some(device) {
+                if let Some(b) = std::fs::read_to_string(dev.join("mem_info_vram_total"))
+                    .ok()
+                    .and_then(|t| t.trim().parse::<u64>().ok())
+                {
+                    return Some(b);
+                }
+            }
+        }
+    }
+    if vendor == 0x10de {
+        let csv = crate::falconeye::watch::tool(
+            "nvidia-smi",
+            &["--query-gpu=pci.device_id,memory.total", "--format=csv,noheader,nounits"],
+            std::time::Duration::from_secs(15),
+        )
+        .ok()?;
+        return crate::falconeye::posix::nvidia_smi_total(&csv, vendor, device);
+    }
+    None
+}
+
+/// Nothing to read on macOS yet: Apple silicon shares memory with the CPU, \[11\]
+#[cfg(not(any(windows, target_os = "linux")))]
+fn total(_vendor: u32, _device: u32) -> Option<u64> {
+    None
+}
+
+#[cfg(windows)]
+use windows_probe::total;
+
+/// The instance-name prefix the performance counters give an adapter, \[12\]
 #[cfg_attr(not(windows), allow(dead_code))]
 fn counter_prefix(luid_high: i32, luid_low: u32) -> String {
     format!("luid_0x{:08x}_0x{:08x}_phys_", luid_high as u32, luid_low)
@@ -107,8 +153,8 @@ mod windows_probe {
     use super::{counter_prefix, GpuMemory};
     use windows::core::{w, Interface, PCWSTR};
     use windows::Win32::Graphics::Dxgi::{
-        CreateDXGIFactory1, IDXGIAdapter3, IDXGIFactory1, DXGI_MEMORY_SEGMENT_GROUP_LOCAL,
-        DXGI_QUERY_VIDEO_MEMORY_INFO,
+        CreateDXGIFactory1, IDXGIAdapter1, IDXGIAdapter3, IDXGIFactory1, DXGI_ADAPTER_DESC1,
+        DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO,
     };
     use windows::Win32::System::Performance::{
         PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
@@ -124,29 +170,38 @@ mod windows_probe {
         counters: Option<Counters>,
     }
 
+    /// The DXGI adapter with these PCI ids, and its description.
+    fn find(vendor: u32, device: u32) -> Option<(IDXGIAdapter1, DXGI_ADAPTER_DESC1)> {
+        // [13]
+        let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.ok()?;
+        let mut index = 0;
+        loop {
+            // [14]
+            let adapter = unsafe { factory.EnumAdapters1(index) }.ok()?;
+            index += 1;
+            // SAFETY: fills a plain-data struct from a live adapter.
+            let Ok(desc) = (unsafe { adapter.GetDesc1() }) else {
+                continue;
+            };
+            if desc.VendorId == vendor && desc.DeviceId == device {
+                return Some((adapter, desc));
+            }
+        }
+    }
+
+    pub(super) fn total(vendor: u32, device: u32) -> Option<u64> {
+        find(vendor, device).map(|(_, desc)| desc.DedicatedVideoMemory as u64)
+    }
+
     impl Probe {
         pub(super) fn open(vendor: u32, device: u32) -> Option<Probe> {
-            // [10]
-            let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.ok()?;
-            let mut index = 0;
-            loop {
-                // [11]
-                let adapter = unsafe { factory.EnumAdapters1(index) }.ok()?;
-                index += 1;
-                // SAFETY: fills a plain-data struct from a live adapter.
-                let Ok(desc) = (unsafe { adapter.GetDesc1() }) else {
-                    continue;
-                };
-                if desc.VendorId != vendor || desc.DeviceId != device {
-                    continue;
-                }
-                return Some(Probe {
-                    adapter: adapter.cast::<IDXGIAdapter3>().ok(),
-                    dedicated_total: desc.DedicatedVideoMemory as u64,
-                    prefix: counter_prefix(desc.AdapterLuid.HighPart, desc.AdapterLuid.LowPart),
-                    counters: Counters::open(),
-                });
-            }
+            let (adapter, desc) = find(vendor, device)?;
+            Some(Probe {
+                adapter: adapter.cast::<IDXGIAdapter3>().ok(),
+                dedicated_total: desc.DedicatedVideoMemory as u64,
+                prefix: counter_prefix(desc.AdapterLuid.HighPart, desc.AdapterLuid.LowPart),
+                counters: Counters::open(),
+            })
         }
 
         pub(super) fn read(&mut self) -> GpuMemory {
@@ -156,7 +211,7 @@ mod windows_probe {
             };
             if let Some(adapter) = &self.adapter {
                 let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
-                // [12]
+                // [15]
                 let asked = unsafe {
                     adapter.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut info)
                 };
@@ -185,12 +240,12 @@ mod windows_probe {
     impl Counters {
         fn open() -> Option<Counters> {
             let mut query = 0isize;
-            // [13]
+            // [16]
             if unsafe { PdhOpenQueryW(PCWSTR::null(), 0, &mut query) } != 0 {
                 return None;
             }
             let (mut dedicated, mut shared) = (0isize, 0isize);
-            // [14]
+            // [17]
             let added = unsafe {
                 PdhAddEnglishCounterW(query, w!("\\GPU Adapter Memory(*)\\Dedicated Usage"), 0, &mut dedicated) == 0
                     && PdhAddEnglishCounterW(query, w!("\\GPU Adapter Memory(*)\\Shared Usage"), 0, &mut shared) == 0
@@ -212,20 +267,20 @@ mod windows_probe {
             unsafe { PdhCollectQueryData(self.query) == 0 }
         }
 
-        /// A counter's value summed over this adapter's instances, or `None` \[15\]
+        /// A counter's value summed over this adapter's instances, or `None` \[18\]
         fn sum(&self, counter: isize, prefix: &str) -> Option<u64> {
             let (mut bytes, mut count) = (0u32, 0u32);
-            // [16]
+            // [19]
             let status = unsafe {
                 PdhGetFormattedCounterArrayW(counter, PDH_FMT_LARGE, &mut bytes, &mut count, None)
             };
             if status != PDH_MORE_DATA {
                 return None;
             }
-            // [17]
+            // [20]
             let mut buf = vec![0u64; (bytes as usize).div_ceil(8)];
             let items = buf.as_mut_ptr() as *mut PDH_FMT_COUNTERVALUE_ITEM_W;
-            // [18]
+            // [21]
             let status = unsafe {
                 PdhGetFormattedCounterArrayW(counter, PDH_FMT_LARGE, &mut bytes, &mut count, Some(items))
             };
@@ -235,7 +290,7 @@ mod windows_probe {
             let mut total = 0u64;
             let mut found = false;
             for i in 0..count as usize {
-                // [19]
+                // [22]
                 let (name, valid, value) = unsafe {
                     let item = &*items.add(i);
                     (
@@ -265,7 +320,7 @@ mod windows_probe {
 mod tests {
     use super::*;
 
-    /// The instance names as Windows writes them, taken from `Get-Counter \[20\]
+    /// The instance names as Windows writes them, taken from `Get-Counter \[23\]
     #[test]
     fn the_counter_prefix_matches_the_instance_names_windows_uses() {
         assert_eq!(counter_prefix(0, 0x0001_1d6f), "luid_0x00000000_0x00011d6f_phys_");
@@ -273,7 +328,7 @@ mod tests {
         assert_eq!(counter_prefix(-1, 1), "luid_0xffffffff_0x00000001_phys_");
     }
 
-    /// The adapter wgpu would render on reports a total, and a usage no \[21\]
+    /// The adapter wgpu would render on reports a total, and a usage no \[24\]
     #[test]
     #[cfg(windows)]
     fn the_render_adapter_reports_its_memory() {

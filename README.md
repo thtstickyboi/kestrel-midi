@@ -63,7 +63,7 @@ Build in **release mode**; the debug build is unusable for real files. That is t
 
 Tested on NVIDIA and Intel GPUs on Windows, and on Linux. Integrated GPUs are slower but usable, and Kestrel prefers a discrete GPU when both are present. `--backend cpu` renders on the CPU reference instead, far slower, if you have no usable GPU.
 
-**Memory.** VRAM is usually the limit: the voice pool (250 MiB at the default 1,048,576 voices) plus your soundfont's samples. The most voices your card holds is printed by `kestrel --force-cli gpu-info` and on the guided renderer's first screen: 16,519,104 on an RTX 5060. If a soundfont will not fit in `--pool-budget` (2 GB), it is downsampled until it does. Kestrel checks every limit before allocating and names the flag to lower rather than failing mid-render. The details are in DESIGN.md.
+**Memory.** VRAM is usually the limit: the voice pool (250 MiB at the default 1,048,576 voices) plus your soundfont's samples. The most voices your card holds is printed by `kestrel --force-cli gpu-info` and on the guided renderer's first screen: 16,519,104 on an RTX 5060. Soundfonts with up to 8 GB of samples load, if your card has the video memory for them. An SF2 whose samples pass `--pool-budget` is loaded at half its sample rate, and again until it fits. By default the budget is three quarters of your card's video memory, and never less than 2 GB. SFZ samples are never downsampled. Kestrel checks every limit before allocating and names the flag to lower rather than failing mid-render. The details are in DESIGN.md.
 
 ## Using Kestrel
 
@@ -109,6 +109,7 @@ kestrel --force-cli render input.mid -s soundfont.sfz -o output.wav
 | `--note-grid` | off | Hold notes to BASSMIDI's 4 ms envelope grid, so notes shorter than 4 ms still sound. Only for files that rely on it. |
 | `--phase-mode` | `baseline` | `analytic` is experimental phase rotation: stacked copies of a note get different phases. Needs extra memory and minutes of preparation; see [its guide](https://github.com/thtstickyboi/kestrel-midi/blob/main/docs/analytic-phase-rotation.md). |
 | `--interp` | `linear` | `nearest`, `linear` or `cubic`. Cubic reads twice as many samples per voice. |
+| `--pool-budget MIB` | from your GPU | The most memory an SF2's samples may take. One that needs more loads at half its sample rate, and again until it fits. By default three quarters of your card's video memory, at least 2048; `--pool-budget 2048` is how 1.2.2 and earlier loaded. |
 | `--block N` | `4096` | Frames per render block. Also sets how many note-ons are held in host RAM at once. |
 | `--steal-percent` | `25` | How much of the pool one block may replace. |
 | `--format` | `float32` | `float32` or `pcm16`, for WAV. |
@@ -181,7 +182,7 @@ Known to differ from a reference GM synth:
 FalconEye is Kestrel's error catching and logging, new in 1.2.2. Nothing it writes leaves your computer unless you send it, and your PC's and Windows account's names are left out of all of it.
 
 - **Every render leaves a log** in `logs` beside `kestrel.exe` (guided renderer and API; `--log` on the command line). If a render fails, the guided renderer shows the log's path: that's the file to send with a bug report.
-- **If a render crashes or hangs**, a second, windowless `kestrel.exe` that watched it writes `<log> CRASH.txt` or `HANG.txt` beside the log, with what Windows recorded about it. A crash inside a graphics driver also gets a small minidump.
+- **If a render crashes or hangs**, a second, windowless `kestrel.exe` that watched it writes `<log> CRASH.txt` or `HANG.txt` beside the log, with what the system recorded about it. On Windows, a crash inside a graphics driver also gets a small minidump, and the log names the file the crash happened in.
 - **Extras → Machine report** (or `kestrel --force-cli report`) writes one zip with your hardware, drivers, graphics settings, recent logs and a GPU self-test that says how close your GPU runs to Windows' 2-second reset. It asks before the self-test, and separately before an optional step that needs administrator permission.
 
 **[docs/falconeye.md](docs/falconeye.md)** is the transparency report: exactly what FalconEye writes, reads and hides, and what it does that antivirus might notice.
@@ -196,7 +197,8 @@ FalconEye is Kestrel's error catching and logging, new in 1.2.2. Nothing it writ
 - **SFZ support is almost complete.** Not applied: `fillfo_depth`, the LFO `*_fade` opcodes, controller-driven LFOs, SFZ v2's `lfoN_*`, `note_selfmask`, and the per-stage envelope velocity-tracking opcodes. Kestrel warns about every opcode it does not apply.
 - **SF2's modulation LFO to filter** (`modLfoToFilterFc`) is not implemented.
 - **VRAM figures** in the progress screen and the JSON feed are Windows only. **NaN checking is off** unless you pass `--nan-guard`.
-- **FalconEye is fullest on Windows.** On Linux and macOS a render still writes its log, but the watcher can't read how a render ended, and the machine report is shorter.
+- **FalconEye on Linux and macOS is new in 1.2.3 and hasn't been tried on either yet.** There, the watcher reads how a render ended from the system's own crash records and logs, not from the render itself. There are no minidumps, and some Linux distributions only let certain groups read the kernel log. If you use one of them, a machine report and your impressions would help.
+- **A soundfont over 2 GB renders about 4% slower,** because its samples are split across GPU buffers. Past 8 GB of samples, it doesn't load.
 
 ## Planned
 

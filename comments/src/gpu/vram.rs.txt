@@ -54,6 +54,22 @@
 /// a `VramWatch` from anything that should not wait.
 
 [9] src/gpu/vram.rs:105
+/// The adapter's dedicated video memory, without opening the performance
+/// counters `sample` does, so it is quick. It never changes on a machine,
+/// which is why `gpu::auto_pool_budget` sizes from it and not from what is
+/// free: a budget that moved with other programs could load one soundfont
+/// at two rates on two runs.
+
+[10] src/gpu/vram.rs:114
+/// On Linux (1.2.3): the card's own figure in sysfs, which amdgpu and
+/// Intel's xe publish, or `nvidia-smi` for NVIDIA's driver, which does not.
+/// Plain files and a tool, no `unsafe`.
+
+[11] src/gpu/vram.rs:148
+/// Nothing to read on macOS yet: Apple silicon shares memory with the CPU,
+/// and wgpu does not pass on Metal's working-set figure.
+
+[12] src/gpu/vram.rs:158
 /// The instance-name prefix the performance counters give an adapter,
 /// `luid_0x<high>_0x<low>_phys_` in lower-case hex. A linked multi-GPU adapter
 /// has several `phys` instances under one LUID, and they are summed.
@@ -61,56 +77,56 @@
 /// Only the Windows probe calls it, but it is plain formatting and its test
 /// runs everywhere, so it is not compiled out elsewhere -- only the lint is.
 
-[10] src/gpu/vram.rs:157
-            // SAFETY: takes no arguments and returns an owned COM reference,
-            // released when the wrapper drops.
+[13] src/gpu/vram.rs:210
+        // SAFETY: takes no arguments and returns an owned COM reference,
+        // released when the wrapper drops.
 
-[11] src/gpu/vram.rs:162
-                // SAFETY: an index past the last adapter returns
-                // DXGI_ERROR_NOT_FOUND, which ends the walk through `?`; an
-                // adapter that is returned is an owned reference.
+[14] src/gpu/vram.rs:215
+            // SAFETY: an index past the last adapter returns
+            // DXGI_ERROR_NOT_FOUND, which ends the walk through `?`; an
+            // adapter that is returned is an owned reference.
 
-[12] src/gpu/vram.rs:190
+[15] src/gpu/vram.rs:252
                 // SAFETY: `info` is a live, writable struct of exactly the type
                 // the call fills, and node 0 exists on every adapter.
 
-[13] src/gpu/vram.rs:220
+[16] src/gpu/vram.rs:282
             // SAFETY: a null data source asks for live data, and `query` is a
             // writable handle slot.
 
-[14] src/gpu/vram.rs:226
+[17] src/gpu/vram.rs:288
             // SAFETY: `query` is the query just opened; both paths are static
             // NUL-terminated wide strings; the handle slots are writable, and
             // the counters they receive belong to the query.
 
-[15] src/gpu/vram.rs:250
+[18] src/gpu/vram.rs:312
         /// A counter's value summed over this adapter's instances, or `None`
         /// if the adapter has none.
 
-[16] src/gpu/vram.rs:254
+[19] src/gpu/vram.rs:316
             // SAFETY: with no buffer the call writes only the size it needs and
             // the item count, both into writable locals.
 
-[17] src/gpu/vram.rs:262
+[20] src/gpu/vram.rs:324
             // Whole u64 words, so the buffer is aligned for the item structs
             // the call writes at its start. The names those items point to are
             // written later in the same buffer.
 
-[18] src/gpu/vram.rs:267
+[21] src/gpu/vram.rs:329
             // SAFETY: the buffer holds at least the `bytes` the first call
             // asked for and is aligned for PDH_FMT_COUNTERVALUE_ITEM_W.
 
-[19] src/gpu/vram.rs:278
+[22] src/gpu/vram.rs:340
                 // SAFETY: the call wrote `count` items at the start of `buf`,
                 // which is neither freed nor moved during this loop, and each
                 // name points at a NUL-terminated string inside it.
 
-[20] src/gpu/vram.rs:310
+[23] src/gpu/vram.rs:372
     /// The instance names as Windows writes them, taken from `Get-Counter
     /// '\GPU Adapter Memory(*)\Dedicated Usage'` on the RTX 5060 machine,
     /// 2026-09-12.
 
-[21] src/gpu/vram.rs:320
+[24] src/gpu/vram.rs:382
     /// The adapter wgpu would render on reports a total, and a usage no
     /// larger than it. Windows only: elsewhere there is no implementation, and
     /// `sample` saying so is the correct answer.

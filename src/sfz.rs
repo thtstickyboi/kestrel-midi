@@ -9,7 +9,7 @@ use crate::config::Config;
 use crate::resample;
 use crate::wav;
 use anyhow::{bail, Context, Result};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Ignore the note-off gate entirely (SFZ `loop_mode=one_shot`).
@@ -101,6 +101,8 @@ struct Parser {
     depth: u32,
     /// `#define $NAME value`, longest name first. \[4\]
     defines: Vec<(String, String)>,
+    /// A failed `#include` is not logged. See `regions`.
+    quiet: bool,
 }
 
 impl Parser {
@@ -217,7 +219,9 @@ impl Parser {
                 let r = self.parse_file(&p, out);
                 self.depth -= 1;
                 if let Err(e) = r {
-                    log::warn!("{}", e);
+                    if !self.quiet {
+                        log::warn!("{}", e);
+                    }
                 }
                 continue;
             }
@@ -294,15 +298,16 @@ fn find_value_end(s: &str) -> usize {
     s.len()
 }
 
-pub fn load(path: impl AsRef<Path>, cfg: &Config) -> Result<Bank> {
-    let path = path.as_ref();
+/// Every region `path` defines, each with the `default_path` it was written \[12\]
+fn regions(path: &Path, quiet: bool) -> Result<(Parser, Vec<(PathBuf, OpcodeSet)>)> {
     let root = path.parent().unwrap_or(Path::new(".")).to_path_buf();
 
     let mut parser = Parser {
-        root: root.clone(),
+        root,
         unknown: HashMap::new(),
         depth: 0,
         defines: Vec::new(),
+        quiet,
     };
 
     let mut sections: Vec<(String, OpcodeSet)> = Vec::new();
@@ -311,7 +316,7 @@ pub fn load(path: impl AsRef<Path>, cfg: &Config) -> Result<Bank> {
         ops.canonicalise();
     }
 
-    // [12]
+    // [13]
     let mut default_path = PathBuf::new();
     let mut global = OpcodeSet::default();
     let mut master = OpcodeSet::default();
@@ -370,6 +375,41 @@ pub fn load(path: impl AsRef<Path>, cfg: &Config) -> Result<Bank> {
     if region_sets.is_empty() {
         bail!("{}: no <region> sections", path.display());
     }
+    Ok((parser, region_sets))
+}
+
+/// The sample files `path` names, once each, resolved as `load` resolves them
+/// and without reading any of them.
+///
+/// For the render log. An `.sfz` is a few kilobytes of text that names its
+/// samples, so its own size says nothing about the library: a 4.28 GB one was
+/// logged as "0.0 MiB" (reported 2026-09-27). What the render log wants is
+/// what these add up to.
+pub fn sample_files(path: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
+    let (parser, region_sets) = regions(path.as_ref(), true)?;
+    // Resolving checks the disk, so each written path is resolved once: a
+    // library that includes one keymap per layer names each sample many times.
+    let mut written: HashSet<(&Path, &str)> = HashSet::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut files = Vec::new();
+    for (default_path, ops) in &region_sets {
+        let Some(rel) = ops.get("sample") else {
+            continue;
+        };
+        if ops.i32("end") == Some(-1) || !written.insert((default_path.as_path(), rel)) {
+            continue;
+        }
+        let file = parser.resolve(default_path, rel);
+        if seen.insert(file.clone()) {
+            files.push(file);
+        }
+    }
+    Ok(files)
+}
+
+pub fn load(path: impl AsRef<Path>, cfg: &Config) -> Result<Bank> {
+    let path = path.as_ref();
+    let (mut parser, region_sets) = regions(path, false)?;
 
     // ---- load every referenced wav once -----------------------------------
     let mut pool: Vec<i16> = Vec::new();
@@ -403,6 +443,10 @@ pub fn load(path: impl AsRef<Path>, cfg: &Config) -> Result<Bank> {
             pool_rate,
         ) {
             Ok(c) => c,
+            // Not one sample's problem but the whole soundfont's.
+            Err(e) if e.is::<PoolTooBig>() => {
+                return Err(anyhow::anyhow!("{}: {e}", path.display()));
+            }
             Err(e) => {
                 *sample_errors.entry(format!("{e:#}")).or_default() += 1;
                 if spath.to_string_lossy().contains('$') {
@@ -421,7 +465,7 @@ pub fn load(path: impl AsRef<Path>, cfg: &Config) -> Result<Bank> {
                 *parser.unknown.entry(what).or_default() += 1;
             }
             if channels.len() == 2 {
-                // [13]
+                // [14]
                 r.pan = if ch == 0 { -1.0 } else { 1.0 };
             }
             region_ids.push(regions.len() as u32);
@@ -435,9 +479,9 @@ pub fn load(path: impl AsRef<Path>, cfg: &Config) -> Result<Bank> {
 
     for (op, n) in &parser.unknown {
         match op.strip_prefix(UNIMPL_TAG) {
-            // [14]
-            Some(group) => log::warn!("sfz: {group} not implemented, {n} opcodes ignored"),
             // [15]
+            Some(group) => log::warn!("sfz: {group} not implemented, {n} opcodes ignored"),
+            // [16]
             None => log::warn!("sfz: ignored unsupported {op} ({n} times)"),
         }
     }
@@ -551,12 +595,17 @@ fn load_sample_channels(
         };
 
         let len = data.len() as u32;
-        // [16]
+        // [17]
         let declared_loop = w.loop_points.is_some();
         let (mut ls, mut le) = w.loop_points.unwrap_or((0, len.saturating_sub(1)));
         ls = (ls as f64 * ratio).round() as u32;
         le = (le as f64 * ratio).round() as u32;
 
+        check_pool_frames(
+            (pool.len() + data.len() + POOL_GUARD) as u64,
+            pool_rate,
+            &spath.to_string_lossy(),
+        )?;
         let start = pool.len() as u32;
         pool.extend_from_slice(&data);
         pool.extend(std::iter::repeat_n(0i16, POOL_GUARD));
@@ -580,7 +629,7 @@ fn load_sample_channels(
     Ok(out)
 }
 
-/// Every opcode this loader reads. Anything outside it is dropped, and being \[17\]
+/// Every opcode this loader reads. Anything outside it is dropped, and being \[18\]
 const KNOWN_OPCODES: &[&str] = &[
     "sample",
     "lokey",
@@ -629,25 +678,25 @@ const KNOWN_OPCODES: &[&str] = &[
     "pitchlfo_depth",
     "pitchlfo_delay",
     "pitchlfo_fade",
-    // [18]
+    // [19]
     "fillfo_freq",
     "fillfo_delay",
     "fillfo_depth",
     "fillfo_fade",
 ];
 
-/// Opcodes recognised as deliberately unimplemented, grouped by the feature \[19\]
+/// Opcodes recognised as deliberately unimplemented, grouped by the feature \[20\]
 const UNIMPL_TAG: char = '';
 
 const UNIMPLEMENTED_GROUPS: &[(&str, &[&str])] = &[
-    // [20]
+    // [21]
     (
         "LFO controller modulation",
         &["amplfo_", "fillfo_", "pitchlfo_", "pitchlfo", "amplfo", "fillfo", "lfo"],
     ),
-    // [21]
-    ("effects", &["reverb_", "chorus_", "delay_", "send_effect", "send", "effect"]),
     // [22]
+    ("effects", &["reverb_", "chorus_", "delay_", "send_effect", "send", "effect"]),
+    // [23]
     (
         "envelope veltrack",
         &[
@@ -662,14 +711,14 @@ const UNIMPLEMENTED_GROUPS: &[(&str, &[&str])] = &[
             "gain_veltrack",
         ],
     ),
-    // [23]
-    ("voice masking", &["note_selfmask", "note_polyphony", "polyphony"]),
     // [24]
+    ("voice masking", &["note_selfmask", "note_polyphony", "polyphony"]),
+    // [25]
     ("crossfade curve", &["xf_velcurve", "xf_keycurve", "xf_cccurve"]),
     ("CC labelling", &["set_cc", "label_cc", "label_key"]),
 ];
 
-/// Controller ranges: `loccN`/`hiccN`, which gate a region on a controller's \[25\]
+/// Controller ranges: `loccN`/`hiccN`, which gate a region on a controller's \[26\]
 const SILENT_CC_RANGES: &[&str] =
     &["locc", "hicc", "xfin_locc", "xfin_hicc", "xfout_locc", "xfout_hicc"];
 
@@ -707,7 +756,7 @@ fn region_from_opcodes(
         ..Default::default()
     };
 
-    // [26]
+    // [27]
     if let Some(k) = ops.key("lokey") {
         r.key_lo = k.clamp(0, 127) as u8;
     }
@@ -746,7 +795,7 @@ fn region_from_opcodes(
         r.amp_veltrack = v.clamp(-100.0, 100.0);
     }
 
-    // [27]
+    // [28]
     r.loop_mode = match ops.get("loop_mode").unwrap_or("") {
         "loop_continuous" => LoopMode::Continuous,
         "loop_sustain" => LoopMode::UntilRelease,
@@ -760,14 +809,14 @@ fn region_from_opcodes(
                 LoopMode::NoLoop
             }
         }
-        // [28]
+        // [29]
         other => {
             unhandled.push(format!("loop_mode={other} (unknown, treated as no_loop)"));
             LoopMode::NoLoop
         }
     };
 
-    // [29]
+    // [30]
     if let Some(v) = ops.i32("xfin_lovel") {
         r.xfin_lo = v.clamp(0, 127) as u8;
     }
@@ -780,7 +829,7 @@ fn region_from_opcodes(
     if let Some(v) = ops.i32("xfout_hivel") {
         r.xfout_hi = v.clamp(0, 127) as u8;
     }
-    // [30]
+    // [31]
     if r.xfin_hi < r.xfin_lo {
         unhandled.push("xfin_hivel < xfin_lovel (ignored)".to_string());
         r.xfin_lo = 0;
@@ -792,7 +841,7 @@ fn region_from_opcodes(
         r.xfout_hi = 127;
     }
 
-    // [31]
+    // [32]
     if let Some(v) = ops.f32("lorand") {
         r.rand_lo = v.clamp(0.0, 1.0);
     }
@@ -804,7 +853,7 @@ fn region_from_opcodes(
             "lorand={} > hirand={} (empty range, ignored)",
             r.rand_lo, r.rand_hi
         ));
-        // [32]
+        // [33]
         r.rand_lo = 0.0;
         r.rand_hi = 1.0;
     }
@@ -812,7 +861,7 @@ fn region_from_opcodes(
     if let Some(o) = ops.i32("offset") {
         r.addr_start = o.max(0);
     }
-    // [33]
+    // [34]
     let to_source = |resampled: u32| {
         if info.resample_ratio > 0.0 {
             (resampled as f32 / info.resample_ratio).round() as i32
@@ -832,7 +881,7 @@ fn region_from_opcodes(
         r.addr_loop_end = le - to_source(info.loop_end);
     }
 
-    // [34]
+    // [35]
     if let Some(d) = ops.f32("amplfo_depth") {
         r.mod_lfo_to_volume = -10.0 * d;
         r.mod_lfo_hz = ops.f32("amplfo_freq").unwrap_or(0.0).max(0.0);
@@ -843,7 +892,7 @@ fn region_from_opcodes(
         r.vib_lfo_hz = ops.f32("pitchlfo_freq").unwrap_or(0.0).max(0.0);
         r.vib_lfo_delay = ops.f32("pitchlfo_delay").unwrap_or(0.0).max(0.0);
     }
-    // [35]
+    // [36]
     if ops.f32("fillfo_depth").is_some_and(|d| d != 0.0) {
         unhandled.push("fillfo_depth (the filter LFO is not implemented)".to_string());
     }
@@ -871,20 +920,20 @@ fn region_from_opcodes(
     if let Some(vt) = ops.f32("fil_veltrack") {
         r.filter_veltrack_cents = vt.clamp(-9600.0, 9600.0);
     }
-    // [36]
+    // [37]
     if let Some(kind) = ops.get("fil_type") {
         if !kind.starts_with("lpf") {
             r.filter_fc_cents = 13500.0;
             r.filter_veltrack_cents = 0.0;
         }
     }
-    // [37]
+    // [38]
     let group_id = ops.i32("group").unwrap_or(0).clamp(0, 255);
     match ops.i32("off_by") {
         Some(off) if off.clamp(0, 255) == group_id && group_id > 0 => {
             r.exclusive_class = group_id as u8;
         }
-        // [38]
+        // [39]
         Some(_) => unhandled.push("off_by (cross-group, not implemented)".to_string()),
         None => {}
     }
@@ -933,7 +982,35 @@ mod tests {
             unknown: HashMap::new(),
             depth: 0,
             defines: Vec::new(),
+            quiet: false,
         }
+    }
+
+    /// The samples an `.sfz` names, for the render log: each file once however \[40\]
+    #[test]
+    fn sample_files_lists_each_named_sample_once() {
+        let dir = std::env::temp_dir().join(format!("kestrel_sfz_sample_files_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        std::fs::create_dir_all(dir.join("b")).unwrap();
+        for f in ["a/one.wav", "a/two.wav", "b/one.wav", "off.wav"] {
+            std::fs::write(dir.join(f), [0u8; 4]).unwrap();
+        }
+        std::fs::write(dir.join("keys.sfz"), "<region> sample=one.wav key=60\n<region> sample=two.wav key=61\n").unwrap();
+        let sfz = dir.join("lib.sfz");
+        std::fs::write(
+            &sfz,
+            "<control> default_path=a/\n<group> lovel=1 hivel=64\n#include \"keys.sfz\"\n\
+             <group> lovel=65 hivel=127\n#include \"keys.sfz\"\n\
+             <control> default_path=b\\\n<region> sample=one.wav key=62\n\
+             <region> sample=../off.wav end=-1\n",
+        )
+        .unwrap();
+        let files = sample_files(&sfz).unwrap();
+        let want: Vec<PathBuf> = ["a/one.wav", "a/two.wav", "b/one.wav"].iter().map(|f| dir.join(f)).collect();
+        let canon = |v: &[PathBuf]| v.iter().map(|p| p.canonicalize().unwrap()).collect::<Vec<_>>();
+        assert_eq!(canon(&files), canon(&want));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Feed lines through the same `#define` reader `parse_file` uses.
@@ -960,14 +1037,14 @@ mod tests {
         assert_eq!(out, ["sample=WYV-64-64.wav"]);
     }
 
-    /// `$KEY` and `$KEYS` can both be defined. Replacing the shorter one first \[39\]
+    /// `$KEY` and `$KEYS` can both be defined. Replacing the shorter one first \[41\]
     #[test]
     fn longest_name_wins() {
         let out = expand(&["#define $KEY a", "#define $KEYS b", "sample=$KEYS/$KEY.wav"]);
         assert_eq!(out, ["sample=b/a.wav"]);
     }
 
-    /// Redefinition takes effect from that point on, which is how a library \[40\]
+    /// Redefinition takes effect from that point on, which is how a library \[42\]
     #[test]
     fn redefinition_applies_from_that_point() {
         let out = expand(&["#define $L 1", "a=$L", "#define $L 2", "b=$L"]);
@@ -986,7 +1063,7 @@ mod tests {
         assert_eq!(out, ["sample=root/v1/s.wav"]);
     }
 
-    /// Left in place rather than blanked, so it survives into the resolved \[41\]
+    /// Left in place rather than blanked, so it survives into the resolved \[43\]
     #[test]
     fn an_undefined_name_survives_for_the_report() {
         let out = expand(&["#define $A a", "sample=$A-$NOPE.wav"]);

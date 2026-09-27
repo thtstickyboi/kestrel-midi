@@ -155,6 +155,7 @@ mod filter {
 }
 
 /// `crash <code> <address> <thread> <pointers>\n`, in hex but the thread, \[19\]
+#[cfg_attr(not(windows), allow(dead_code))]
 fn crash_line(buf: &mut [u8; 96], code: u32, address: usize, thread: u32, pointers: usize) -> usize {
     fn hex(buf: &mut [u8], at: &mut usize, v: u64, digits: u32) {
         for i in (0..digits).rev() {
@@ -227,6 +228,7 @@ pub fn disarm_crash_filter() {
     filter::PIPE.store(0, std::sync::atomic::Ordering::SeqCst);
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn dump_event_name(pid: u32) -> String {
     format!("Local\\falconeye-dump-{pid}")
 }
@@ -285,13 +287,61 @@ impl Process {
         written.map_err(|e| format!("MiniDumpWriteDump: {e}"))
     }
 
+    /// The module `address` falls in, in the process: its file name and how \[24\]
+    pub fn module_at(&self, address: u64) -> Option<(String, u64)> {
+        use windows::Win32::Foundation::HMODULE;
+        use windows::Win32::System::ProcessStatus::{
+            EnumProcessModulesEx, GetModuleBaseNameW, GetModuleInformation, LIST_MODULES_ALL, MODULEINFO,
+        };
+        let size = std::mem::size_of::<HMODULE>();
+        let mut modules = vec![HMODULE::default(); 512];
+        loop {
+            let mut needed = 0u32;
+            // [25]
+            unsafe {
+                EnumProcessModulesEx(
+                    self.handle,
+                    modules.as_mut_ptr(),
+                    (modules.len() * size) as u32,
+                    &mut needed,
+                    LIST_MODULES_ALL,
+                )
+            }
+            .ok()?;
+            let n = needed as usize / size;
+            if n <= modules.len() {
+                modules.truncate(n);
+                break;
+            }
+            modules.resize(n, HMODULE::default());
+        }
+        for module in modules {
+            let mut info = MODULEINFO::default();
+            // [26]
+            let read = unsafe {
+                GetModuleInformation(self.handle, module, &mut info, std::mem::size_of::<MODULEINFO>() as u32)
+            };
+            if read.is_err() {
+                continue;
+            }
+            let base = info.lpBaseOfDll as u64;
+            if address >= base && address < base + info.SizeOfImage as u64 {
+                let mut name = [0u16; 260];
+                // [27]
+                let len = unsafe { GetModuleBaseNameW(self.handle, module, &mut name) } as usize;
+                return Some((String::from_utf16_lossy(&name[..len.min(name.len())]), address - base));
+            }
+        }
+        None
+    }
+
     /// Let the render's crash filter go on, once its dump is written.
     pub fn release(pid: u32) {
         use windows::core::HSTRING;
         use windows::Win32::Foundation::CloseHandle;
         use windows::Win32::System::Threading::{OpenEventW, SetEvent, EVENT_MODIFY_STATE};
         let name = HSTRING::from(dump_event_name(pid));
-        // [24]
+        // [28]
         unsafe {
             if let Ok(event) = OpenEventW(EVENT_MODIFY_STATE, false, &name) {
                 let _ = SetEvent(event);
@@ -306,10 +356,13 @@ impl Process {
     pub fn dump(&self, _pid: u32, _path: &std::path::Path, _crash: Option<Crash>) -> Result<(), String> {
         Err("minidumps are Windows only".into())
     }
+    pub fn module_at(&self, _address: u64) -> Option<(String, u64)> {
+        None
+    }
     pub fn release(_pid: u32) {}
 }
 
-// [25]
+// [29]
 
 /// A string value under `HKEY_LOCAL_MACHINE\key`.
 #[cfg(windows)]
@@ -324,7 +377,7 @@ pub fn reg_string(key: &str, name: &str) -> Option<String> {
         return None;
     }
     let mut buf = vec![0u16; (bytes as usize).div_ceil(2)];
-    // [26]
+    // [30]
     let second = unsafe {
         RegGetValueW(
             HKEY_LOCAL_MACHINE,
@@ -404,7 +457,7 @@ pub fn memory() -> Option<Memory> {
     None
 }
 
-/// Plugged in or not, and the battery's charge; `battery` is `None` with no \[27\]
+/// Plugged in or not, and the battery's charge; `battery` is `None` with no \[31\]
 #[derive(Debug, Clone, Copy)]
 pub struct Power {
     pub plugged_in: Option<bool>,
@@ -445,7 +498,7 @@ pub enum Elevated {
     Failed(String),
 }
 
-/// Run `exe args` as administrator, through Windows' own permission prompt \[28\]
+/// Run `exe args` as administrator, through Windows' own permission prompt \[32\]
 #[cfg(windows)]
 pub fn run_elevated(exe: &std::path::Path, args: &str, timeout: Duration) -> Elevated {
     use windows::core::{HSTRING, PCWSTR};
@@ -462,7 +515,7 @@ pub fn run_elevated(exe: &std::path::Path, args: &str, timeout: Duration) -> Ele
         nShow: 0, // SW_HIDE: the elevated part has nothing to show
         ..Default::default()
     };
-    // [29]
+    // [33]
     if let Err(e) = unsafe { ShellExecuteExW(&mut info) } {
         // HRESULT_FROM_WIN32(ERROR_CANCELLED): the prompt was refused.
         return if e.code().0 as u32 == 0x8007_04C7 { Elevated::Declined } else { Elevated::Failed(e.to_string()) };
@@ -471,7 +524,7 @@ pub fn run_elevated(exe: &std::path::Path, args: &str, timeout: Duration) -> Ele
         return Elevated::Failed("no process was started".into());
     }
     let ms = timeout.as_millis().min(u32::MAX as u128 - 1) as u32;
-    // [30]
+    // [34]
     unsafe {
         let done = WaitForSingleObject(info.hProcess, ms) == windows::Win32::Foundation::WAIT_OBJECT_0;
         let mut code = 0u32;
@@ -492,10 +545,10 @@ pub fn run_elevated(_exe: &std::path::Path, _args: &str, _timeout: Duration) -> 
 
 // ---- DX12's reason for a lost device --------------------------------------
 
-/// Why DX12 removed `device`, when it is a DX12 device: the one thing that \[31\]
+/// Why DX12 removed `device`, when it is a DX12 device: the one thing that \[35\]
 #[cfg(windows)]
 pub fn dx12_removed_reason(device: &wgpu::Device) -> Option<(u32, &'static str)> {
-    // [32]
+    // [36]
     let code = unsafe {
         let hal = device.as_hal::<wgpu::hal::api::Dx12>()?;
         match hal.raw_device().GetDeviceRemovedReason() {
@@ -525,10 +578,10 @@ pub fn describe_removed(code: u32) -> &'static str {
     }
 }
 
-/// Crash with an access violation, for `KESTREL_CRASH_TEST=segv`: the native \[33\]
+/// Crash with an access violation, for `KESTREL_CRASH_TEST=segv`: the native \[37\]
 #[cfg(feature = "dev")]
 pub fn access_violation() -> ! {
-    // [34]
+    // [38]
     unsafe { (0x10 as *mut u8).write_volatile(1) };
     unreachable!("the write above faults")
 }

@@ -314,12 +314,12 @@ pub(super) struct BatchSources {
     pub sort: String,
 }
 
-pub(super) fn batch_sources(cfg: &Config, bank: &Bank, s: &Strides) -> Result<BatchSources> {
+pub(super) fn batch_sources(cfg: &Config, bank: &Bank, parts: PoolParts, s: &Strides) -> Result<BatchSources> {
     use Role::*;
     let src = |body: &str| shader_source(body, cfg, bank);
     let render = |chan: bool, glide: bool| {
         let v = chan as u32 | ((glide as u32) << 1);
-        laned(&render_source(cfg, bank, chan, glide), &[("main", Render(v))], s)
+        laned(&render_source(cfg, bank, parts, chan, glide), &[("main", Render(v))], s)
     };
     Ok(BatchSources {
         spawn: laned(&src(include_str!("../../shaders/spawn.wgsl")), &[("main", Plain), ("commit", Plain)], s)?,
@@ -398,25 +398,12 @@ pub(super) struct BatchLayouts {
 
 impl BatchLayouts {
     /// The solo layouts with binding 0 as the lanes' uniforms, the second half \[13\]
-    fn new(device: &wgpu::Device) -> Self {
+    fn new(device: &wgpu::Device, pool_rest: u32) -> Self {
+        let mut render = vec![(1, true), (2, true), (3, true), (4, false), (5, false), (6, true), (7, true), (8, true), (9, true), (11, true)];
+        render.extend((0..pool_rest).map(|k| (POOL_PART_BINDING + k, true)));
         BatchLayouts {
             spawn: layout(device, "batch spawn", &[(1, true), (2, false), (3, false)]),
-            render: layout(
-                device,
-                "batch render",
-                &[
-                    (1, true),
-                    (2, true),
-                    (3, true),
-                    (4, false),
-                    (5, false),
-                    (6, true),
-                    (7, true),
-                    (8, true),
-                    (9, true),
-                    (11, true),
-                ],
-            ),
+            render: layout(device, "batch render", &render),
             reduce: layout(device, "batch reduce", &[(1, true), (2, false)]),
             compact: layout(device, "batch compact", &[(1, false), (3, false), (4, false), (5, false), (6, false)]),
             select: layout(device, "batch select", &[(1, true), (2, false), (3, false)]),
@@ -614,6 +601,8 @@ pub struct GpuBatch {
     /// What the lanes' backends share, apart from the lanes themselves.
     host: LaneHost,
     pool_buf: wgpu::Buffer,
+    /// The sample pool's other parts, when it has them; see `pool_parts`.
+    pool_rest: Vec<wgpu::Buffer>,
     menv_factor_buf: wgpu::Buffer,
     readback_out: wgpu::Buffer,
     readback_state: wgpu::Buffer,
@@ -808,15 +797,16 @@ impl GpuBatch {
 
         let shape = Shape {
             slots: capacity,
-            pool_words: (shared.pool_buf.size() / 4) as u32,
+            pool_words: shared.pool_words,
             sort_key: SortKeyLayout::plan(bank),
             params_per_variant: params.len() as u32,
             menv_factor_half: bank.menv_factor_half,
             menv_log2_base,
             glide_base,
         };
-        let layouts = BatchLayouts::new(&device);
-        let pipes = BatchPipelines::new(&device, cfg, batch_sources(cfg, bank, &strides)?, &layouts);
+        let (pool_first, pool_rest) = shared.pool_split();
+        let layouts = BatchLayouts::new(&device, pool_rest.len() as u32);
+        let pipes = BatchPipelines::new(&device, cfg, batch_sources(cfg, bank, shared.pool_parts, &strides)?, &layouts);
 
         let mut b = GpuBatch {
             cfg: cfg.clone(),
@@ -867,7 +857,8 @@ impl GpuBatch {
                     grown: false,
                 }),
             },
-            pool_buf: shared.pool_buf.clone(),
+            pool_buf: pool_first.clone(),
+            pool_rest: pool_rest.to_vec(),
             menv_factor_buf,
             readback_out,
             readback_state,
@@ -926,26 +917,24 @@ impl GpuBatch {
         let u = &self.lane_u_buf;
         let ll = &self.lane_list_buf;
         let slots = self.host.slots.lock().unwrap();
+        let mut render = vec![
+            (0, u),
+            (12, ll),
+            (1, &self.pool_buf),
+            (2, &slots.params_buf),
+            (3, &self.gates_buf),
+            (4, &self.voices_buf),
+            (5, &self.partials_buf),
+            (6, &self.state_buf),
+            (7, &self.chan_buf),
+            (8, &slots.menv_buf),
+            (9, &self.menv_factor_buf),
+            (11, &self.slots_buf),
+        ];
+        render.extend(self.pool_rest.iter().enumerate().map(|(k, b)| (POOL_PART_BINDING + k as u32, b)));
         BatchGroups {
             spawn: group(d, &l.spawn, &[(0, u), (12, ll), (1, &self.cmds_buf), (2, &self.voices_buf), (3, &self.state_buf)]),
-            render: group(
-                d,
-                &l.render,
-                &[
-                    (0, u),
-                    (12, ll),
-                    (1, &self.pool_buf),
-                    (2, &slots.params_buf),
-                    (3, &self.gates_buf),
-                    (4, &self.voices_buf),
-                    (5, &self.partials_buf),
-                    (6, &self.state_buf),
-                    (7, &self.chan_buf),
-                    (8, &slots.menv_buf),
-                    (9, &self.menv_factor_buf),
-                    (11, &self.slots_buf),
-                ],
-            ),
+            render: group(d, &l.render, &render),
             reduce: group(d, &l.reduce, &[(0, u), (12, ll), (1, &self.partials_buf), (2, &self.out_buf)]),
             compact: group(
                 d,
@@ -1516,8 +1505,8 @@ mod tests {
             block_sums: cfg.pool_slots().div_ceil(cfg.workgroup_size),
             variants: cfg.max_param_variants.max(1),
         };
-        let src = batch_sources(&cfg, &bank, &s).unwrap();
-        let layouts = BatchLayouts::new(&device);
+        let src = batch_sources(&cfg, &bank, PoolParts { words_each: 1, count: 1 }, &s).unwrap();
+        let layouts = BatchLayouts::new(&device, 0);
         device.push_error_scope(wgpu::ErrorFilter::Validation);
         let _p = BatchPipelines::new(&device, &cfg, src, &layouts);
         let err = pollster::block_on(device.pop_error_scope());

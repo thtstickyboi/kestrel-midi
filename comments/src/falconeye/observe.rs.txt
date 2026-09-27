@@ -16,12 +16,21 @@
 /// configuration it runs with.
 
 [3] src/falconeye/observe.rs:61
+/// What an `.sfz`'s samples come to on disk, to follow its own size in the
+/// header; empty for anything else, whose samples are inside it.
+///
+/// An `.sfz` is a few kilobytes of text, so on its own the header said "0.0
+/// MiB" for a 4.28 GB library (reported 2026-09-27). What it holds once
+/// loaded, which is what goes to the GPU, is the "soundfont:" or "loaded"
+/// line further down.
+
+[4] src/falconeye/observe.rs:92
 /// Passes everything to the front end's observer, and writes the render log's
 /// breadcrumbs on the way: each phase as it starts, the device once it is
 /// set up, and about once a second where the render is. A log that ends
 /// mid-render ends on the last of these.
 
-[4] src/falconeye/observe.rs:169
+[5] src/falconeye/observe.rs:203
 /// Fail on purpose partway through a render, to see what each kind of failure
 /// leaves behind: `KESTREL_CRASH_TEST=<kind>@<block>`. `panic` panics, `lost`
 /// destroys the device as a driver reset would lose it, `abort` aborts,
@@ -29,6 +38,6 @@
 /// violation, and `hang` stops finishing blocks. Dev builds only; the release
 /// zips do not contain it.
 
-[5] src/falconeye/observe.rs:194
+[6] src/falconeye/observe.rs:228
         // Stops finishing blocks while the heartbeat goes on, as a render
         // stuck on the device would.

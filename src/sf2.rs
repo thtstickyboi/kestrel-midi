@@ -666,16 +666,21 @@ fn build_pool(
                 }
                 break;
             }
-            pool_rate /= 2;
             log::warn!(
-                "sample pool does not fit the budget; downsampling the pool to {} Hz",
-                pool_rate
+                "sample pool is {:.1} MiB at {} Hz, over the {} MiB --pool-budget; downsampling it to {} Hz. \
+                 The budget is sized from the GPU unless --pool-budget gives one, and a larger one keeps \
+                 the full rate if the card has room",
+                est as f64 * 2.0 / 1048576.0,
+                pool_rate,
+                cfg.sample_pool_budget >> 20,
+                pool_rate / 2
             );
+            pool_rate /= 2;
         }
     } else if raw_frames * 2 > cfg.sample_pool_budget {
         log::warn!(
             "sample pool is {:.1} MiB, over the {:.1} MiB budget; \
-             enable --resample-pool to allow automatic downsampling",
+             without --no-resample-pool it would be downsampled to fit",
             raw_frames as f64 * 2.0 / 1048576.0,
             cfg.sample_pool_budget as f64 / 1048576.0
         );
@@ -717,6 +722,11 @@ fn build_pool(
         loop_start = loop_start.min(len.saturating_sub(1));
         loop_end = loop_end.min(len);
 
+        crate::bank::check_pool_frames(
+            (pool.len() + data.len()) as u64 + POOL_GUARD as u64,
+            pool_rate,
+            "this SF2",
+        )?;
         let start = pool.len() as u32;
         pool.extend_from_slice(&data);
         pool.extend(std::iter::repeat_n(0i16, POOL_GUARD as usize));

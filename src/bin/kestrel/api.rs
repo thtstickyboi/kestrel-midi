@@ -148,6 +148,8 @@ struct LoadKey {
     sf_programs: Option<String>,
     /// Option arguments not in `checks::LOAD_NEUTRAL`, sorted.
     flags: Vec<String>,
+    /// The sample pool budget, which the adapter options size when \[9\]
+    budget: u64,
 }
 
 struct Loaded {
@@ -156,7 +158,7 @@ struct Loaded {
     info: Value,
 }
 
-/// The one long request that may run at a time. A GPU render wants the GPU \[9\]
+/// The one long request that may run at a time. A GPU render wants the GPU \[10\]
 struct Running {
     id: Value,
     cmd: &'static str,
@@ -168,14 +170,14 @@ struct Running {
 struct State {
     running: Option<Running>,
     loaded: Option<Loaded>,
-    /// Milliseconds between `progress` lines for the next render, and the \[10\]
+    /// Milliseconds between `progress` lines for the next render, and the \[11\]
     interval_ms: u64,
 }
 
 type Shared = Arc<Mutex<State>>;
 
 fn lock(state: &Shared) -> MutexGuard<'_, State> {
-    // [11]
+    // [12]
     state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
@@ -191,7 +193,7 @@ pub fn run() -> Result<()> {
         "type": "ready",
         "api": API,
         "version": env!("CARGO_PKG_VERSION"),
-        // [12]
+        // [13]
         "build": crate::BUILD,
         "commands": COMMANDS,
     }));
@@ -202,7 +204,7 @@ pub fn run() -> Result<()> {
         interval_ms: 250,
     }));
     let mut worker: Option<JoinHandle<()>> = None;
-    // [13]
+    // [14]
     let mut quick: Vec<JoinHandle<()>> = Vec::new();
 
     for line in std::io::stdin().lock().lines() {
@@ -246,7 +248,7 @@ pub fn run() -> Result<()> {
                 let was = lock(&state).loaded.take().is_some();
                 respond_ok(&id, json!({"unloaded": was}));
             }
-            // [14]
+            // [15]
             "adapters" | "ffmpeg" | "options" | "inspect_midi" | "check_update" => {
                 let (cmd, id, req) = (cmd.to_string(), id.clone(), req.clone());
                 quick.retain(|h| !h.is_finished());
@@ -271,12 +273,12 @@ pub fn run() -> Result<()> {
         }
     }
 
-    // [15]
+    // [16]
     stop(&state, &mut worker, &mut quick);
     Ok(())
 }
 
-/// Cancel whatever is running, and wait for it and every quick request to \[16\]
+/// Cancel whatever is running, and wait for it and every quick request to \[17\]
 fn stop(state: &Shared, worker: &mut Option<JoinHandle<()>>, quick: &mut Vec<JoinHandle<()>>) {
     if let Some(r) = &lock(state).running {
         r.cancel.store(true, Ordering::Relaxed);
@@ -339,7 +341,7 @@ fn start_long(
         let _ = handle.join();
     }
 
-    // [17]
+    // [18]
     let (cmd, prepared): (&'static str, Result<Long>) = match cmd {
         "load_soundfonts" => (
             "load_soundfonts",
@@ -399,7 +401,7 @@ fn start_long(
                     .unwrap_or("no message")
             ))
         });
-        // [18]
+        // [19]
         lock(&state).running = None;
         set_log_id(None);
         match outcome {
@@ -459,6 +461,7 @@ fn prepare_load(req: &Map<String, Value>) -> Result<LoadJob> {
             soundfonts,
             sf_programs,
             flags: load_flags(&flags),
+            budget: cfg.sample_pool_budget,
         },
         cfg,
     })
@@ -502,6 +505,7 @@ fn prepare_render(req: &Map<String, Value>, state: &Shared) -> Result<RenderJob>
     kestrel::falconeye::renderlog::set_args(&argv);
     let job = parse_render(argv)?.to_job()?;
     let plan = session::plan(&job)?;
+    let budget = plan.cfg.sample_pool_budget;
     let interval_ms = match req.get("progress_interval_ms") {
         None | Some(Value::Null) => lock(state).interval_ms,
         Some(v) => feed::clamp_interval(
@@ -516,6 +520,7 @@ fn prepare_render(req: &Map<String, Value>, state: &Shared) -> Result<RenderJob>
             soundfonts,
             sf_programs,
             flags: load_flags(&flags),
+            budget,
         },
         interval_ms,
     })
@@ -737,7 +742,7 @@ fn adapters() -> Result<Value> {
     Ok(json!({"adapters": adapters}))
 }
 
-/// The guided renderer's update check, on the person's update ring from \[19\]
+/// The guided renderer's update check, on the person's update ring from \[20\]
 fn check_update() -> Result<Value> {
     if crate::update::opted_out() {
         bail!("update checks are turned off by {}", crate::update::OPT_OUT);
@@ -797,7 +802,7 @@ fn inspect_midi(req: &Map<String, Value>) -> Result<Value> {
             "format": m.format,
             "tracks": m.tracks,
             "division": division_value(m.division),
-            // [20]
+            // [21]
             "warnings": m.notes,
         }),
         Verdict::Invalid { path, reason } => json!({
@@ -828,7 +833,7 @@ struct OptionSpec {
     help: String,
 }
 
-/// Every option `render` takes that a request passes in `options`, read off \[21\]
+/// Every option `render` takes that a request passes in `options`, read off \[22\]
 fn option_specs() -> Vec<OptionSpec> {
     let cli = Cli::command();
     let render = cli
@@ -898,7 +903,7 @@ fn options() -> Value {
 
 // ---- Options to arguments -------------------------------------------------
 
-/// Turn `options` into the arguments the command line would have been given. \[22\]
+/// Turn `options` into the arguments the command line would have been given. \[23\]
 fn option_flags(options: Option<&Value>) -> Result<Vec<String>> {
     let map = match options {
         None | Some(Value::Null) => return Ok(Vec::new()),
@@ -931,7 +936,7 @@ fn option_flags(options: Option<&Value>) -> Result<Vec<String>> {
             Value::Null => continue,
             Value::String(s) => s.clone(),
             Value::Bool(b) => b.to_string(),
-            // [23]
+            // [24]
             Value::Number(n) => match n.as_f64() {
                 Some(f) if !n.is_i64() && !n.is_u64() && f.fract() == 0.0 && f.abs() < 9.0e15 => {
                     format!("{}", f as i64)
@@ -1010,7 +1015,7 @@ fn parse_render(argv: Vec<OsString>) -> Result<RenderArgs> {
             _ => unreachable!("the argument list names the render subcommand"),
         },
         Err(e) => {
-            // [24]
+            // [25]
             let text = e.render().to_string();
             let kept: Vec<&str> = text
                 .lines()

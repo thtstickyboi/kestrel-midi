@@ -1,0 +1,100 @@
+# Comments extracted from src/falconeye/posix.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/falconeye/posix.rs:5
+//! What FalconEye reads on Linux and macOS, added in 1.2.3: how a render that
+//! went without a word died, the system's own records of the GPU, and the
+//! machine report's operating-system section.
+//!
+//! Windows gets these from a dead render's exit code and its event logs
+//! (`winsys`, `watch::windows_events`). Here the watcher cannot read the exit
+//! code at all: the render is its parent, not its child, and only a parent
+//! may. So it reads what the system wrote down instead:
+//!
+//! - **Linux:** systemd's record of the crash (`coredumpctl`), where systemd
+//!   catches core dumps, and the kernel log -- a segfault line naming the
+//!   module, the out-of-memory killer, and the GPU drivers' own errors
+//!   (NVIDIA's Xid, amdgpu's ring timeouts and resets, i915's hangs).
+//! - **macOS:** the crash report Apple writes to
+//!   `~/Library/Logs/DiagnosticReports`, and `log show`.
+//!
+//! **All of it is files and the system's own tools; there is no `unsafe`.**
+//! The parsers are plain text in, text out, and compiled everywhere so their
+//! tests run on every platform; only the reading is per platform. None of
+//! this has run on a real Linux or macOS machine by the time of writing
+//! (2026-09-27): it was built and tested on Windows, and checked to compile
+//! for both.
+
+[2] src/falconeye/posix.rs:39
+/// The kernel log's lines that bear on a render with process id `pid`: its
+/// own segfault or trap line, the out-of-memory killer taking it, and every
+/// GPU driver error.
+
+[3] src/falconeye/posix.rs:57
+/// A GPU driver's error in the kernel log: NVIDIA's Xid, or amdgpu, i915,
+/// xe or nouveau with a timeout, reset, fault or hang. Those drivers log a
+/// good deal at every boot that is not trouble, so the name alone is not
+/// enough.
+
+[4] src/falconeye/posix.rs:70
+/// How the kernel log says process `pid` died, if it says: the OOM killer,
+/// or a segfault or trap, with the module it happened in.
+
+[5] src/falconeye/posix.rs:94
+/// systemd-coredump's record of a crash, from `coredumpctl info <pid>`: the
+/// signal, and the lines worth quoting. Everything that names the machine or
+/// the user -- the hostname, the boot and machine ids, the command line -- is
+/// left out rather than scrubbed.
+
+[6] src/falconeye/posix.rs:125
+/// Whether the kernel hands core dumps to systemd, so `coredumpctl` will
+/// have this one.
+
+[7] src/falconeye/posix.rs:141
+/// The first `model name` in `/proc/cpuinfo`, or on ARM the `Hardware` or
+/// `Model` line.
+
+[8] src/falconeye/posix.rs:180
+/// An NVIDIA card's total memory from `nvidia-smi
+/// --query-gpu=pci.device_id,memory.total --format=csv,noheader,nounits`,
+/// whose id puts the device above the vendor: `0x2D5910DE`.
+
+[9] src/falconeye/posix.rs:195
+/// A crash report Apple wrote (`.ips`, macOS 12 on): a line of JSON about
+/// the report, then the report as JSON. The process id it is about, what
+/// killed it, and the crashed thread's first frames, with the images they
+/// are in. `None` for anything that does not read as one.
+
+[10] src/falconeye/posix.rs:263
+/// The GPU's lines in `system_profiler SPDisplaysDataType`. Displays' serial
+/// numbers are in the same output and are left out.
+
+[11] src/falconeye/posix.rs:276
+/// Where the power comes from, and the battery's charge, from `pmset -g
+/// batt`, without the battery's id.
+
+[12] src/falconeye/posix.rs:300
+/// How render `pid` died, when the system wrote it down, and the records to
+/// quote in the report: `(what, records)`. `what` finishes "The render ...".
+
+[13] src/falconeye/posix.rs:308
+        // systemd writes the record once the dump is taken, which for a
+        // process holding gigabytes takes a while.
+
+[14] src/falconeye/posix.rs:349
+/// The kernel log from `window` ago: `journalctl -k`, or `dmesg` where there
+/// is no journal. Either can be closed to a user who is not in the right
+/// group, and then says so.
+
+[15] src/falconeye/posix.rs:388
+/// The newest crash report about process `pid`, written in the last
+/// `window`.
+
+[16] src/falconeye/posix.rs:431
+/// The GPU drivers' errors and Kestrel's crashes over the last `days`, for
+/// the machine report.

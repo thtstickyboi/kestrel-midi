@@ -103,31 +103,51 @@
 /// written into `buf` without allocating, as a crashing process must.
 /// Returns its length.
 
-[20] src/falconeye/winsys.rs:235
+[20] src/falconeye/winsys.rs:236
 /// Catch native crashes from now on. Harmless while no render is watched:
 /// the filter then passes straight on to Windows' own handling.
 
-[21] src/falconeye/winsys.rs:254
+[21] src/falconeye/winsys.rs:255
         // SAFETY: CreateEventW takes plain values and a name that outlives
         // the call. The handle is kept for the life of the process, which is
         // what the filter needs, and never closed.
 
-[22] src/falconeye/winsys.rs:301
+[22] src/falconeye/winsys.rs:303
     /// Write a minidump of the process to `path`: at the crash the filter
     /// reported, or of every thread as it is now, for a hang. The render's
     /// filter is waiting for [`Process::release`] meanwhile.
 
-[23] src/falconeye/winsys.rs:317
+[23] src/falconeye/winsys.rs:319
         // SAFETY: the process handle has query and VM-read access; the file
         // handle is owned by `file`, alive for the call; `exception`, when
         // present, is a live local whose pointers MiniDumpWriteDump reads in
         // the target process, as ClientPointers says.
 
-[24] src/falconeye/winsys.rs:342
+[24] src/falconeye/winsys.rs:338
+    /// The module `address` falls in, in the process: its file name and how
+    /// far into it, so a crash reads "in nvoglv64.dll+0x1a2b30" rather than as
+    /// a bare address. Read from outside, by the watcher, while the render's
+    /// filter waits: the crashing process itself must not ask, because
+    /// asking takes the loader lock, which the faulting thread may hold.
+
+[25] src/falconeye/winsys.rs:352
+            // SAFETY: `modules` is a live, writable array of the byte length
+            // passed, `needed` a live u32, and the handle has query and
+            // VM-read access, which listing another process's modules needs.
+
+[26] src/falconeye/winsys.rs:374
+            // SAFETY: fills a plain-data struct of exactly the size passed,
+            // for a module handle this process's list just gave.
+
+[27] src/falconeye/winsys.rs:385
+                // SAFETY: `name` is a live buffer, and the call writes at most
+                // its length.
+
+[28] src/falconeye/winsys.rs:400
         // SAFETY: OpenEventW takes plain values and a name that outlives the
         // call; the handle is set and closed here, once.
 
-[25] src/falconeye/winsys.rs:361
+[29] src/falconeye/winsys.rs:422
 // ---- Facts about the machine, read without PowerShell ----------------------
 //
 // The machine report first read these through a PowerShell script passed as
@@ -135,44 +155,44 @@
 // and antivirus watches for it -- the user's concern, 2026-09-26 -- so they
 // are read directly: the registry, and two kernel32 calls.
 
-[26] src/falconeye/winsys.rs:381
+[30] src/falconeye/winsys.rs:442
     // SAFETY: `buf` holds `bytes` bytes, which is what the call is told it
     // may write; RRF_RT_REG_SZ guarantees a terminated string within it.
 
-[27] src/falconeye/winsys.rs:462
+[31] src/falconeye/winsys.rs:523
 /// Plugged in or not, and the battery's charge; `battery` is `None` with no
 /// battery.
 
-[28] src/falconeye/winsys.rs:504
+[32] src/falconeye/winsys.rs:565
 /// Run `exe args` as administrator, through Windows' own permission prompt
 /// -- the API installers use -- and wait up to `timeout` for it.
 
-[29] src/falconeye/winsys.rs:522
+[33] src/falconeye/winsys.rs:583
     // SAFETY: `info` is a live, sized SHELLEXECUTEINFOW whose strings are
     // HSTRINGs that outlive the call. With NOCLOSEPROCESS it returns the
     // process handle, closed below exactly once.
 
-[30] src/falconeye/winsys.rs:533
+[34] src/falconeye/winsys.rs:594
     // SAFETY: `info.hProcess` is the valid handle ShellExecuteExW returned;
     // it is waited on, read, and closed once.
 
-[31] src/falconeye/winsys.rs:555
+[35] src/falconeye/winsys.rs:616
 /// Why DX12 removed `device`, when it is a DX12 device: the one thing that
 /// tells a timeout (`DEVICE_HUNG`, Windows' 2 s limit) from a driver fault or
 /// a reset. wgpu reports a lost device without it. `None` on other backends.
 
-[32] src/falconeye/winsys.rs:560
+[36] src/falconeye/winsys.rs:621
     // SAFETY: `as_hal` hands out the DX12 device only when this is one, and
     // the guard lives only to the end of this function. The one call made on
     // it, GetDeviceRemovedReason, reads the device's state and is documented
     // for exactly this use on a removed device; nothing is created,
     // destroyed or submitted.
 
-[33] src/falconeye/winsys.rs:594
+[37] src/falconeye/winsys.rs:655
 /// Crash with an access violation, for `KESTREL_CRASH_TEST=segv`: the native
 /// crash a graphics driver's own fault looks like from here. Dev builds only.
 
-[34] src/falconeye/winsys.rs:598
+[38] src/falconeye/winsys.rs:659
     // SAFETY: none, on purpose; this exists to crash. The address is in the
     // first page, which Windows and Linux never map, and the write is
     // volatile so the compiler cannot drop it. It runs only when a developer

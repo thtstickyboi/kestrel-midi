@@ -88,7 +88,7 @@
     // estimated pool fits the budget. Degrade the pool rather than fail the
     // load: a downsampled render beats no render.
 
-[13] src/sf2.rs:749
+[13] src/sf2.rs:754
         // Recorded for completeness; SF2 never infers looping from the points.
         // Generator 54 (`sampleModes`) says so outright, which is why the SF2
         // path never had the SFZ path's whole-sample-fallback bug.

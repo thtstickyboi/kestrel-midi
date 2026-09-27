@@ -1330,6 +1330,10 @@ struct Fonts {
     paths: Vec<PathBuf>,
     names: Vec<String>,
     bank: Arc<Bank>,
+    /// The pool budget it was loaded with. Sized from the default adapter
+    /// (`gpu::auto_pool_budget`), so a render on another one loads it again
+    /// when that one's budget differs.
+    budget: u64,
 }
 
 /// The loading settings of a render with no extra flags, got the way a render
@@ -1539,6 +1543,7 @@ fn step_soundfonts(io: &mut dyn Io, at: (u8, u8)) -> Step<Fonts> {
                     paths,
                     names,
                     bank: Arc::new(bank),
+                    budget: cfg.sample_pool_budget,
                 })
             }
             Err(e) => {
@@ -1914,6 +1919,14 @@ fn step_flags(
                 AMBER,
                 vec![s(
                     "These flags change how a soundfont loads, so it loads again when the render starts.",
+                )],
+            );
+            None
+        } else if plan.cfg.sample_pool_budget != fonts.budget {
+            style::status(
+                AMBER,
+                vec![s(
+                    "This adapter has a different sample budget, so the soundfont loads again when the render starts.",
                 )],
             );
             None

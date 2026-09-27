@@ -64,7 +64,7 @@ pub fn build(opts: Options, say: &mut dyn FnMut(&str)) -> Result<PathBuf> {
     say("Kestrel");
     sections.push(kestrel());
     sections.extend(opts.extra);
-    say("Windows");
+    say(if cfg!(windows) { "Windows" } else { "The operating system" });
     sections.push(windows());
     say("GPUs, on every backend");
     let adapters = adapters();
@@ -73,7 +73,11 @@ pub fn build(opts: Options, say: &mut dyn FnMut(&str)) -> Result<PathBuf> {
     sections.push(nvidia());
     say("Windows' graphics settings");
     sections.push(graphics_settings());
-    say("30 days of driver resets and Kestrel crashes, from Windows' logs");
+    say(if cfg!(windows) {
+        "30 days of driver resets and Kestrel crashes, from Windows' logs"
+    } else {
+        "30 days of GPU driver errors and Kestrel crashes, from the system's logs"
+    });
     sections.push(driver_history());
     say("Kestrel's render logs and reports");
     let (history, keep) = kestrel_history(&mut files);
@@ -264,14 +268,13 @@ fn windows() -> Section {
     s
 }
 
+/// Linux's or macOS's facts, from files and the system's own tools; see \[8\]
 #[cfg(not(windows))]
 fn windows() -> Section {
-    let mut s = Section::new("Operating system");
-    s.item("note", "only Windows is collected so far");
-    s
+    super::posix::os_section()
 }
 
-/// Every adapter on every backend, and which of them the self-test runs on: \[8\]
+/// Every adapter on every backend, and which of them the self-test runs on: \[9\]
 fn adapters() -> (Section, Vec<(String, String, u32)>) {
     let mut s = Section::new("GPUs, as wgpu sees them on every backend");
     let mut text = String::new();
@@ -334,7 +337,7 @@ fn yes(b: bool) -> &'static str {
     if b { "yes" } else { "no" }
 }
 
-/// `nvidia-smi`, where NVIDIA's driver is installed: the state now, the link, \[9\]
+/// `nvidia-smi`, where NVIDIA's driver is installed: the state now, the link, \[10\]
 fn nvidia() -> Section {
     let mut s = Section::new("NVIDIA (nvidia-smi)");
     let query = "--query-gpu=name,driver_version,vbios_version,pstate,temperature.gpu,power.draw,\
@@ -371,7 +374,7 @@ fn count_processes(table: &str) -> usize {
         .count()
 }
 
-/// Windows' timeout settings and GPU scheduling. Absent means Windows' \[10\]
+/// Windows' timeout settings and GPU scheduling. Absent means Windows' \[11\]
 #[cfg(windows)]
 fn graphics_settings() -> Section {
     let mut s = Section::new("Windows' graphics settings");
@@ -392,11 +395,18 @@ fn graphics_settings() -> Section {
 
 fn driver_history() -> Section {
     let mut s = Section::new("Driver resets and Kestrel crashes, last 30 days");
-    s.text = Some(watch::windows_events(30 * 24 * 3600 * 1000));
+    #[cfg(windows)]
+    {
+        s.text = Some(watch::windows_events(30 * 24 * 3600 * 1000));
+    }
+    #[cfg(not(windows))]
+    {
+        s.text = Some(super::posix::history(30));
+    }
     s
 }
 
-/// The render logs and FalconEye's reports: listed, and the recent ones added \[11\]
+/// The render logs and FalconEye's reports: listed, and the recent ones added \[12\]
 fn kestrel_history(files: &mut Vec<(String, Vec<u8>)>) -> (Section, Vec<String>) {
     let mut s = Section::new("Kestrel's render logs and reports");
     let mut found: Vec<(SystemTime, PathBuf)> = Vec::new();
@@ -453,7 +463,7 @@ fn kestrel_history(files: &mut Vec<(String, Vec<u8>)>) -> (Section, Vec<String>)
     (s, keep)
 }
 
-/// Run the administrator step and take in what it read: its listing as the \[12\]
+/// Run the administrator step and take in what it read: its listing as the \[13\]
 fn administrator_step(exe: &Path, files: &mut Vec<(String, Vec<u8>)>) -> Section {
     use super::winsys::{run_elevated, Elevated};
     let mut s = Section::new("Windows' own GPU crash records (administrator)");

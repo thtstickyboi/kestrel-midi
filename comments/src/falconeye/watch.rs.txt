@@ -49,35 +49,56 @@
     // Opened first, while the render is certainly alive, so its exit code can
     // still be read after it dies.
 
-[5] src/falconeye/watch.rs:178
+[5] src/falconeye/watch.rs:117
+                            // Before the release: the process is whole only
+                            // while its filter waits.
+
+[6] src/falconeye/watch.rs:184
             // Windows writes its own record of a crash a moment after the
             // process is gone; give it that moment before reading it.
 
-[6] src/falconeye/watch.rs:194
+[7] src/falconeye/watch.rs:192
+            // Off Windows the render is the watcher's parent, whose exit code
+            // only its own parent may read; what the system wrote down about
+            // it has to do instead (`posix`).
+
+[8] src/falconeye/watch.rs:213
 /// Write `<log> <kind>.dmp` of the render and overwrite this machine's names
 /// in it. See `winsys::Process::dump`.
 
-[7] src/falconeye/watch.rs:220
+[9] src/falconeye/watch.rs:239
 /// The redactor for what the watcher writes: this machine's names, keeping
 /// the MIDI's, which the log is named after.
 
-[8] src/falconeye/watch.rs:230
+[10] src/falconeye/watch.rs:249
 /// The MIDI's name, from the log's: `<midi> <MM-DD-YYYY HH.MM.SS>.log`, or
 /// with ` (n)` after it when two logs started in the same second.
 
-[9] src/falconeye/watch.rs:244
+[11] src/falconeye/watch.rs:263
 /// Add a line to the end of the render's log, which its own process no
 /// longer writes to.
 
-[10] src/falconeye/watch.rs:257
+[12] src/falconeye/watch.rs:276
 /// `<log> <kind>.txt` beside the log: what happened, the log's last lines,
-/// Windows' records from the render's time, and the GPU now.
+/// the system's records from the render's time, and the GPU now.
 
-[11] src/falconeye/watch.rs:344
+[13] src/falconeye/watch.rs:282
+/// `write_report`, with the system's records already read, where reading
+/// them was how the watcher learned what happened (`posix::death`).
+
+[14] src/falconeye/watch.rs:383
 /// Windows' own records from the last `window_ms`: GPU driver events from
 /// the System log, and from the Application log the errors and hangs of
 /// kestrel.exe and Windows' reports of a GPU reset (LiveKernelEvent).
 
-[12] src/falconeye/watch.rs:390
+[15] src/falconeye/watch.rs:408
+/// The system's records from the last `window_ms`, for a report about a
+/// render the watcher can still see: a hang.
+
+[16] src/falconeye/watch.rs:417
+        // A render still alive has no crash to find; the GPU drivers' errors
+        // are what a hang leaves. No process has the pid `u32::MAX`.
+
+[17] src/falconeye/watch.rs:439
 /// `wevtutil /f:text` output, one string per event, each cut to its first 40
 /// lines.

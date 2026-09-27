@@ -212,30 +212,32 @@ pub struct Config {
     pub resample_pool: bool,
     /// Soft ceiling on sample-pool bytes on the device. When the pool does not \[40\]
     pub sample_pool_budget: u64,
+    /// The most bytes of the sample pool one device buffer holds; 0, the \[41\]
+    pub pool_part_bytes: u64,
 
-    // [41]
+    // [42]
     pub clamp_output: bool,
 
-    /// Ramp channel gain across a gate tile instead of stepping it. \[42\]
+    /// Ramp channel gain across a gate tile instead of stepping it. \[43\]
     pub gain_ramp: bool,
 
-    /// Ramp biquad coefficients across a gate tile instead of switching them. \[43\]
+    /// Ramp biquad coefficients across a gate tile instead of switching them. \[44\]
     pub filter_ramp: bool,
 
-    /// Evaluate SF2 vibrato and tremolo LFOs. \[44\]
+    /// Evaluate SF2 vibrato and tremolo LFOs. \[45\]
     pub lfo_enabled: bool,
 
-    /// Evaluate the SF2 modulation envelope and its pitch and filter \[45\]
+    /// Evaluate the SF2 modulation envelope and its pitch and filter \[46\]
     pub mod_env_enabled: bool,
 
-    /// Use Kahan compensation for the per-thread partial sums in the reduce \[46\]
+    /// Use Kahan compensation for the per-thread partial sums in the reduce \[47\]
     pub kahan_reduce: bool,
     /// Check every output block for NaN/Inf. Always on in debug builds.
     pub nan_guard: bool,
-    /// Compile the shaders without naga's automatic bounds clamps and loop \[47\]
+    /// Compile the shaders without naga's automatic bounds clamps and loop \[48\]
     pub unchecked_shaders: bool,
 
-    // [48]
+    // [49]
     pub profile: bool,
     /// Force a specific wgpu backend, e.g. "vulkan" or "dx12".
     pub gpu_backend: Option<String>,
@@ -251,11 +253,11 @@ impl Default for Config {
             channels: 2,
 
             block_frames: 4096,
-            // [49]
+            // [50]
             reduce_tile: 4,
             gate_frames: 32,
             workgroup_size: 256,
-            // [50]
+            // [51]
             max_render_workgroups: 2048,
             max_pool_workgroups: u32::MAX,
 
@@ -279,7 +281,7 @@ impl Default for Config {
             filter_enabled: true,
             master_volume: 1.0,
             dc_blocker: false,
-            // [51]
+            // [52]
             dc_blocker_hz: 15.0,
             max_param_variants: 32,
             limiter: true,
@@ -293,8 +295,9 @@ impl Default for Config {
             limiter_release: 0.1,
 
             resample_pool: true,
-            // [52]
+            // [53]
             sample_pool_budget: 2 << 30,
+            pool_part_bytes: 0,
 
             clamp_output: true,
             gain_ramp: true,
@@ -353,7 +356,7 @@ impl Config {
                 self.block_frames
             );
         }
-        // [53]
+        // [54]
         let shared_bytes = self.workgroup_size as u64 * (self.reduce_tile as u64 * 2 + 1) * 4;
         if shared_bytes > 49152 {
             bail!(
@@ -364,7 +367,7 @@ impl Config {
                 shared_bytes
             );
         }
-        // [54]
+        // [55]
         if self.workgroup_size < self.reduce_tile * 2 {
             bail!(
                 "workgroup_size {} must be at least twice reduce_tile {}",
@@ -381,7 +384,7 @@ impl Config {
         if !(0.0..=2.0).contains(&self.master_volume) {
             bail!("master_volume {} must be in 0..=2", self.master_volume);
         }
-        // [55]
+        // [56]
         if !(1.0..=200.0).contains(&self.dc_blocker_hz) || self.dc_blocker_hz >= self.sample_rate as f64 / 10.0 {
             bail!("dc_blocker_hz {} must be in 1..=200 and under a tenth of the rate", self.dc_blocker_hz);
         }
@@ -419,7 +422,7 @@ impl Config {
                 self.max_steal_percent
             );
         }
-        // [56]
+        // [57]
         if self.max_layers > 255 {
             bail!("max_layers {} must be at most 255", self.max_layers);
         }
@@ -437,22 +440,22 @@ impl Config {
         10f64.powf(self.limiter_ceiling_db / 20.0)
     }
 
-    /// Frames in which a steal may be scheduled. The fade has to finish inside \[57\]
+    /// Frames in which a steal may be scheduled. The fade has to finish inside \[58\]
     pub fn steal_span(&self) -> u32 {
         self.block_frames.saturating_sub(self.steal_fade_frames).max(1)
     }
 
-    /// Frames in one step of the envelope grid: 4 ms, 192 frames at 48 kHz. \[58\]
+    /// Frames in one step of the envelope grid: 4 ms, 192 frames at 48 kHz. \[59\]
     pub fn env_step_frames(&self) -> u32 {
         (self.sample_rate / 250).clamp(1, crate::voice::GRID_MASK)
     }
 
-    /// Voice slots to allocate. A stolen voice keeps sounding until its own \[59\]
+    /// Voice slots to allocate. A stolen voice keeps sounding until its own \[60\]
     pub fn pool_slots(&self) -> u32 {
         self.max_voices.saturating_add(self.max_steal())
     }
 
-    /// The most voices one block may steal. Integer arithmetic, and both \[60\]
+    /// The most voices one block may steal. Integer arithmetic, and both \[61\]
     pub fn max_steal(&self) -> u32 {
         let n = self.max_voices as u64 * self.max_steal_percent as u64 / 100;
         (n as u32).max(1)

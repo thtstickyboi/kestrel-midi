@@ -402,9 +402,11 @@ struct RenderArgs {
     /// Keep the sample pool at its source rates instead of converting it.
     #[arg(long = "no-resample-pool")]
     no_resample_pool: bool,
-    /// Sample pool budget in MiB before automatic downsampling kicks in.
-    #[arg(long = "pool-budget", default_value_t = 2048)]
-    pool_budget: u64,
+    /// Sample pool budget in MiB: an SF2 whose samples come to more is loaded
+    /// at half the rate, and again until it fits. By default it is sized from
+    /// the GPU: three quarters of its video memory, at least 2048.
+    #[arg(long = "pool-budget", value_name = "MIB")]
+    pool_budget: Option<u64>,
     /// Log per-pass timings.
     #[arg(long)]
     profile: bool,
@@ -552,6 +554,12 @@ struct DevArgs {
     /// anything upstream miscounts.
     #[arg(long = "unchecked-shaders")]
     unchecked_shaders: bool,
+    /// Hold each of the sample pool's device buffers to this many MiB, so a
+    /// pool that fits one binding is split anyway; 0 is the adapter's binding.
+    /// For checking a split render against the one-buffer render it must
+    /// match byte for byte.
+    #[arg(long = "pool-part-mib", default_value_t = 0)]
+    pool_part_mib: u64,
 }
 
 impl DevArgs {
@@ -660,7 +668,6 @@ impl RenderArgs {
             sort_voices: !dev.no_sort,
             skip_silence: !dev.no_skip_silence,
             resample_pool: !self.no_resample_pool,
-            sample_pool_budget: self.pool_budget << 20,
             profile: self.profile,
             gpu_backend: self.gpu_backend.clone(),
             gpu_adapter: self.gpu_adapter.clone(),
@@ -680,6 +687,12 @@ impl RenderArgs {
             cfg.nan_guard = true;
         }
         cfg.unchecked_shaders = dev.unchecked_shaders;
+        cfg.pool_part_bytes = dev.pool_part_mib << 20;
+        // After the adapter flags, which it sizes for.
+        cfg.sample_pool_budget = match self.pool_budget {
+            Some(mib) => mib << 20,
+            None => kestrel::gpu::auto_pool_budget(&cfg),
+        };
         cfg.interpolation = Interpolation::parse(&self.interp)
             .with_context(|| format!("unknown interpolation {:?}", self.interp))?;
         cfg.decay_curve = EnvelopeCurve::parse(&dev.decay_curve)

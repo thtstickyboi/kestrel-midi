@@ -84,6 +84,12 @@ pub fn stack(
                 top.remap_to_programs(&progs)?;
             }
         }
+        // [5]
+        crate::bank::check_pool_frames(
+            (bank.pool.len() + top.pool.len()) as u64,
+            bank.pool_rate,
+            "these soundfonts together",
+        )?;
         bank.merge(top);
     }
     // Everything derived is rebuilt from the merged whole.
@@ -108,7 +114,7 @@ fn supported_exts() -> Vec<&'static str> {
     v
 }
 
-/// Levenshtein distance, for "did you mean". Small and bounded -- both inputs \[5\]
+/// Levenshtein distance, for "did you mean". Small and bounded -- both inputs \[6\]
 fn edit_distance(a: &str, b: &str) -> usize {
     let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
     let mut prev: Vec<usize> = (0..=b.len()).collect();
@@ -124,9 +130,9 @@ fn edit_distance(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
-/// Decide what to write from the output path, and reject anything Kestrel \[6\]
+/// Decide what to write from the output path, and reject anything Kestrel \[7\]
 pub fn resolve_output_target(path: &Path) -> Result<Target> {
-    // [7]
+    // [8]
     const UNSUPPORTED: &[&str] = &[
         "aac", "alac", "wma", "aiff", "aif", "aifc", "wv", "spx", "mka", "caf", "oga", "ac3",
         "amr", "ra", "au", "mp2", "mpc", "tta", "dsf",
@@ -161,7 +167,7 @@ pub fn resolve_output_target(path: &Path) -> Result<Target> {
         );
     }
 
-    // [8]
+    // [9]
     let hint = supported_exts()
         .into_iter()
         .map(|s| (edit_distance(&ext, s), s))
@@ -181,7 +187,7 @@ pub fn resolve_output_target(path: &Path) -> Result<Target> {
     }
 }
 
-/// Where a render's blocks go: straight to a WAV, or through an encoder. \[9\]
+/// Where a render's blocks go: straight to a WAV, or through an encoder. \[10\]
 pub(crate) enum Sink {
     Wav(wav::WavWriter),
     Encoded(Box<crate::ffmpeg::Encoder>),
@@ -216,7 +222,7 @@ impl Sink {
     }
 }
 
-/// Where a render is. The soundfont load and the device setup each take \[10\]
+/// Where a render is. The soundfont load and the device setup each take \[11\]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
@@ -227,11 +233,11 @@ pub enum Phase {
     OpeningMidi,
     PreparingDevice,
     Rendering,
-    /// The last block is written; the file is being closed, which for an \[11\]
+    /// The last block is written; the file is being closed, which for an \[12\]
     Finishing,
-    /// The file is complete. This and the two after it are reported by a \[12\]
+    /// The file is complete. This and the two after it are reported by a \[13\]
     Finished,
-    /// Stopped early through [`Observer::cancelled`]. The file is closed and \[13\]
+    /// Stopped early through [`Observer::cancelled`]. The file is closed and \[14\]
     Cancelled,
     /// Stopped by an error; [`Event::Failed`] carries it.
     Failed,
@@ -264,14 +270,14 @@ pub struct Tick<'a> {
     pub peak_voices: u64,
     /// When the first block started.
     pub start: Instant,
-    /// This is the last block: the file ran out or `Job::seconds` was reached. \[14\]
+    /// This is the last block: the file ran out or `Job::seconds` was reached. \[15\]
     pub last: bool,
 }
 
-/// The share of a per-track render's progress that is its notes read; the \[15\]
+/// The share of a per-track render's progress that is its notes read; the \[16\]
 pub const PER_TRACK_NOTE_SHARE: f64 = 0.55;
 
-/// A per-track render as it stands, which [`Observer::tracks`] is handed \[16\]
+/// A per-track render as it stands, which [`Observer::tracks`] is handed \[17\]
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct TrackProgress {
     /// Tracks the render has, has finished, and is rendering now.
@@ -280,16 +286,16 @@ pub struct TrackProgress {
     pub running: usize,
     /// Finished tracks that had to steal voices.
     pub stole: usize,
-    /// Blocks rendered over every track; those of them that were silent and \[17\]
+    /// Blocks rendered over every track; those of them that were silent and \[18\]
     pub blocks: u64,
     pub silent_blocks: u64,
     pub blocks_total: u64,
-    /// Blocks rendered inside each track's notes -- from the block its first \[18\]
+    /// Blocks rendered inside each track's notes -- from the block its first \[19\]
     pub span_blocks: u64,
     pub span_total: u64,
-    /// Note-ons the tracks hold in all, after `--min-velocity`: where `notes` \[19\]
+    /// Note-ons the tracks hold in all, after `--min-velocity`: where `notes` \[20\]
     pub notes_total: u64,
-    /// Seconds of audio each track renders: the file's length, or \[20\]
+    /// Seconds of audio each track renders: the file's length, or \[21\]
     pub length_secs: f64,
     /// Voices each track may hold: the total, split evenly.
     pub voices_each: u32,
@@ -300,8 +306,11 @@ pub struct TrackProgress {
     pub notes: u64,
     pub stolen: u64,
     pub dropped: u64,
-    /// The loudest track, before any limiter. Merged, the mix's own peak is \[21\]
+    /// The loudest track, before any limiter. Merged, the mix's own peak is \[22\]
     pub peak_level: f32,
+    /// Microseconds the longest batch of tracks took, from going up to the \[23\]
+    #[serde(skip)]
+    pub longest_wait_us: u64,
     /// Up to three of the busiest tracks still rendering.
     pub now: Vec<TrackNow>,
 }
@@ -316,15 +325,15 @@ pub struct TrackNow {
     pub secs: f64,
 }
 
-/// A front end's view of a render. Every method has a default, so an observer \[22\]
+/// A front end's view of a render. Every method has a default, so an observer \[24\]
 pub trait Observer {
     fn phase(&mut self, _phase: Phase) {}
     fn setup(&mut self, _setup: &Setup) {}
-    /// Called after every block. Cheap counters only are in `Tick`; anything \[23\]
+    /// Called after every block. Cheap counters only are in `Tick`; anything \[25\]
     fn block(&mut self, _tick: &Tick) {}
     /// A per-track render's progress, from the thread `run` was called on.
     fn tracks(&mut self, _progress: &TrackProgress) {}
-    /// Polled during analytic preparation and once per block. True stops after \[24\]
+    /// Polled during analytic preparation and once per block. True stops after \[26\]
     fn cancelled(&self) -> bool {
         false
     }
@@ -350,29 +359,29 @@ pub struct Summary {
     pub cancelled: bool,
 }
 
-/// A render, described completely: what to read, what to write, and how. \[25\]
+/// A render, described completely: what to read, what to write, and how. \[27\]
 #[derive(Debug, Clone)]
 pub struct Job {
     pub midi: PathBuf,
     /// Layered in order, each merged on top of the ones before it.
     pub soundfonts: Vec<PathBuf>,
-    /// Programs of bank 0 the last soundfont takes over, spelled the way \[26\]
+    /// Programs of bank 0 the last soundfont takes over, spelled the way \[28\]
     pub sf_programs: Option<String>,
     /// The extension picks the container; see [`resolve_output_target`].
     pub out: PathBuf,
     /// An ffmpeg to encode with, instead of searching for one.
     pub ffmpeg: Option<PathBuf>,
-    /// The sample format of a WAV. Encoded containers take float and refuse \[27\]
+    /// The sample format of a WAV. Encoded containers take float and refuse \[29\]
     pub wav_format: wav::SampleFormat,
-    /// Brickwall ceiling in dBFS, when one was chosen. `None` keeps `cfg`'s \[28\]
+    /// Brickwall ceiling in dBFS, when one was chosen. `None` keeps `cfg`'s \[30\]
     pub ceiling_db: Option<f64>,
     /// Stop after this many seconds of audio.
     pub seconds: Option<f64>,
     /// Write one CSV row per block here: the admission diagnostic.
     pub block_csv: Option<PathBuf>,
-    /// Render this one track alone rather than the whole file: its own notes \[29\]
+    /// Render this one track alone rather than the whole file: its own notes \[31\]
     pub track: Option<crate::tracks::TrackPick>,
-    /// Render every track `stems.tracks` names, each alone and to a file of \[30\]
+    /// Render every track `stems.tracks` names, each alone and to a file of \[32\]
     pub stems: Option<crate::tracks::Stems>,
     pub backend: BackendKind,
     pub cfg: Config,
@@ -385,7 +394,7 @@ pub struct Plan {
     pub(crate) encoder: Option<(crate::ffmpeg::Ffmpeg, &'static crate::ffmpeg::Preset)>,
 }
 
-/// Validate a render and resolve its output, without loading anything. \[31\]
+/// Validate a render and resolve its output, without loading anything. \[33\]
 pub fn plan(job: &Job) -> Result<Plan> {
     let mut cfg = job.cfg.clone();
     if let Some(db) = job.ceiling_db {
@@ -394,7 +403,7 @@ pub fn plan(job: &Job) -> Result<Plan> {
     if job.track.is_some() && job.stems.is_some() {
         bail!("--track renders one track and --tracks renders stems; give one of them");
     }
-    // [32]
+    // [34]
     if (job.track.is_some() || job.stems.is_some())
         && cfg.phase != crate::phase::PhaseSettings::default()
     {
@@ -417,10 +426,10 @@ pub fn plan(job: &Job) -> Result<Plan> {
         );
         cfg.max_voices = crate::tracks::MAX_TOTAL_VOICES;
     }
-    // [33]
+    // [35]
     let stems = job.stems.as_ref().filter(|s| !s.merge);
     if let Some(pick) = job.track {
-        // [34]
+        // [36]
         let h = crate::midi::SmfHeader::read(&job.midi)?;
         if pick.index >= h.tracks.len() {
             bail!(
@@ -433,12 +442,12 @@ pub fn plan(job: &Job) -> Result<Plan> {
     }
     cfg.validate()?;
     let kind = job.backend;
-    // [35]
+    // [37]
     let target = match stems {
         Some(stems) => resolve_output_target(Path::new(&format!("stem.{}", stems.ext)))?,
         None => resolve_output_target(&job.out)?,
     };
-    // [36]
+    // [38]
     if stems.is_some()
         && matches!(target, Target::Wav)
         && job.wav_format == wav::SampleFormat::Float32
@@ -456,7 +465,7 @@ pub fn plan(job: &Job) -> Result<Plan> {
     let encoder = match &target {
         Target::Wav => None,
         Target::Encoded(preset) => {
-            // [37]
+            // [39]
             if cfg.limiter_mode == LimiterMode::Off || !cfg.limiter {
                 bail!(
                     "--limiter off cannot be used with .{}: encoding clamps anything \
@@ -466,7 +475,7 @@ pub fn plan(job: &Job) -> Result<Plan> {
                     preset.ext
                 );
             }
-            // [38]
+            // [40]
             if job.wav_format != wav::SampleFormat::Float32 {
                 bail!(
                     "--format pcm16 applies to .wav output only; .{} is encoded from \
@@ -474,7 +483,7 @@ pub fn plan(job: &Job) -> Result<Plan> {
                     preset.ext
                 );
             }
-            // [39]
+            // [41]
             if preset.lossy && job.ceiling_db.is_none() {
                 cfg.limiter_ceiling_db = crate::ffmpeg::LOSSY_CEILING_DB;
             }
@@ -515,7 +524,7 @@ pub fn plan(job: &Job) -> Result<Plan> {
     Ok(Plan { cfg, kind, encoder })
 }
 
-/// A soundfont that drives no LFO should not pay for the machinery. This turns \[40\]
+/// A soundfont that drives no LFO should not pay for the machinery. This turns \[42\]
 pub(crate) fn fit_to_bank(cfg: &mut Config, bank: &Bank) {
     if !bank.uses_lfo {
         cfg.lfo_enabled = false;
@@ -525,7 +534,15 @@ pub(crate) fn fit_to_bank(cfg: &mut Config, bank: &Bank) {
     }
 }
 
-/// Render `args` as `plan` settled it. \[41\]
+/// Say what the soundfont holds once loaded: its sample pool is what goes to \[43\]
+pub(crate) fn log_bank(bank: &Bank, took: Option<std::time::Duration>) {
+    match took {
+        Some(t) => log::info!(target: TARGET, "loaded {} in {t:.2?}", bank.describe()),
+        None => log::info!(target: TARGET, "soundfont, loaded before the render: {}", bank.describe()),
+    }
+}
+
+/// Render `args` as `plan` settled it. \[44\]
 pub fn run(
     job: &Job,
     plan: Plan,
@@ -569,9 +586,7 @@ fn run_inner(
         None => Arc::new(load_layered(&job.soundfonts,job.sf_programs.as_deref(), &cfg)?),
     };
     fit_to_bank(&mut cfg, &bank);
-    if loaded_here {
-        log::info!(target: TARGET, "loaded {} in {:.2?}", bank.describe(), t0.elapsed());
-    }
+    log_bank(&bank, loaded_here.then(|| t0.elapsed()));
 
     let phase_started = Instant::now();
     let mut last_percent = usize::MAX;
@@ -595,7 +610,7 @@ fn run_inner(
             phase.sample_count(), phase.cache_bytes() as f64 / 1048576.0, phase_started.elapsed());
     }
     obs.phase(Phase::OpeningMidi);
-    // [42]
+    // [45]
     if job.track.is_some() {
         cfg.max_block_candidates = crate::tracks::candidates_each(&cfg);
     }
@@ -762,7 +777,7 @@ fn run_inner(
         driver.stats.voices_spawned,
         peak_voices,
         st.stolen,
-        // [43]
+        // [46]
         driver.stats.dropped,
         driver.stats.peak
     );
@@ -846,7 +861,7 @@ fn run_inner(
     })
 }
 
-/// Everything a front end can show about a render in progress, at one moment. \[44\]
+/// Everything a front end can show about a render in progress, at one moment. \[47\]
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Snapshot {
     pub phase: Phase,
@@ -858,7 +873,7 @@ pub struct Snapshot {
     pub render_secs: f64,
     /// Audio rendered so far.
     pub audio_secs: f64,
-    /// Track data read so far, and in the whole file. A streamed MIDI has no \[45\]
+    /// Track data read so far, and in the whole file. A streamed MIDI has no \[48\]
     pub bytes_read: u64,
     pub bytes_total: u64,
     pub blocks: u64,
@@ -880,20 +895,20 @@ pub struct Snapshot {
     pub backend: Option<String>,
     pub adapter: Option<String>,
     pub tracks: u16,
-    /// Device buffers this render allocated. Not the whole GPU's usage; that \[46\]
+    /// Device buffers this render allocated. Not the whole GPU's usage; that \[49\]
     pub device_bytes: Option<u64>,
-    /// The whole adapter's memory, every process on it counted, once the first \[47\]
+    /// The whole adapter's memory, every process on it counted, once the first \[50\]
     pub gpu_memory: Option<crate::gpu::vram::GpuMemory>,
-    /// This process's resident memory now, and its highest since the monitor \[48\]
+    /// This process's resident memory now, and its highest since the monitor \[51\]
     pub host_rss_bytes: Option<u64>,
     pub host_rss_peak_bytes: Option<u64>,
-    /// A per-track render's tracks, once it is rendering. Its sums are also \[49\]
+    /// A per-track render's tracks, once it is rendering. Its sums are also \[52\]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub per_track: Option<TrackProgress>,
 }
 
 impl Snapshot {
-    /// How far along, 0 to 1: the MIDI's track data read, once the file is \[50\]
+    /// How far along, 0 to 1: the MIDI's track data read, once the file is \[53\]
     pub fn progress(&self) -> Option<f64> {
         if let Some(p) = &self.per_track {
             let spans = (p.span_total > 0).then(|| (p.span_blocks as f64 / p.span_total as f64).min(1.0));
@@ -908,7 +923,7 @@ impl Snapshot {
             .then(|| (self.bytes_read as f64 / self.bytes_total as f64).min(1.0))
     }
 
-    /// Audio the render has made so far: `audio_secs`, or for a per-track \[51\]
+    /// Audio the render has made so far: `audio_secs`, or for a per-track \[54\]
     pub fn audio_done(&self) -> f64 {
         match &self.per_track {
             Some(p) => p.length_secs * self.progress().unwrap_or(0.0),
@@ -916,12 +931,12 @@ impl Snapshot {
         }
     }
 
-    /// Seconds of audio per second of rendering, over the render so far: the \[52\]
+    /// Seconds of audio per second of rendering, over the render so far: the \[55\]
     pub fn speed(&self) -> Option<f64> {
         (self.render_secs > 0.2).then(|| self.audio_done() / self.render_secs)
     }
 
-    /// Seconds of rendering left, extrapolated from progress. `None` until \[53\]
+    /// Seconds of rendering left, extrapolated from progress. `None` until \[56\]
     pub fn eta_secs(&self) -> Option<f64> {
         let p = self.progress()?;
         (p > 0.005 && p < 1.0 && self.render_secs > 1.0)
@@ -940,7 +955,7 @@ pub enum Event {
         #[serde(flatten)]
         setup: Setup,
     },
-    /// The render ended normally or was cancelled. Always the last event of a \[54\]
+    /// The render ended normally or was cancelled. Always the last event of a \[57\]
     Summary {
         t: f64,
         #[serde(flatten)]
@@ -950,7 +965,7 @@ pub enum Event {
     Failed { t: f64, message: String },
 }
 
-/// A render's live state, shared between the thread rendering it and any \[55\]
+/// A render's live state, shared between the thread rendering it and any \[58\]
 pub struct Monitor {
     created: Instant,
     inner: Mutex<Inner>,
@@ -964,7 +979,7 @@ struct Inner {
     phase_since: Option<Instant>,
     render_started: Option<Instant>,
     events: Vec<Event>,
-    /// Started when the render reports its adapter, and stopped when the \[56\]
+    /// Started when the render reports its adapter, and stopped when the \[59\]
     vram: Option<crate::gpu::vram::VramWatch>,
 }
 
@@ -979,7 +994,7 @@ impl Monitor {
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
-        // [57]
+        // [60]
         self.inner.lock().unwrap_or_else(|p| p.into_inner())
     }
 
@@ -1011,7 +1026,7 @@ impl Monitor {
         snap
     }
 
-    /// Every event from index `from` on, and the index to pass next time. \[58\]
+    /// Every event from index `from` on, and the index to pass next time. \[61\]
     pub fn events_since(&self, from: usize) -> (Vec<Event>, usize) {
         let inner = self.lock();
         let from = from.min(inner.events.len());
@@ -1035,7 +1050,7 @@ impl Monitor {
         }
     }
 
-    /// Record how a render ended. [`run_monitored`] does this; a caller that \[59\]
+    /// Record how a render ended. [`run_monitored`] does this; a caller that \[62\]
     pub fn finish(&self, result: &Result<Summary>) {
         let now = Instant::now();
         let t = self.secs(now);
@@ -1067,7 +1082,7 @@ impl Monitor {
     }
 }
 
-/// How often the observer walks every track to count the bytes read. The \[60\]
+/// How often the observer walks every track to count the bytes read. The \[63\]
 const BYTES_EVERY: Duration = Duration::from_millis(50);
 
 /// The [`Observer`] half of a [`Monitor`].
@@ -1081,7 +1096,7 @@ impl Observer for MonitorObserver {
         let now = Instant::now();
         let t = self.monitor.secs(now);
         let mut inner = self.monitor.lock();
-        // [61]
+        // [64]
         if inner.snap.phase == phase {
             return;
         }
@@ -1163,7 +1178,7 @@ impl Observer for MonitorObserver {
     }
 }
 
-/// [`run`], reporting into `monitor`, which is marked finished however the \[62\]
+/// [`run`], reporting into `monitor`, which is marked finished however the \[65\]
 pub fn run_monitored(
     job: &Job,
     plan: Plan,
@@ -1202,7 +1217,7 @@ mod tests {
         resolve_output_target(Path::new(p)).map_err(|e| e.to_string())
     }
 
-    /// The bug this guards: `-o mix.mp3` wrote a RIFF/WAVE file named `.mp3` \[63\]
+    /// The bug this guards: `-o mix.mp3` wrote a RIFF/WAVE file named `.mp3` \[66\]
     #[test]
     fn wav_and_every_preset_resolve_and_nothing_else_does() {
         assert!(matches!(target("out/mix.wav"), Ok(Target::Wav)));
@@ -1223,7 +1238,7 @@ mod tests {
         }
     }
 
-    /// A typo should name the thing it probably meant. These four are the ones \[64\]
+    /// A typo should name the thing it probably meant. These four are the ones \[67\]
     #[test]
     fn a_near_miss_extension_suggests_the_real_one() {
         for (typo, want) in [
@@ -1241,7 +1256,7 @@ mod tests {
         }
     }
 
-    /// A real container Kestrel does not write is a considered request, not a \[65\]
+    /// A real container Kestrel does not write is a considered request, not a \[68\]
     #[test]
     fn a_real_but_unsupported_container_is_not_treated_as_a_typo() {
         let e = target("out/mix.aiff").unwrap_err();
@@ -1261,9 +1276,9 @@ mod tests {
     fn edit_distance_is_a_metric_on_the_cases_that_matter() {
         assert_eq!(edit_distance("opus", "opus"), 0);
         assert_eq!(edit_distance("opis", "opus"), 1);
-        // [66]
+        // [69]
         assert_eq!(edit_distance("fkac", "flac"), 1);
-        // [67]
+        // [70]
         assert_eq!(edit_distance("flca", "flac"), 2);
         assert_eq!(edit_distance("", "wav"), 3);
     }
@@ -1285,7 +1300,7 @@ mod tests {
         }
     }
 
-    /// A reader that looks rarely still sees every phase, in order; a reader \[68\]
+    /// A reader that looks rarely still sees every phase, in order; a reader \[71\]
     #[test]
     fn a_monitor_keeps_every_event_for_every_reader() {
         use super::{Event, Monitor, Observer, Phase, Setup};
@@ -1342,7 +1357,7 @@ mod tests {
         assert!(obs.cancelled());
     }
 
-    /// Progress, speed and the estimate say nothing until they mean \[69\]
+    /// Progress, speed and the estimate say nothing until they mean \[72\]
     #[test]
     fn derived_figures_wait_until_they_mean_something() {
         use super::Snapshot;
@@ -1359,7 +1374,7 @@ mod tests {
         assert_eq!(s.eta_secs(), None);
     }
 
-    /// A per-track render's progress is its notes read and its blocks inside \[70\]
+    /// A per-track render's progress is its notes read and its blocks inside \[73\]
     #[test]
     fn a_per_track_render_is_measured_by_its_notes_and_its_file() {
         use super::{Snapshot, TrackProgress, PER_TRACK_NOTE_SHARE};
@@ -1392,7 +1407,7 @@ mod tests {
         assert_eq!(s.progress(), Some(0.8));
     }
 
-    /// The progress feed's wire format is this serialisation, so it is pinned: \[71\]
+    /// The progress feed's wire format is this serialisation, so it is pinned: \[74\]
     #[test]
     fn events_serialise_with_a_type_tag_and_snake_case_names() {
         use super::{Event, Phase};

@@ -5,6 +5,7 @@
 //! **FalconEye**: Kestrel's error catching and logging, kept apart from the \[1\]
 
 pub(crate) mod observe;
+pub(crate) mod posix;
 pub mod redact;
 pub mod renderlog;
 pub mod report;

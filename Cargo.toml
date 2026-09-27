@@ -1,6 +1,6 @@
 [package]
 name = "kestrel"
-version = "1.2.2"
+version = "1.2.3"
 edition = "2021"
 rust-version = "1.88"
 authors = ["thtstickyboi"]
@@ -79,11 +79,18 @@ wgpu = { version = "27", features = ["static-dxc"] }
 # mapping: the VRAM fetcher, `src/gpu/vram.rs` (DXGI for an adapter's memory
 # and this process's budget, the performance counters for what every process
 # on it uses), and FalconEye's `src/falconeye/winsys.rs` (a crashed render's
-# exit code and minidump, DX12's reason for a lost device, the registry,
-# memory and power, and the administrator prompt). The same crate and version
-# wgpu already builds.
+# exit code, the module it crashed in and a minidump, DX12's reason for a
+# lost device, the registry, memory and power, and the administrator prompt).
+# The same crate and version wgpu already builds.
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_Performance", "Win32_System_Threading", "Win32_System_Diagnostics_Debug", "Win32_System_Kernel", "Win32_System_Memory", "Win32_Storage_FileSystem", "Win32_Security", "Win32_System_IO", "Win32_Graphics_Direct3D12", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Power", "Win32_UI_Shell"] }
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_Performance", "Win32_System_Threading", "Win32_System_Diagnostics_Debug", "Win32_System_Kernel", "Win32_System_Memory", "Win32_Storage_FileSystem", "Win32_Security", "Win32_System_IO", "Win32_Graphics_Direct3D12", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Power", "Win32_UI_Shell", "Win32_System_ProcessStatus"] }
+
+# kestrel.exe's version information, from `build.rs`. Without it Windows'
+# crash records give the exe as version 0.0.0.0, and an exe with no version
+# information is one more thing antivirus heuristics count against it. It
+# needs the Windows SDK's resource compiler, which the MSVC toolchain brings.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
 
 [profile.release]
 opt-level = 3

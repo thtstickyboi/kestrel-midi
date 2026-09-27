@@ -32,38 +32,42 @@
 /// Collect the report and write it. `say` hears each step as it starts.
 /// Returns the report's path.
 
-[4] src/falconeye/report.rs:107
+[4] src/falconeye/report.rs:111
         // A render's device setup reports at info; a self-test sets up a
         // dozen, and those lines would bury its own.
 
-[5] src/falconeye/report.rs:162
+[5] src/falconeye/report.rs:166
         // Render logs go under logs/; anything that names its own folder,
         // the administrator step's wer/, keeps it.
 
-[6] src/falconeye/report.rs:187
+[6] src/falconeye/report.rs:191
 /// `reports` beside the logs: beside the executable, or in local app data
 /// where that cannot be written.
 
-[7] src/falconeye/report.rs:215
+[7] src/falconeye/report.rs:219
 /// Windows' facts, read from the registry and kernel32 directly -- not
 /// through PowerShell, which antivirus watches. Nothing read names the PC.
 
-[8] src/falconeye/report.rs:295
+[8] src/falconeye/report.rs:292
+/// Linux's or macOS's facts, from files and the system's own tools; see
+/// `posix`. Nothing read names the PC.
+
+[9] src/falconeye/report.rs:299
 /// Every adapter on every backend, and which of them the self-test runs on:
 /// the hardware ones, on Vulkan and DX12.
 
-[9] src/falconeye/report.rs:359
+[10] src/falconeye/report.rs:363
 /// `nvidia-smi`, where NVIDIA's driver is installed: the state now, the link,
 /// the limits, and how many programs use the GPU. Their names are left out.
 
-[10] src/falconeye/report.rs:397
+[11] src/falconeye/report.rs:401
 /// Windows' timeout settings and GPU scheduling. Absent means Windows'
 /// default: `TdrDelay` 2 s.
 
-[11] src/falconeye/report.rs:423
+[12] src/falconeye/report.rs:434
 /// The render logs and FalconEye's reports: listed, and the recent ones added
 /// to the archive. Returns the MIDI names they carry, which stay visible.
 
-[12] src/falconeye/report.rs:481
+[13] src/falconeye/report.rs:492
 /// Run the administrator step and take in what it read: its listing as the
 /// section, its `.wer` texts into the archive.
