@@ -30,95 +30,139 @@
 /// The protocol's version, sent in `ready`. Adding a command or a field leaves
 /// it alone; renaming or removing one, or changing a meaning, bumps it.
 
-[3] src/bin/kestrel/api.rs:66
+[3] src/bin/kestrel/api.rs:68
 /// Render arguments a request does not pass as options: the ones it names
 /// directly, and the command line's own reporting, which the API replaces.
 
-[4] src/bin/kestrel/api.rs:78
+[4] src/bin/kestrel/api.rs:81
 /// Stand-ins for the MIDI and output when the render arguments are parsed only
 /// for the configuration a soundfont loads with.
 
-[5] src/bin/kestrel/api.rs:85
+[5] src/bin/kestrel/api.rs:88
 /// Write one line. Stdout's own lock keeps a line whole against every other
 /// thread writing one, and nothing else in this mode prints to stdout.
 ///
 /// A failed write means the program on the other end has gone. There is
 /// nothing to tell it, and stdin closing is what ends the session.
 
-[6] src/bin/kestrel/api.rs:116
+[6] src/bin/kestrel/api.rs:119
 /// Log records as `log` lines, marked with the request running when they were
 /// logged, so a GUI can show a load's warnings beside that load.
 
-[7] src/bin/kestrel/api.rs:124
+[7] src/bin/kestrel/api.rs:127
     /// What the protocol carries. As the guided renderer filters: Kestrel's
     /// own information is worth having, a dependency only when something is
     /// actually wrong.
 
-[8] src/bin/kestrel/api.rs:171
+[8] src/bin/kestrel/api.rs:174
 /// What makes one loaded bank the bank another request would build: the same
 /// soundfonts in the same order, the same programs, and the same value for
 /// every option a loader reads.
 
-[9] src/bin/kestrel/api.rs:180
+[9] src/bin/kestrel/api.rs:183
     /// The sample pool budget, which the adapter options size when
     /// `--pool-budget` is not given (`gpu::auto_pool_budget`), although no
     /// loader reads them.
 
-[10] src/bin/kestrel/api.rs:192
+[10] src/bin/kestrel/api.rs:195
 /// The one long request that may run at a time. A GPU render wants the GPU
 /// to itself, and a soundfont load wants the memory.
 
-[11] src/bin/kestrel/api.rs:205
+[11] src/bin/kestrel/api.rs:208
     /// Milliseconds between `progress` lines for the next render, and the
     /// interval `scan_midi` reports at.
 
-[12] src/bin/kestrel/api.rs:213
+[12] src/bin/kestrel/api.rs:216
     // A panic while holding this is caught and reported where it happened;
     // the state it leaves is still the best there is.
 
-[13] src/bin/kestrel/api.rs:230
+[13] src/bin/kestrel/api.rs:233
         // `release` for the downloadable zips, `dev` for a build with the
         // developer options; `options` lists what this one takes.
 
-[14] src/bin/kestrel/api.rs:242
+[14] src/bin/kestrel/api.rs:245
     // Quick requests still answering. Every request gets its response, so the
     // session waits for these before it ends.
 
-[15] src/bin/kestrel/api.rs:287
+[15] src/bin/kestrel/api.rs:290
             // Quick, and free to run beside a render: each on a thread of its
             // own, so none of them holds up a cancel behind it.
 
-[16] src/bin/kestrel/api.rs:313
+[16] src/bin/kestrel/api.rs:316
     // Stdin closed: the program driving this has gone, so nothing it started
     // should go on using the GPU without it.
 
-[17] src/bin/kestrel/api.rs:319
+[17] src/bin/kestrel/api.rs:322
 /// Cancel whatever is running, and wait for it and every quick request to
 /// send its response.
 
-[18] src/bin/kestrel/api.rs:383
+[18] src/bin/kestrel/api.rs:387
     // Everything that can be refused is refused here, before anything starts,
     // so a bad request gets its answer at once.
 
-[19] src/bin/kestrel/api.rs:444
+[19] src/bin/kestrel/api.rs:457
         // Free before answering, so a request sent the moment the response
         // arrives is not told the session is busy.
 
-[20] src/bin/kestrel/api.rs:786
+[20] src/bin/kestrel/api.rs:560
+    // A render saves its progress, and keeps the command it was started with,
+    // so that `resume` can run it again.
+
+[21] src/bin/kestrel/api.rs:587
+/// `resume`: a render continued from the checkpoint it saved, as the command
+/// line's `resume` does. It takes only `file`, the `.krsm`: the command
+/// the render was started with is in it. The checkpoint is refused, with the
+/// reason, if the MIDI, a soundfont, this build or the card is not what it was
+/// made under. It always loads its soundfonts afresh, whatever is loaded.
+
+[22] src/bin/kestrel/api.rs:605
+    // Keyed by the whole command, so a bank loaded for another is never taken
+    // for this one: every flag is kept, the load-neutral ones too.
+
+[23] src/bin/kestrel/api.rs:729
+    // A render that was stopped has saved its progress: where. A whole one has
+    // let its checkpoint go, so there is none to name.
+
+[24] src/bin/kestrel/api.rs:748
+    /// Whether the session's loaded soundfonts are this batch's one set, which
+    /// the batch then takes instead of loading. When they are not, they are let
+    /// go before the batch loads its own: two large pools are never held at once.
+
+[25] src/bin/kestrel/api.rs:755
+/// What `jobs` and the rest of a `batch` request ask for, checked and planned
+/// before anything starts, as a render's is. Jobs are the batch file's entries
+/// (`midi`, and optionally `soundfonts`, `sf_programs`, `out`, `seconds`), and
+/// the rules for them are `kestrel::batch`'s, the same the file and the
+/// command line follow.
+
+[26] src/bin/kestrel/api.rs:797
+    // The shared options, parsed as a render's are; the jobs' own MIDI, soundfonts
+    // and outputs go in over them.
+
+[27] src/bin/kestrel/api.rs:840
+/// Run a batch, its telemetry written by `feed::BatchFeed`: each job's lines with
+/// the request's `id` and a `job` index, and `batch_set` and `batch_job` between
+/// them. `cancel`, `snapshot` and `set_interval` act on the job on the stage.
+
+[28] src/bin/kestrel/api.rs:848
+    // The session's interval when the batch began: a `set_interval` since holds for
+    // the jobs after it.
+
+[29] src/bin/kestrel/api.rs:980
 /// The guided renderer's update check, on the person's update ring from
 /// `ktrl.ini`. `KESTREL_NO_UPDATE_CHECK` is honoured, so a machine with checks
 /// turned off is not contacted through a GUI either.
 
-[21] src/bin/kestrel/api.rs:848
+[30] src/bin/kestrel/api.rs:1042
             // Called `notes` in the guided renderer, which is ambiguous in a
             // response a GUI puts beside a note count.
 
-[22] src/bin/kestrel/api.rs:880
+[31] src/bin/kestrel/api.rs:1074
 /// Every option `render` takes that a request passes in `options`, read off
 /// the command line's own definition, so a GUI built from this list cannot
 /// drift from the command line.
 
-[23] src/bin/kestrel/api.rs:952
+[32] src/bin/kestrel/api.rs:1146
 /// Turn `options` into the arguments the command line would have been given.
 ///
 /// Keys are option names with or without the dashes, in either `max_voices`
@@ -126,10 +170,17 @@
 /// a string or a number, and null leaves the option at its default. Values are
 /// joined with `=`, so a negative number is never read as another flag.
 
-[24] src/bin/kestrel/api.rs:990
+[33] src/bin/kestrel/api.rs:1184
             // A whole number sent as a float -- which is how many languages
             // serialise one -- is written as the integer the option parses.
 
-[25] src/bin/kestrel/api.rs:1070
+[34] src/bin/kestrel/api.rs:1267
             // clap's message without its usage block, which describes the
             // command line rather than this request.
+
+[35] src/bin/kestrel/api.rs:1283
+/// `cancel`. With `"discard": true` a render or a resume that saves its progress
+/// keeps none of it: no checkpoint is written, and none is left, so the render
+/// cannot be resumed. Without it the stop saves where it stood, as it always has.
+/// Anything else that is running has no progress to keep, and the answer says
+/// `"discard": false` for it.

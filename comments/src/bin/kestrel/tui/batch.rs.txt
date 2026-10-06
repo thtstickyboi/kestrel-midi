@@ -1,0 +1,70 @@
+# Comments extracted from src/bin/kestrel/tui/batch.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/bin/kestrel/tui/batch.rs:5
+//! The guided renderer's batch: several MIDIs, each with the soundfonts it is
+//! given, or one MIDI on several sets.
+//!
+//! A front end and nothing more, like the rest of the guided renderer. The jobs
+//! it builds go through `kestrel::batch` -- the same planning and the same
+//! runner `kestrel render a.mid b.mid` and `kestrel batch` use -- so a file
+//! written here is the file the equivalent command writes.
+//!
+//! Which soundfonts each file gets is the arrow-key table in `assign`. The only
+//! windows this opens are the system's file pickers.
+
+[2] src/bin/kestrel/tui/batch.rs:20
+/// What `flow` returns for a step that turned the person away: the way out, as
+/// `step!` has it.
+
+[3] src/bin/kestrel/tui/batch.rs:32
+/// The batch flow, from the soundfonts on: `midis` are picked, and `first` is
+/// the one set a single MIDI already has when it is being rendered on several.
+/// What it returns is where the person goes next: home, or out.
+
+[4] src/bin/kestrel/tui/batch.rs:59
+    // Named after the MIDI, and after the soundfonts where two would clash. A
+    // name the guided renderer cannot settle that way is numbered instead, since
+    // it cannot ask for a better one.
+
+[5] src/bin/kestrel/tui/batch.rs:96
+    // The bank loaded to describe the set is the render's only when every file
+    // uses that one set.
+
+[6] src/bin/kestrel/tui/batch.rs:141
+    // A job that was stopped or failed partway left what it had written as a
+    // `.partial.` file, which is not a render anyone asked for. The names were
+    // free when the batch started, so this one is ours to remove.
+
+[7] src/bin/kestrel/tui/batch.rs:345
+    /// The guided renderer's promise, for a batch: a table of rows, each given
+    /// its soundfonts with the arrow keys, writes what the same commands write.
+    /// Two MIDIs on two sets, with G turned away once for a row that has none.
+
+[8] src/bin/kestrel/tui/batch.rs:389
+    /// Space marks rows, and Enter gives all the marked ones one set: a table
+    /// that ends up with a single set takes the bank it already loaded.
+
+[9] src/bin/kestrel/tui/batch.rs:419
+        // The first batch ends on Home, which leaves the flow for the main menu; the
+        // second call is the next choice made there.
+
+[10] src/bin/kestrel/tui/batch.rs:445
+    /// "Resume a render": a per-track merge stopped part way is continued from
+    /// its checkpoint by the guided renderer, and writes what the same command
+    /// writes uninterrupted. The stop is the hook `kestrel resume`'s tests use.
+
+[11] src/bin/kestrel/tui/batch.rs:499
+        // The done screen lists the flags the render was made under, which the checkpoint holds
+        // (it said "none" for a resumed render that had --dc-blocker and --volume 80, 2026-10-06).
+
+[12] src/bin/kestrel/tui/batch.rs:516
+    /// The same for a render of one file: it saves the render itself, the guided
+    /// renderer picks the checkpoint up, and the file comes out as the same
+    /// command writes it uninterrupted. The stop panel names the checkpoint and
+    /// keeps the audio so far.

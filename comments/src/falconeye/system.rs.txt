@@ -30,10 +30,21 @@
 //! `TdrDelay`, and not `LocalDumps`, which would make Windows keep full dumps
 //! of kestrel.exe. Both are the user's to set, and the report says how.
 
-[2] src/falconeye/system.rs:103
+[2] src/falconeye/system.rs:117
 /// Every file in `dir` and one level of folders below it, newest first:
 /// name, size, date.
 
-[3] src/falconeye/system.rs:143
+[3] src/falconeye/system.rs:157
+/// Whether a Windows report is one the machine report may carry: a
+/// `LiveKernelEvent`, which is Windows' record of a GPU or other live kernel
+/// reset and names no program, or kestrel.exe's own.
+///
+/// Decided by what the report says, not by its folder's name. Windows names
+/// the folder of a hang report for *any* program `Kernel_0_0_...`, and a
+/// filter on the prefix copied one that named another program and its folder
+/// (a Windows user's report, 2026-10-03), which the report's header promises never to
+/// hold.
+
+[4] src/falconeye/system.rs:172
 /// A `Report.wer` is UTF-16LE with a byte-order mark; read anything else as
 /// UTF-8.

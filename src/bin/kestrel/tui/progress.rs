@@ -10,7 +10,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::tty::IsTty;
 use crossterm::{cursor, execute, queue, terminal};
 use kestrel::bank::Bank;
-use kestrel::session::{self, Job, Monitor, Phase, Plan, Snapshot, Summary};
+use kestrel::session::{self, Job, Monitor, Observer as _, Phase, Plan, Snapshot, Summary};
 use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -22,19 +22,24 @@ const CONFIRM: Duration = Duration::from_secs(3);
 /// The widest the panel's content goes in a wide terminal: a normal render's, \[4\]
 const WIDEST: usize = 76;
 const WIDEST_PER_TRACK: usize = 100;
+/// The footer after a first Ctrl+C, for a render that saves its progress. It sits \[5\]
+const ARMED_SAVING: &str = "Ctrl+C: stop & save \u{00B7} Ctrl+D: discard";
 
 /// The fixed text of the screen, settled before the render starts.
+#[derive(Clone)]
 pub struct Labels {
     pub midi: String,
     pub output: String,
     pub format: String,
     pub fonts: Vec<String>,
     pub max_voices: u32,
-    /// A per-track render, which gets `track_frame`: its tracks render many at \[5\]
+    /// A per-track render, which gets `track_frame`: its tracks render many at \[6\]
     pub per_track: bool,
+    /// Set for each job of a batch: the frame then opens with a row saying \[7\]
+    pub batch: Option<BatchRow>,
 }
 
-/// Recent speed and note rate, smoothed over a couple of seconds so the \[6\]
+/// Recent speed and note rate, smoothed over a couple of seconds so the \[8\]
 #[derive(Default)]
 struct Rates {
     prev: Option<(f64, f64, u64)>,
@@ -76,8 +81,33 @@ impl Rates {
 enum Footer {
     Hint,
     Armed,
+    /// Armed, for a render that saves its progress: a stop can keep it or not.
+    ArmedSaving,
     Cancelling,
     Hidden,
+}
+
+/// What a key asks of a render that is running.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stop {
+    /// Stop, and keep the progress for a resume.
+    Keep,
+    /// Stop, and keep none of it: no resume file.
+    Discard,
+}
+
+/// The stop a key asks for, if it asks for one. Either takes a second press to \[9\]
+fn stop_key(key: &crossterm::event::KeyEvent, saving: bool) -> Option<Stop> {
+    if key.kind != KeyEventKind::Press {
+        return None;
+    }
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Esc => Some(Stop::Keep),
+        KeyCode::Char(ch) if ctrl && ch.eq_ignore_ascii_case(&'c') => Some(Stop::Keep),
+        KeyCode::Char(ch) if ctrl && saving && ch.eq_ignore_ascii_case(&'d') => Some(Stop::Discard),
+        _ => None,
+    }
 }
 
 fn spinner(tick: u64) -> &'static str {
@@ -112,7 +142,7 @@ fn memory(snap: &Snapshot, col: usize) -> Line {
         (None, Some("cpu")) => vec![c("none, CPU backend", DIM)],
         _ => dash(),
     };
-    // [7]
+    // [10]
     if let Some(m) = snap.gpu_memory {
         if let Some(used) = m.dedicated_used {
             let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
@@ -168,12 +198,25 @@ fn frame(labels: &Labels, snap: &Snapshot, rates: &Rates, view: &View) -> Vec<Li
         footer,
     } = *view;
     let label = |t: &str| c(format!("{t:<10}"), DIM);
-    let mut body: Vec<Line> = vec![
+    let mut body: Vec<Line> = Vec::new();
+    if let Some(row) = &labels.batch {
+        let mut line = vec![
+            label("Batch"),
+            b(format!("job {} of {}", row.job, row.jobs), AMBER),
+            c(format!("  \u{00B7}  set {} of {}", row.set, row.sets), DIM),
+            c(format!("  \u{00B7}  {} done", row.done), DIM),
+        ];
+        if row.failed > 0 {
+            line.push(c(format!(", {} failed", row.failed), WARN));
+        }
+        body.push(line);
+    }
+    body.extend([
         vec![label("MIDI"), s(style::middle(&labels.midi, inner - 10))],
         vec![label("Output"), s(labels.output.clone()), c(format!("  {}", labels.format), DIM)],
         vec![label("Fonts"), s(labels.fonts.join("  +  "))],
         Line::new(),
-    ];
+    ]);
 
     let rendering = snap.render_secs > 0.0;
     match snap.phase {
@@ -190,7 +233,7 @@ fn frame(labels: &Labels, snap: &Snapshot, rates: &Rates, view: &View) -> Vec<Li
             bar.push(b(pct, AMBER));
             body.push(bar);
 
-            // [8]
+            // [11]
             let middle = if finishing {
                 vec![c(format!("Closing the file {}", spinner(tick)), AMBER)]
             } else if frac >= 1.0 {
@@ -274,13 +317,14 @@ fn frame(labels: &Labels, snap: &Snapshot, rates: &Rates, view: &View) -> Vec<Li
     let footer = match footer {
         Footer::Hint => Some(vec![c("Ctrl+C to cancel", DIM)]),
         Footer::Armed => Some(vec![b("press Ctrl+C again to cancel", WARN)]),
+        Footer::ArmedSaving => Some(vec![b(ARMED_SAVING, WARN)]),
         Footer::Cancelling => Some(vec![b("stopping after this block\u{2026}", WARN)]),
         Footer::Hidden => None,
     };
     style::panel(title, &body, inner, footer)
 }
 
-/// A per-track render's frame: its tracks, many at once, rather than one \[9\]
+/// A per-track render's frame: its tracks, many at once, rather than one \[12\]
 fn track_frame(labels: &Labels, snap: &Snapshot, rates: &Rates, view: &View) -> Vec<Line> {
     let View {
         tick,
@@ -425,13 +469,14 @@ fn track_frame(labels: &Labels, snap: &Snapshot, rates: &Rates, view: &View) -> 
     let footer = match footer {
         Footer::Hint => Some(vec![c("Ctrl+C to cancel", DIM)]),
         Footer::Armed => Some(vec![b("press Ctrl+C again to cancel", WARN)]),
+        Footer::ArmedSaving => Some(vec![b(ARMED_SAVING, WARN)]),
         Footer::Cancelling => Some(vec![b("stopping the tracks in flight\u{2026}", WARN)]),
         Footer::Hidden => None,
     };
     style::panel(title, &body, inner, footer)
 }
 
-/// The terminal while the screen owns it: raw mode so Ctrl+C arrives as a key \[10\]
+/// The terminal while the screen owns it: raw mode so Ctrl+C arrives as a key \[13\]
 struct Screen {
     raw: bool,
     size: (u16, u16),
@@ -519,11 +564,13 @@ pub fn run(job: &Job, plan: Plan, bank: Option<Arc<Bank>>, labels: &Labels) -> R
         let worker =
             scope.spawn(move || session::run_monitored(job, plan, bank, &render_monitor));
 
-        // [11]
+        // [14]
         let mut screen = Screen::open(interactive, if labels.per_track { WIDEST_PER_TRACK } else { WIDEST });
         let mut rates = Rates::default();
         let mut armed: Option<Instant> = None;
         let mut tick = 0u64;
+        // Whether a stop has progress to keep, and so a choice about it.
+        let saving = job.checkpoint.is_some() || job.stems.as_ref().is_some_and(|s| s.resume.is_some());
 
         loop {
             let finished = worker.is_finished();
@@ -534,7 +581,11 @@ pub fn run(job: &Job, plan: Plan, bank: Option<Arc<Bank>>, labels: &Labels) -> R
             } else if monitor.is_cancelled() {
                 Footer::Cancelling
             } else if armed.is_some_and(|t| t.elapsed() < CONFIRM) {
-                Footer::Armed
+                if saving {
+                    Footer::ArmedSaving
+                } else {
+                    Footer::Armed
+                }
             } else {
                 Footer::Hint
             };
@@ -553,17 +604,205 @@ pub fn run(job: &Job, plan: Plan, bank: Option<Arc<Bank>>, labels: &Labels) -> R
                 std::thread::sleep(FRAME);
                 continue;
             }
-            // [12]
+            // [15]
             if !event::poll(FRAME).unwrap_or(false) {
                 continue;
             }
             if let Ok(Event::Key(key)) = event::read() {
-                let stop = key.kind == KeyEventKind::Press
-                    && (key.code == KeyCode::Esc
-                        || (key.code == KeyCode::Char('c')
-                            && key.modifiers.contains(KeyModifiers::CONTROL)));
-                if stop {
-                    if armed.is_some_and(|t| t.elapsed() < CONFIRM) {
+                let armed_now = armed.is_some_and(|t| t.elapsed() < CONFIRM);
+                match stop_key(&key, saving) {
+                    // [16]
+                    Some(_) if !armed_now => armed = Some(Instant::now()),
+                    Some(Stop::Keep) => monitor.cancel(),
+                    Some(Stop::Discard) => monitor.cancel_discarding(),
+                    None => {}
+                }
+            }
+        }
+        drop(screen);
+        worker.join().unwrap_or_else(|p| std::panic::resume_unwind(p))
+    })
+}
+
+/// Where a batch is, for the row a batch's frames add at the top.
+#[derive(Clone, Debug, Default)]
+pub struct BatchRow {
+    /// The job on the screen, from 1, and how many there are.
+    pub job: usize,
+    pub jobs: usize,
+    /// Its soundfont set, from 1, and how many sets the batch loads. Filled in \[17\]
+    pub set: usize,
+    pub sets: usize,
+    /// Jobs finished, and of them how many failed. Live: filled in per frame.
+    pub done: usize,
+    pub failed: usize,
+}
+
+/// What `run_batch` shares between the render thread and the screen.
+struct BatchShared {
+    /// The monitor of the job on the screen: each job gets a fresh one, so its \[18\]
+    monitor: std::sync::Mutex<Arc<Monitor>>,
+    /// That job, from 0; `usize::MAX` before the first.
+    current: std::sync::atomic::AtomicUsize,
+    cancel: std::sync::atomic::AtomicBool,
+    done: std::sync::atomic::AtomicUsize,
+    failed: std::sync::atomic::AtomicUsize,
+}
+
+impl BatchShared {
+    fn monitor(&self) -> Arc<Monitor> {
+        Arc::clone(&self.monitor.lock().unwrap_or_else(|p| p.into_inner()))
+    }
+}
+
+/// The batch's observer: each job's own render reports to a monitor of its own, \[19\]
+struct Watch {
+    shared: Arc<BatchShared>,
+    obs: session::MonitorObserver,
+}
+
+impl Watch {
+    /// Put job `index` on the screen, on a monitor of its own, unless it \[20\]
+    fn show(&mut self, index: usize) {
+        use std::sync::atomic::Ordering::Relaxed;
+        if self.shared.current.load(Relaxed) == index {
+            return;
+        }
+        let monitor = Monitor::new();
+        self.obs = monitor.observer();
+        *self.shared.monitor.lock().unwrap_or_else(|p| p.into_inner()) = monitor;
+        self.shared.current.store(index, Relaxed);
+    }
+}
+
+impl session::Observer for Watch {
+    fn phase(&mut self, phase: Phase) {
+        self.obs.phase(phase);
+    }
+    fn setup(&mut self, setup: &session::Setup) {
+        self.obs.setup(setup);
+    }
+    fn block(&mut self, tick: &session::Tick) {
+        self.obs.block(tick);
+    }
+    fn tracks(&mut self, progress: &session::TrackProgress) {
+        self.obs.tracks(progress);
+    }
+    fn cancelled(&self) -> bool {
+        self.shared.cancel.load(std::sync::atomic::Ordering::Relaxed) || self.obs.cancelled()
+    }
+}
+
+impl kestrel::batch::BatchObserver for Watch {
+    fn job(&mut self) -> &mut dyn session::Observer {
+        self
+    }
+
+    fn loading(&mut self, _set: usize, _sets: usize, _fonts: &[std::path::PathBuf], first_job: usize, _jobs: usize) {
+        self.show(first_job);
+        self.obs.phase(Phase::LoadingSoundfont);
+    }
+
+    fn started(&mut self, index: usize, _total: usize, _job: &Job) {
+        self.show(index);
+    }
+
+    fn finished(&mut self, _total: usize, result: &kestrel::batch::JobResult) {
+        use kestrel::batch::Outcome;
+        use std::sync::atomic::Ordering::Relaxed;
+        // [21]
+        self.show(result.index);
+        let ended = match &result.outcome {
+            Outcome::Done(s) => Ok(s.clone()),
+            Outcome::Failed(why) => Err(anyhow::anyhow!("{why}")),
+            Outcome::NotRun => return,
+        };
+        if ended.is_err() {
+            self.shared.failed.fetch_add(1, Relaxed);
+        }
+        self.shared.done.fetch_add(1, Relaxed);
+        self.shared.monitor().finish(&ended);
+    }
+}
+
+/// Run a batch with the progress screen up, one job at a time on the screen. \[22\]
+pub fn run_batch(plan: kestrel::batch::BatchPlan, mut labels: Vec<Labels>) -> kestrel::batch::BatchSummary {
+    use std::sync::atomic::Ordering::Relaxed;
+    let interactive = std::io::stdin().is_tty() && std::io::stdout().is_tty();
+
+    let sets = plan.groups().len();
+    for (set, group) in plan.groups().iter().enumerate() {
+        for &job in group {
+            if let Some(row) = labels[job].batch.as_mut() {
+                row.set = set + 1;
+                row.sets = sets;
+            }
+        }
+    }
+
+    let first = Monitor::new();
+    let shared = Arc::new(BatchShared {
+        monitor: std::sync::Mutex::new(Arc::clone(&first)),
+        current: std::sync::atomic::AtomicUsize::new(usize::MAX),
+        cancel: std::sync::atomic::AtomicBool::new(false),
+        done: std::sync::atomic::AtomicUsize::new(0),
+        failed: std::sync::atomic::AtomicUsize::new(0),
+    });
+
+    std::thread::scope(|scope| {
+        let mut watch = Watch { shared: Arc::clone(&shared), obs: first.observer() };
+        let worker = scope.spawn(move || kestrel::batch::run(plan, &mut watch));
+
+        let mut screen = Screen::open(interactive, WIDEST);
+        let mut rates = Rates::default();
+        let mut shown = usize::MAX;
+        let mut armed: Option<Instant> = None;
+        let mut tick = 0u64;
+
+        loop {
+            let finished = worker.is_finished();
+            let at = shared.current.load(Relaxed);
+            if at != shown {
+                shown = at;
+                rates = Rates::default();
+            }
+            let monitor = shared.monitor();
+            let snap = monitor.snapshot();
+            rates.update(&snap);
+            let footer = if !interactive {
+                Footer::Hidden
+            } else if shared.cancel.load(Relaxed) {
+                Footer::Cancelling
+            } else if armed.is_some_and(|t| t.elapsed() < CONFIRM) {
+                Footer::Armed
+            } else {
+                Footer::Hint
+            };
+            let view = View { tick, inner: screen.inner(), footer };
+            let mut label = labels[at.min(labels.len() - 1)].clone();
+            if let Some(row) = label.batch.as_mut() {
+                row.done = shared.done.load(Relaxed);
+                row.failed = shared.failed.load(Relaxed);
+            }
+            screen.draw(&frame(&label, &snap, &rates, &view));
+            if finished {
+                break;
+            }
+            tick += 1;
+
+            if !interactive {
+                std::thread::sleep(FRAME);
+                continue;
+            }
+            if !event::poll(FRAME).unwrap_or(false) {
+                continue;
+            }
+            if let Ok(Event::Key(key)) = event::read() {
+                // A batch saves no progress, so there is one kind of stop.
+                let armed_now = armed.is_some_and(|t| t.elapsed() < CONFIRM);
+                if stop_key(&key, false).is_some() {
+                    if armed_now {
+                        shared.cancel.store(true, Relaxed);
                         monitor.cancel();
                     } else {
                         armed = Some(Instant::now());
@@ -588,6 +827,7 @@ mod tests {
             fonts: vec!["gm.sf2".into(), "piano.sfz".into()],
             max_voices: 1 << 20,
             per_track: false,
+            batch: None,
         }
     }
 
@@ -626,6 +866,7 @@ mod tests {
             wall_secs: 14.0,
             render_secs: if rendering { 4.0 } else { 0.0 },
             audio_secs: 102.1,
+            resumed_secs: 0.0,
             bytes_read: 523,
             bytes_total: 1000,
             blocks: 1200,
@@ -662,7 +903,7 @@ mod tests {
         Phase::Finishing,
     ];
 
-    /// Every phase lays out to the same rectangle, so the screen never leaves \[13\]
+    /// Every phase lays out to the same rectangle, so the screen never leaves \[23\]
     #[test]
     fn every_phase_draws_the_same_rectangle() {
         let mut heights = Vec::new();
@@ -690,7 +931,67 @@ mod tests {
         assert!(heights.iter().all(|&h| h == heights[0]), "{heights:?}");
     }
 
-    /// And so does a per-track render's, whose rows differ from a normal \[14\]
+    /// The footer that offers both stops sits in the panel's bottom edge, which has \[24\]
+    #[test]
+    fn the_footer_that_offers_both_stops_fits_the_narrowest_panel() {
+        for inner in [40, 70, WIDEST] {
+            for footer in [Footer::Armed, Footer::ArmedSaving] {
+                let view = View { tick: 3, inner, footer };
+                let mut snap = sample(Phase::Rendering);
+                let mut tracks = labels();
+                for per in [false, true] {
+                    tracks.per_track = per;
+                    if per {
+                        per_track(&mut snap);
+                    }
+                    let lines = frame(&tracks, &snap, &Rates::default(), &view);
+                    let widths: Vec<usize> = lines.iter().map(|l| style::width(l)).collect();
+                    assert!(widths.iter().all(|&w| w == inner + 4), "{inner} {per}: {widths:?}");
+                    let text: Vec<String> = lines.iter().map(|l| style::plain(l)).collect();
+                    let last = text.last().unwrap();
+                    if footer == Footer::ArmedSaving {
+                        assert!(last.contains("Ctrl+C: stop & save") && last.contains("Ctrl+D: discard"), "{last}");
+                    } else {
+                        assert!(last.contains("press Ctrl+C again to cancel"), "{last}");
+                    }
+                }
+            }
+        }
+    }
+
+    fn key(code: KeyCode, mods: KeyModifiers) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(code, mods)
+    }
+
+    /// Which stop a key asks for: Ctrl+C and Esc keep the progress, Ctrl+D does not, \[25\]
+    #[test]
+    fn a_stop_key_says_whether_to_keep_the_progress() {
+        let ctrl = KeyModifiers::CONTROL;
+        let c = key(KeyCode::Char('c'), ctrl);
+        let d = key(KeyCode::Char('d'), ctrl);
+        let esc = key(KeyCode::Esc, KeyModifiers::NONE);
+        for saving in [true, false] {
+            assert_eq!(stop_key(&c, saving), Some(Stop::Keep));
+            assert_eq!(stop_key(&esc, saving), Some(Stop::Keep));
+            // Caps Lock, or Shift, makes the letter a capital: the same key.
+            assert_eq!(stop_key(&key(KeyCode::Char('C'), ctrl | KeyModifiers::SHIFT), saving), Some(Stop::Keep));
+            // A letter alone is not a stop, and an `x` is not either.
+            assert_eq!(stop_key(&key(KeyCode::Char('d'), KeyModifiers::NONE), saving), None);
+            assert_eq!(stop_key(&key(KeyCode::Char('D'), KeyModifiers::SHIFT), saving), None);
+            assert_eq!(stop_key(&key(KeyCode::Char('x'), ctrl), saving), None);
+        }
+        assert_eq!(stop_key(&d, true), Some(Stop::Discard));
+        assert_eq!(stop_key(&key(KeyCode::Char('D'), ctrl), true), Some(Stop::Discard));
+        assert_eq!(stop_key(&d, false), None, "nothing to keep, so nothing to discard");
+        // Only a press: a release or a repeat of the key is not another one.
+        for k in [c, d] {
+            let mut release = k;
+            release.kind = KeyEventKind::Release;
+            assert_eq!(stop_key(&release, true), None);
+        }
+    }
+
+    /// And so does a per-track render's, whose rows differ from a normal \[26\]
     #[test]
     fn every_phase_of_a_per_track_render_draws_the_same_rectangle() {
         let labels = Labels { per_track: true, ..labels() };
@@ -708,9 +1009,9 @@ mod tests {
             let all: Vec<String> = frame(&labels, &snap, &Rates::default(), &wide).iter().map(|l| style::plain(l)).collect();
             let all = all.join("\n");
             if phase == Phase::Rendering {
-                // [15]
+                // [27]
                 assert!(all.contains(" 41.0%"), "{all}");
-                // [16]
+                // [28]
                 assert!(all.contains("24.60\u{00D7} realtime"), "{all}");
                 assert!(all.contains("Tracks 1,234 of 50,000"), "{all}");
                 assert!(all.contains("256 tracks, 18 voices each"), "{all}");
@@ -725,7 +1026,7 @@ mod tests {
         assert!(heights.iter().all(|&h| h == heights[0]), "{heights:?}");
     }
 
-    /// At its own width a per-track render's rows fit whole, with figures the \[17\]
+    /// At its own width a per-track render's rows fit whole, with figures the \[29\]
     #[test]
     fn a_per_track_render_fits_its_rows_at_its_width() {
         let labels = Labels { per_track: true, ..labels() };
@@ -748,7 +1049,7 @@ mod tests {
         }
     }
 
-    /// Not a check: prints one frame per phase as plain text, to look at a \[18\]
+    /// Not a check: prints one frame per phase as plain text, to look at a \[30\]
     #[test]
     #[ignore = "prints frames to look at; asserts nothing"]
     fn preview_frames() {

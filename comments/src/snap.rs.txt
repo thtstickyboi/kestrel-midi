@@ -1,0 +1,41 @@
+# Comments extracted from src/snap.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/snap.rs:5
+//! Bytes in and bytes out, for the state a single render saves when it stops:
+//! `Enc` writes plain little-endian values, `Dec` reads them back and says so
+//! when the bytes run out.
+//!
+//! **Why not serde.** A snapshot holds floats that must come back as the same
+//! bits (`f32::to_bits`, never a text round trip), arrays a few hundred entries
+//! long, and a handful of vectors that run to megabytes. Writing each field by
+//! name in one place, next to the struct it belongs to, is also what lets a
+//! test say "every field is here": see the exhaustive destructuring in
+//! `Driver::save_state`, which stops compiling when a field is added without
+//! being decided on.
+//!
+//! Every length is written before what it counts, and every read of a counted
+//! thing checks the count against what the receiver expects, so a snapshot made
+//! under another configuration is refused rather than half read.
+
+[2] src/snap.rs:171
+    /// Every byte was read: a snapshot with some left over was made by
+    /// something that wrote more than this reads.
+
+[3] src/snap.rs:229
+    /// A count, which cannot be more than the bytes left could hold at
+    /// `each` bytes a thing: a damaged count is an error, not an allocation.
+
+[4] src/snap.rs:304
+    /// Plain-old-data values, copied out so they are aligned however the
+    /// snapshot's bytes were.
+
+[5] src/snap.rs:314
+    /// Fill `into` from a stored array of exactly its length: a per-channel
+    /// table is as long as the channels there are, and one that is not is a
+    /// snapshot of something else.

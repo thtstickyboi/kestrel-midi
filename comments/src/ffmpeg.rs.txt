@@ -164,30 +164,36 @@
             // why. Reporting the write error alone would name the symptom.
 
 [24] src/ffmpeg.rs:436
+    /// Feed samples that are already bytes: the `f32le` stream a render fed an
+    /// earlier encoder, played back into this one when that render is resumed.
+    /// An encoder fed the same stream writes the same file however the stream
+    /// is cut into writes.
+
+[25] src/ffmpeg.rs:450
     /// Collect ffmpeg's own complaint, which is the useful half of any failure
     /// here. Consumes the stderr reader, so it is only ever called once on the
     /// way out.
 
-[25] src/ffmpeg.rs:458
+[26] src/ffmpeg.rs:472
     /// Close the pipe, wait for the encode to finish, and return the size of
     /// the file written. Returning the *encoded* size rather than the bytes
     /// fed in keeps the caller's "wrote N MiB" line honest.
 
-[26] src/ffmpeg.rs:476
+[27] src/ffmpeg.rs:490
         // Anything on stderr with -loglevel error is worth passing on even
         // when the exit status was clean.
 
-[27] src/ffmpeg.rs:490
+[28] src/ffmpeg.rs:504
 /// True when `name` looks like a path rather than a bare command. Used to keep
 /// `--ffmpeg ffmpeg` (a bare name someone meant to be found on PATH) from
 /// being treated as a relative file that does not exist.
 
-[28] src/ffmpeg.rs:643
+[29] src/ffmpeg.rs:657
     /// Pinned digest of the archive, checked before anything is extracted or
     /// run. `None` means this build ships no pin and the operator must supply
     /// one; see `verify`.
 
-[29] src/ffmpeg.rs:652
+[30] src/ffmpeg.rs:666
 /// **No pins are shipped, on purpose.** These URLs are rolling "latest release"
 /// endpoints whose digest changes with every upstream release, so a constant
 /// baked in here would be stale within weeks and would have to be either
@@ -196,11 +202,11 @@
 /// makes the operator pin one deliberately, against the vendor's own published
 /// checksum.
 
-[30] src/ffmpeg.rs:664
+[31] src/ffmpeg.rs:678
         // Measured 2026-08-31 on release 9.0.1. The other two are
         // estimates and are marked as such; nobody has run them.
 
-[31] src/ffmpeg.rs:702
+[32] src/ffmpeg.rs:716
 /// Where `get-ffmpeg` installs: an `ffmpeg/` directory beside the Kestrel
 /// executable. `locate` searches there before `PATH`, so a fetched copy wins
 /// over a system install rather than being shadowed by one.
@@ -208,13 +214,13 @@
 /// Never a system path, and nothing is added to `PATH`. The fetch stays inside
 /// the program's own directory, so undoing it is deleting a folder.
 
-[32] src/ffmpeg.rs:716
+[33] src/ffmpeg.rs:730
 /// Compare a computed digest against what the operator or the build pinned.
 ///
 /// Fails closed: with neither a pinned nor an accepted digest, the download is
 /// reported and refused rather than trusted.
 
-[33] src/ffmpeg.rs:765
+[34] src/ffmpeg.rs:779
 /// Download `url` to `dest` with the platform's own curl.
 ///
 /// curl rather than an HTTP crate: it ships with Windows 10 1803+, macOS and
@@ -222,7 +228,7 @@
 /// keeps this command at zero added dependencies. `--proto-redir =https`
 /// refuses a redirect that tries to leave TLS, which a plain `-L` would follow.
 
-[34] src/ffmpeg.rs:790
+[35] src/ffmpeg.rs:804
 /// Pull just the ffmpeg binary out of `archive` into `into`.
 ///
 /// bsdtar reads zip as well as tar.xz and ships as `tar` on Windows 10+, macOS
@@ -230,40 +236,40 @@
 /// taken: ffplay, ffprobe, the documentation and the presets are most of the
 /// archive and nothing here uses any of them.
 
-[35] src/ffmpeg.rs:805
+[36] src/ffmpeg.rs:819
             // Wildcard because the top directory carries the version, which
             // changes with every release and cannot be written down here.
 
-[36] src/ffmpeg.rs:811
+[37] src/ffmpeg.rs:825
     // Extraction keeps the archive's own directory structure, so find what
     // landed rather than predicting it.
 
-[37] src/ffmpeg.rs:819
+[38] src/ffmpeg.rs:833
         // Drop whatever version-named directory it came out of, innermost
         // first. `remove_dir` only succeeds on an empty one, so this cannot
         // take anything with it.
 
-[38] src/ffmpeg.rs:891
+[39] src/ffmpeg.rs:905
     /// FIPS-180-4 vectors, plus a multi-block case that catches a wrong length
     /// field and a chunked case that catches a wrong buffer boundary.
 
-[39] src/ffmpeg.rs:962
+[40] src/ffmpeg.rs:976
     /// The wildcard extract plus relocate, which is the fiddly half of
     ///  and the half that has no network in it. Builds an archive
     /// shaped like a real one -- a version-named top directory with the binary
     /// under  -- and checks the binary ends up flat in the destination
     /// with the nesting cleaned up.
 
-[40] src/ffmpeg.rs:974
+[41] src/ffmpeg.rs:988
         // Something that must NOT be extracted, to prove the wildcard is doing
         // work rather than the whole archive being unpacked.
 
-[41] src/ffmpeg.rs:998
+[42] src/ffmpeg.rs:1012
     /// The bug this guards, found 2026-09-02: `.opus` rendered at the 0 dBFS
     /// default decoded to +0.99 dBFS with 2,335 samples over full scale, heard
     /// as high-frequency clicks. Lossy codecs do not preserve peak level, so
     /// they need headroom and lossless does not.
 
-[42] src/ffmpeg.rs:1008
+[43] src/ffmpeg.rs:1022
         // Enough headroom to cover the worst measured overshoot (+0.99 dB on
         // opus), and not so much that it throws away loudness.

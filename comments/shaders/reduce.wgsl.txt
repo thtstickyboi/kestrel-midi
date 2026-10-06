@@ -18,3 +18,42 @@
 // makes it proportional to log2 of the term count. Kahan compensation on the
 // per-thread partial sums is available for the cases where even that is not
 // enough.
+
+[2] shaders/reduce.wgsl:25
+// The most partials a sample can have for `thin` to be the pass that reduces it.
+// A block with at most this many render workgroups is reduced by `thin` and one
+// with more by `main`; the host picks, and each returns at once for the other's.
+// Never more than `WG`, so that `main`'s strided share is a single term. The
+// host's `reduce_thin_max` is this number.
+
+[3] shaders/reduce.wgsl:32
+// One thread per output sample, for a block with few partials a sample.
+//
+// `main` below gives every sample a workgroup of its own, which is 8,192 of them
+// a block however few partials each has, and for a stem with a handful of voices
+// that is workgroups launched to add one number: 18.3 ms of a 23.6 ms batch on a
+// per-track render with 256 lanes (2026-09-24). Here a workgroup is
+// `THIN_LANES` samples, and each thread does what a workgroup did.
+//
+// **The same bytes, not close ones.** With `n <= WG` partials a sample, each of
+// `main`'s threads holds one term -- `0.0 + p[t]` -- or none, and the tree adds
+// the thread at `t + s` into the one at `t`, `s` from `WG / 2` down to 1. The
+// levels with `t + s >= n` add `+0.0` to something that is not `-0.0`, which
+// changes nothing, so the tree over the first `2^m >= n` terms, with `s` from
+// `2^(m-1)`, is the same adds in the same order. Nothing in the tree is `-0.0`:
+// the first level of `main` adds a zero to every term, and `+0.0 + -0.0` is
+// `+0.0`, so each term here has the zero added to it too (see `zero`). The sum
+// below is that tree
+// built as a binary counter: terms taken in the order the tree meets them,
+// which is their index with its `m` bits reversed, and each pair added when its
+// second term arrives. Kahan compensation of a single term is the term itself,
+// so the Kahan switch changes nothing here.
+
+[4] shaders/reduce.wgsl:69
+    // A `+0.0` the compiler cannot see through. `main` turns a `-0.0` partial into
+    // `+0.0` where its tree adds the zero it read back from workgroup memory, and
+    // a zero the compiler knows is not that: Vulkan does not make a shader keep
+    // the sign of a zero, and a compiler takes `p + 0.0` for `p`. It did, for a
+    // zero worked out from `nwg` after the check above -- `-0.0` out of `thin`
+    // for `+0.0` out of `main`, on a single `-0.0` partial -- so this one is a
+    // word the host wrote, which nothing at compile time can know.

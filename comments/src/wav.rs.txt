@@ -22,22 +22,33 @@
 // writer
 // ---------------------------------------------------------------------------
 
-[3] src/wav.rs:142
+[3] src/wav.rs:133
+    /// Everything written is on the disk, not in a buffer or the system's
+    /// cache: what a checkpoint that points at this file needs to be true.
+
+[4] src/wav.rs:141
+    /// Go on with a WAV that this writer (or its predecessor) left, from
+    /// `data_bytes` of audio. The file is cut back to exactly that, so whatever
+    /// was written after the checkpoint is not in it twice, and its header is
+    /// checked to be the one `create` would write for these settings. The sizes
+    /// in the header are patched when the render finishes, as they always are.
+
+[5] src/wav.rs:208
             // Loud, not silent: a >4 GiB render cannot be described by a plain
             // RIFF header. The audio data is intact, but the size fields are
             // saturated and some players will stop early.
 
-[4] src/wav.rs:169
+[6] src/wav.rs:235
 // ---------------------------------------------------------------------------
 // reader
 // ---------------------------------------------------------------------------
 
-[5] src/wav.rs:177
+[7] src/wav.rs:243
     /// Deinterleaved to mono by taking the first channel if `channels > 1`.
     /// The synth is a mono-sample engine; stereo SFZ samples are handled by
     /// the caller splitting them into two regions.
 
-[6] src/wav.rs:229
+[8] src/wav.rs:295
 /// Read a sample file, dispatching on its contents rather than on its name.
 ///
 /// Sample libraries ship compressed samples under extensions of their own
@@ -46,27 +57,36 @@
 /// libsndfile, which is what sfizz and most of the SFZ world load through,
 /// sniffs the magic number; so does this.
 
-[7] src/wav.rs:241
+[9] src/wav.rs:307
         // A file too short to hold a magic number is not a container of any
         // kind. Fall through so the RIFF path is the only place that says so.
 
-[8] src/wav.rs:252
+[10] src/wav.rs:318
 /// FLAC, whatever the file is called.
 ///
 /// `claxon` hands back planar `i32` blocks at the stream's own bit depth, so
 /// the work here is the transpose to interleaved and the scale to `f32`. Both
 /// are worth a test: getting either wrong produces noise rather than an error.
 
-[9] src/wav.rs:292
+[11] src/wav.rs:358
     // FLAC carries no `smpl` chunk. Loops come from the SFZ opcodes instead,
     // except for the LOOPSTART/LOOPLENGTH tag pair, which is the only place a
     // converted library can have put them.
 
-[10] src/wav.rs:352
+[12] src/wav.rs:418
                     // WAVE_FORMAT_EXTENSIBLE: the real tag is the first two
                     // bytes of the sub-format GUID.
 
-[11] src/wav.rs:451
+[13] src/wav.rs:441
+                    // The chunk's body: manufacturer, product, sample period,
+                    // MIDI unity note (12), MIDI pitch fraction (16), SMPTE
+                    // format (20), SMPTE offset (24), loop count (28), sampler
+                    // data size, then 24 bytes a loop. The unity note and the
+                    // fraction were read from 20 and 24 -- the SMPTE fields, which
+                    // are zero -- until 2026-10-05, so every sample that had a
+                    // `smpl` chunk said it was recorded at key 0.
+
+[14] src/wav.rs:524
     // ---- a minimal FLAC encoder, for fixtures ----------------------------
     //
     // VERBATIM subframes at 16 bits store raw samples and every field lands on
@@ -74,27 +94,40 @@
     // the parts of the FLAC path this crate owns: the magic-number dispatch,
     // the planar-to-interleaved transpose, and the scale to `f32`.
 
-[12] src/wav.rs:480
+[15] src/wav.rs:553
     /// Block size the fixtures use. Deliberately smaller than any test's data,
     /// so every fixture is several frames and the decode loop's accumulation
     /// across blocks is exercised rather than just its first pass.
 
-[13] src/wav.rs:508
+[16] src/wav.rs:581
             // Frame header: sync, fixed blocking, 16-bit block size at the end
             // of the header, sample rate from STREAMINFO, independent
             // channels, 16-bit samples.
 
-[14] src/wav.rs:537
+[17] src/wav.rs:610
     /// The reported failure: FLAC samples under a library's own extension.
     ///
     /// Dispatching on the name rather than the contents skipped every region
     /// in such a library, which renders as silence with only a `not a RIFF
     /// file` warning to say why.
 
-[15] src/wav.rs:555
+[18] src/wav.rs:628
     /// The transpose from claxon's planar blocks, which is this crate's own
     /// arithmetic and would read as noise rather than as an error if wrong.
 
-[16] src/wav.rs:573
+[19] src/wav.rs:646
     /// A file that is neither is still reported against RIFF, so there is one
     /// message for "this is not a sample file" rather than three.
+
+[20] src/wav.rs:656
+    /// A `smpl` chunk is read where the format puts its fields: the unity note
+    /// after the three header words and the pitch fraction after it, then the SMPTE
+    /// pair, the loop count, and the loops at 36. The note and the fraction used to
+    /// be read from the SMPTE fields, so the unity note of every sample that had
+    /// one was 0 (reported on 2026-10-05 as an SFZ region with no `pitch_keycenter`
+    /// playing five octaves high).
+
+[21] src/wav.rs:673
+            // manufacturer, product, period, unity note, fraction (half a
+            // semitone), SMPTE format and offset (nonzero, so a read of them is
+            // seen), one loop, sampler data

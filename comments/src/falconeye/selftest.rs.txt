@@ -21,39 +21,129 @@
 //! as a real piano library is. It starts at 16,384 voices and doubles. It
 //! stops once a block takes over [`STOP_MS`], so the next step, twice the
 //! voices, stays near 0.5 s. The test itself never comes near the 2 s limit.
+//!
+//! **It runs in a process of its own.** The machine report is what a user sends
+//! when their GPU misbehaves, and the self-test is the one part of it that
+//! drives the GPU, so it is the part likeliest to meet a driver that crashes.
+//! Run inside the report's own process, that took the whole report with it: on
+//! 2026-10-05 a user's integrated GPU ended Kestrel with an access
+//! violation (0xC0000005) at the Dx12 test, and no report was written. So the
+//! report starts `kestrel falconeye-selftest` for each adapter and reads what it
+//! prints, a line a step; if that process crashes, hangs or fails, the report
+//! says how and at how many voices, and goes on to the next adapter. See
+//! [`run_isolated`].
 
-[2] src/falconeye/selftest.rs:29
+[2] src/falconeye/selftest.rs:42
 /// The first step. Small, because an integrated GPU is slow: this laptop's
 /// Intel iGPU took 254 ms a block at 16,384 voices (2026-09-26), about 140
 /// times the RTX 5060 beside it, and a slower one must not near the limit on
 /// its first step.
 
-[3] src/falconeye/selftest.rs:34
+[3] src/falconeye/selftest.rs:47
 /// Stop once a block takes this long: the next step, twice the voices, then
 /// comes to about 0.5 s.
 
-[4] src/falconeye/selftest.rs:40
+[4] src/falconeye/selftest.rs:53
 /// Blocks rendered at each step: the one that spawns every voice, then the
 /// ones that only render them.
 
-[5] src/falconeye/selftest.rs:53
+[5] src/falconeye/selftest.rs:66
     /// The block that spawned them all, and the slowest and the middle of
     /// the blocks after it, in ms. The GPU's own time where it keeps
     /// timestamps, the host's wait otherwise; see `timed_on_gpu`.
 
-[6] src/falconeye/selftest.rs:71
+[6] src/falconeye/selftest.rs:84
     /// The same, as numbers: ms per block at the default 1,048,576 voices,
     /// and the voices a block could take before it reached 1 s.
 
-[7] src/falconeye/selftest.rs:77
-/// Write the self-test's soundfont into `dir` and load it. Shared by every
-/// adapter the report tests.
+[7] src/falconeye/selftest.rs:103
+/// Write the self-test's soundfont into `dir` and load it, for a test that runs
+/// in this process.
 
-[8] src/falconeye/selftest.rs:87
+[8] src/falconeye/selftest.rs:116
+    /// Make the test material in `dir`. With `isolate_with`, the executable that
+    /// has the `falconeye-selftest` command, each adapter is tested in a process
+    /// of its own; without, here, which is what a library caller and the tests
+    /// have, since their executable is not Kestrel.
+
+[9] src/falconeye/selftest.rs:161
 /// Run the self-test on one adapter and backend, as `gpu::survey` names
 /// them, up to `max_voices`. `say` hears each step as it finishes.
 
-[9] src/falconeye/selftest.rs:180
+[10] src/falconeye/selftest.rs:208
+    // Nothing ran: say why, which is the thing worth knowing, and not that
+    // there was nothing to scale from.
+
+[11] src/falconeye/selftest.rs:226
+/// The test process: `kestrel falconeye-selftest`, started by [`run_isolated`].
+/// Prints a [`Message`] a line, flushed, so the line before a crash is the
+/// reader's.
+
+[12] src/falconeye/selftest.rs:230
+    // A render's device setup reports at info; a self-test sets up a dozen, and
+    // those lines would bury its own.
+
+[13] src/falconeye/selftest.rs:253
+/// How long the test process may go without a line before it is taken to be hung
+/// on the driver and ended. A step prints nothing while it works, and the
+/// biggest one sets up a pool of 16 million voices.
+
+[14] src/falconeye/selftest.rs:258
+/// [`run`], in a process of its own: `exe` is started as `--force-cli
+/// falconeye-selftest` on the soundfont `sf` and what it prints is read as it
+/// goes. If it prints its result, that is the outcome. If it ends first --
+/// crashed, or failed, or was ended for saying nothing for `stall` -- the outcome
+/// is the steps that did finish, and says how it ended and at how many voices,
+/// which is what the report is for.
+
+[15] src/falconeye/selftest.rs:291
+    // What it says on stderr goes to a file: a pipe nobody reads would fill and
+    // stop it, and a thread to read it is more than the last few lines are worth.
+
+[16] src/falconeye/selftest.rs:346
+    // Its result stands even if the process then fails: a driver that is
+    // already done with the test can still crash as the process unloads it.
+
+[17] src/falconeye/selftest.rs:404
+/// The last `n` messages in a text file, each cut short, on one line. Not the
+/// Vulkan loader's warnings from creating the instance, which every run has
+/// and which say nothing about what went wrong after them, nor the indented
+/// lines that continue a message.
+
+[18] src/falconeye/selftest.rs:418
+/// Fail on purpose at one step, `KESTREL_SELFTEST_CRASH=<kind>@<voices>`, to
+/// see what a driver that crashes or hangs does to the report. `segv` crashes
+/// with an access violation, `hang` stops, `exit` exits with code 3. `@0` is
+/// after the result has been printed, where a driver unloading can crash. Dev
+/// builds only, like `KESTREL_CRASH_TEST`.
+
+[19] src/falconeye/selftest.rs:488
 /// The answer, from the biggest step that filled its pool at least halfway:
 /// time grows with the voices sounding, so that step's ms per voice scales
-/// to any count.
+/// to any count. Worded for the OS this runs on.
+
+[20] src/falconeye/selftest.rs:495
+/// `verdict`, for Windows or not. **Only Windows has the 2 s limit**: it resets a
+/// GPU that spends that long on one piece of work, and the render ends. Said on
+/// Linux it is wrong -- a Linux user's report (2026-10-04, a 2 GiB card) was told
+/// "past the 2,000 ms at which Windows resets it" -- so elsewhere the verdict
+/// names the time and what a long block can do to a screen the GPU also draws, and
+/// says only that some systems' GPU watchdogs end work that runs this long. The
+/// classification is by the same times either way.
+
+[21] src/falconeye/selftest.rs:608
+    /// Windows' 2 s limit is Windows'. A Linux user's report, 2026-10-04, ended "past
+    /// the 2,000 ms at which Windows resets it, which ends the render" on a 2 GiB card
+    /// (4,133 ms at the default); the same times, off Windows, give a verdict that
+    /// names the time and what it can do to a screen, and never names Windows or its
+    /// limit -- while the figures it gives, and the advice to render with `--block
+    /// 1024` and keep the voices down, are the same.
+
+[22] src/falconeye/selftest.rs:619
+            // The card in that report: 258.3 ms to spawn 65,536 voices, about
+            // 4,133 ms at the default.
+
+[23] src/falconeye/selftest.rs:637
+    /// What the test process wrote to stderr before it died: the Vulkan loader's
+    /// instance warnings are in every run's and are left out, so what is left is
+    /// what the driver or wgpu said after them.

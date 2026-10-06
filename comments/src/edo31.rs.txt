@@ -1,0 +1,98 @@
+# Comments extracted from src/edo31.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/edo31.rs:5
+//! The 31-EDO template (`--31edo`): how a file written for it is
+//! played.
+//!
+//! 12 keys cannot hold 31 steps of the octave, so the template does not try.
+//! A file carries **extended note keys, 0 to 255**, one step of the 31-step
+//! scale each (`octave = key / 31`, `step = key % 31`), which is not MIDI --
+//! a key is seven bits -- and which a reader that masks it, as Kestrel does
+//! without this option, plays as the wrong note. The player turns each one into
+//! an ordinary key on one of **three adjacent channels**, tuned a few tens of
+//! cents apart by a MIDI Tuning Standard scale/octave message (`mts`), so that
+//! the three channels together have a pitch class for every step. That is what
+//! a synth is handed; this module is the player's half of it.
+//!
+//! Written from the account of a player's author, who sent it with their
+//! player's source and a capture fixture compared against the editor's own output,
+//! and checked against two real files:
+//!
+//! * A step is a `(key offset, lane)` pair, the table below. The lane picks the
+//!   channel of the triplet, `output channel = triplet start + lane`, and the
+//!   key is `offset + 12 * octave + 24 * (source channel - triplet start)`,
+//!   clamped to 127. Within a triplet the three source channels are three
+//!   registers two octaves apart, which all play on the same three output
+//!   channels.
+//! * The triplets are channels 1-3, 4-6, 7-9, 11-13 and 14-16 of a port.
+//!   **Channel 10 is not remapped**, whatever its keys are: it is drums.
+//! * Note-ons and note-offs map alike, from the source channel and key, so a
+//!   note is ended by the event that began it whichever lane it went to.
+//! * A controller, program change or pitch bend sent on a melodic source
+//!   channel is **sent on all three channels of its triplet**, bends
+//!   included -- the lanes carry the tuning and nothing is converted to a bend.
+//!   A SysEx is not remapped.
+//! * The three tuning messages are the player's, sent before the first note and
+//!   again after a reset. A template file carries them in its setup track as
+//!   well, and they are the same bytes, so they are read twice and say it
+//!   twice; a file that lacks them still plays in tune.
+//!
+//! **It is for files that say so**: a key over 127 is how a file says it, and
+//! `midi::uses_extended_keys` looks for one. The render does not turn this on
+//! by itself.
+
+[2] src/edo31.rs:45
+/// The first channel of the triplet that channel `c` of a port is in, counted
+/// from 0 within the port. `None` for channel 10, which is in none.
+
+[3] src/edo31.rs:66
+/// The channel and key a note-on or note-off on `ch` with the extended key
+/// `key` plays as. `ch` is across every port, and the triplets repeat on each.
+
+[4] src/edo31.rs:80
+/// The three channels a channel-wide message on `ch` is sent on, or `None` for
+/// the drum channel, whose messages go as they are.
+
+[5] src/edo31.rs:88
+/// The three scale/octave messages, from the byte after the `F0`, as the
+/// template writes them and as the player sends them: lane 0, 1 and 2, each
+/// naming the channels of that lane across the five triplets. The offsets in
+/// them are `1200 * step / 31 - 100 * key offset` cents cut down to the
+/// message's 14 bits, which `the_tuning_is_what_the_step_table_says` checks.
+
+[6] src/edo31.rs:113
+    /// The table and the rules of the account this was written from, spelled
+    /// out a second way: one row a step, with the channel numbers as a person
+    /// counts them, from 1.
+
+[7] src/edo31.rs:128
+        // Source channel 1 (index 0), key 155 = octave 5, step 0: middle C on
+        // the first lane's channel.
+
+[8] src/edo31.rs:131
+        // Source channel 2 plays the same step two octaves up, on the same
+        // channels; source channel 3, four up.
+
+[9] src/edo31.rs:175
+        // Mapping is a function of the source alone, so a note-off lands where
+        // its note-on did; and two source notes that share an output channel
+        // and key are the same note to a synth.
+
+[10] src/edo31.rs:181
+        // Source (ch 1, key n) and (ch 0, key n + 62) are one pitch, 24 keys
+        // up, on one channel.
+
+[11] src/edo31.rs:188
+    /// The offsets in the three messages are what the step table asks for:
+    /// where step `s` of the 31-step scale is, less where the key it is played
+    /// on is, in cents, cut down to the message's 14 bits. **Cut, not rounded**:
+    /// every offset in the three messages is the exact figure's floor to a unit
+    /// of 100/8192 of a cent -- 7 steps of 31 less 300 cents is -29.0323, and
+    /// the message says -29.0405, not -29.0283 -- which is what a player that
+    /// converts with an integer cast writes.

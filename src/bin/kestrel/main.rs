@@ -25,7 +25,8 @@ use kestrel::{gpu, load_bank};
 #[cfg(feature = "dev")]
 use kestrel::{testkit, wav};
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// The version `--version` prints, marked when this is a dev build so a bug
 /// report says which option set it came from. See the `dev` feature.
@@ -64,6 +65,34 @@ struct Cli {
 enum Cmd {
     /// Render a MIDI file to WAV.
     Render(RenderArgs),
+    /// Render several MIDIs, each with the soundfonts a JSON file gives it.
+    ///
+    /// The file names the jobs, and flags they share as they would be typed
+    /// after `render`. Jobs run one after another, grouped by soundfont set so
+    /// each set loads once, and each file is the same bytes a render of that
+    /// MIDI on its own would write. A job that fails does not stop the rest.
+    /// The format is described in BATCH.md.
+    Batch {
+        /// The batch file, `.json`.
+        file: PathBuf,
+    },
+    /// Continue a render from the checkpoint it saved.
+    ///
+    /// A render saves its progress as it goes (see --checkpoint-every), and
+    /// when it is stopped. This runs the same command again from there. A
+    /// render of one file carries on from the block it had come to, so the
+    /// minutes already rendered are not rendered again; a render with --tracks
+    /// does not render the tracks it had finished again. The file it writes is
+    /// the same bytes an uninterrupted render would have written (an Opus file
+    /// has a random serial number in its header that ffmpeg draws each time,
+    /// so there it is the same audio). It is refused, and says why, if
+    /// anything the render depended on has changed: this build of Kestrel, the
+    /// MIDI, a soundfont, the graphics card or backend.
+    Resume {
+        /// The checkpoint, `.krsm`: beside the output, or `stems.krsm` in the
+        /// stems' folder.
+        file: PathBuf,
+    },
     /// Print what the loader made of a soundfont or MIDI file.
     Info {
         /// A soundfont (.sf2, .sfz) or a MIDI file (.mid, .midi).
@@ -175,6 +204,20 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// One GPU's self-test, in a process of its own, for the machine report to
+    /// read; never by hand. See `kestrel::falconeye::selftest`.
+    #[command(hide = true)]
+    FalconeyeSelftest {
+        #[arg(long)]
+        adapter: String,
+        #[arg(long)]
+        backend: String,
+        #[arg(long)]
+        max_voices: u32,
+        /// The test's soundfont, which the report has written.
+        #[arg(long)]
+        sf: PathBuf,
+    },
     /// Watch a render from outside and report how it ended, if it did not end
     /// cleanly. Started by a render with its log, never by hand; see
     /// `kestrel::falconeye::watch`.
@@ -232,8 +275,13 @@ enum Cmd {
 #[derive(Args)]
 #[command(group(clap::ArgGroup::new("per_track").args(["track", "tracks"])))]
 struct RenderArgs {
-    /// Input MIDI file.
+    /// Input MIDI file. Give several to render a batch: each becomes a file of
+    /// its own in the folder -o names, all with the same soundfonts, one after
+    /// another. For different soundfonts per MIDI, see `kestrel batch`.
     midi: PathBuf,
+    /// More MIDI files, for a batch. See `midi`.
+    #[arg(value_name = "MORE_MIDI")]
+    more_midi: Vec<PathBuf>,
     /// Soundfont, .sf2 or .sfz. Repeat to layer: each one is merged on top of
     /// the ones before it, and its presets replace anything already at the same
     /// bank and program. A General MIDI .sf2 followed by a piano .sfz gives GM
@@ -250,8 +298,19 @@ struct RenderArgs {
     /// directly, and .opus/.mp3/.ogg/.flac/.m4a are encoded through ffmpeg at a
     /// high-quality preset chosen per container. Encoding needs ffmpeg on PATH;
     /// see `kestrel ffmpeg-info`.
+    ///
+    /// With several MIDIs this is a folder, created if it is not there, and
+    /// each file in it is named after its MIDI.
     #[arg(short = 'o', long = "out")]
     out: PathBuf,
+    /// With several MIDIs: the format of the files in the -o folder, as an
+    /// extension. `wav` when not given.
+    #[arg(
+        long = "out-format",
+        value_name = "EXT",
+        value_parser = ["wav", "flac", "opus", "ogg", "mp3", "m4a"]
+    )]
+    out_format: Option<String>,
     /// ffmpeg to use for encoded output. Only needed when it is not on PATH or
     /// a specific build is wanted; overrides the FFMPEG environment variable.
     #[arg(long = "ffmpeg", value_name = "PATH")]
@@ -323,6 +382,43 @@ struct RenderArgs {
     /// notes, which render silent without it. Costs about 12% of the render.
     #[arg(long = "note-grid")]
     note_grid: bool,
+    /// Play the file as the 31-EDO template writes it: note keys 0 to 255,
+    /// one step of the 31-step octave each, sounded on three channels that the
+    /// file's own tuning messages set a few tens of cents apart. A file written
+    /// for it has a note key over 127, and plays as the wrong notes without
+    /// this; `kestrel info` says whether a file does.
+    #[arg(long = "31edo", conflicts_with_all = ["edo", "scala"])]
+    edo31: bool,
+    /// Tune every key to one step of an N-step octave: key 60 stays where it is
+    /// and each key above or below it is 12/N of a semitone apart, so --edo 31 puts
+    /// 31 steps in the octave across the keyboard, 19 and 22 and 53 likewise, and 12
+    /// changes nothing. The sample played is the one recorded nearest each key's
+    /// pitch, so a piano's regions still answer. Not for drum parts. Where the
+    /// middle is: --tuning-ref.
+    #[arg(long, value_name = "N", conflicts_with = "scala")]
+    edo: Option<u32>,
+    /// Tune the keys to a Scala scale (.scl), the format the microtonal archives
+    /// publish in: cents and ratios, the last being the period. Without --kbm the
+    /// keys follow the scale in order from key 60; --kbm says which key plays
+    /// which degree. Not for drum parts.
+    #[arg(long, value_name = "FILE.scl")]
+    scala: Option<PathBuf>,
+    /// A Scala keyboard map (.kbm) for --scala: which keys play which degrees,
+    /// which keys are left silent, and the reference note and its frequency.
+    #[arg(long, value_name = "FILE.kbm", requires = "scala")]
+    kbm: Option<PathBuf>,
+    /// The key the tuning is laid out around and its frequency, KEY:HZ, such as
+    /// 69:432 for A at 432 Hz. Default: key 60 where 12-tone has it (261.6256 Hz).
+    /// With --scala it wins over the map's own reference.
+    #[arg(long = "tuning-ref", value_name = "KEY:HZ")]
+    tuning_ref: Option<String>,
+    /// Apply MIDI Tuning Standard single-note tuning changes and bulk tuning dumps,
+    /// which a file uses to retune individual keys, with the tuning program and bank
+    /// a channel selects by RPN 3 and 4. BASSMIDI ignores these messages, so a
+    /// render without this is what BASSMIDI plays; the scale/octave messages need
+    /// no flag. `kestrel info` says whether a file has them.
+    #[arg(long = "mts-notes")]
+    mts_notes: bool,
     /// Render only this track, numbered from 1 as `kestrel tracks` lists them:
     /// its own notes and controllers, timed by the whole file's tempo whichever
     /// track carries it, with every MIDI port folded onto the first. The file
@@ -364,6 +460,29 @@ struct RenderArgs {
     /// limiter apply to the sum, once, as in a normal render. -o is that file.
     #[arg(long, requires = "tracks", conflicts_with_all = ["stem_format", "track"])]
     merge: bool,
+    /// Save the progress every this many minutes (fractions are fine), 0 for
+    /// never, so a render that crashes or loses power can be continued with
+    /// `kestrel resume`. The progress is also saved if the render is stopped.
+    /// A render of one file saves the state of the render itself -- about
+    /// 100 MiB at a million voices, beside the output as `<file>.krsm` -- and
+    /// holds for the second or two that takes; with --tracks, a merge saves
+    /// its running mix and stems list each stem as it is finished. While it
+    /// runs, the audio is in `<name>.partial.<ext>`, which becomes the
+    /// output when the render is whole; an encoded format also keeps the
+    /// samples it is fed, in `<file>.krsm.pcm`.
+    #[arg(long = "checkpoint-every", value_name = "MIN", default_value_t = kestrel::resume::DEFAULT_EVERY_MINUTES as f64)]
+    checkpoint_every: f64,
+    /// Keep no resume file: save no progress as the render goes, none when it
+    /// is stopped, and keep nothing beside the output (no `.krsm`, no
+    /// `.partial`, no kept samples). The audio is written straight to the
+    /// output file, so a render that is stopped or crashes leaves what it had
+    /// written there, and cannot be continued. For a render that is not worth
+    /// continuing: a test, or one that is about to be run again. (To stop a
+    /// render that is running without keeping its progress, in the guided
+    /// renderer press Ctrl+C and then Ctrl+D; the API's `cancel` takes
+    /// `"discard": true`.)
+    #[arg(long = "no-resume", conflicts_with = "checkpoint_every")]
+    no_resume: bool,
     /// With --tracks: how many threads do the host's share of the tracks.
     /// Held to this machine's cores less two.
     #[arg(long = "track-jobs", value_name = "N", default_value_t = kestrel::tracks::default_jobs(), requires = "tracks", conflicts_with = "track")]
@@ -476,6 +595,11 @@ struct DevArgs {
     /// Upper bound on render workgroups; sizes the partial buffer.
     #[arg(long = "render-workgroups", default_value_t = 2048)]
     render_workgroups: u32,
+    /// The most voices one submission to the GPU renders, to start from; a
+    /// block over it goes up in parts. The render lowers it itself when a part
+    /// runs long, and the output does not depend on it.
+    #[arg(long = "submit-voices", default_value_t = 4_194_304)]
+    submit_voices: u32,
     /// Most voices one note-on may spawn. Caps runaway presets; a stereo
     /// sample is two.
     #[arg(long, default_value_t = 16)]
@@ -550,6 +674,11 @@ struct DevArgs {
     /// downstream of these numbers, so read them rather than the waveform.
     #[arg(long = "block-csv", value_name = "PATH")]
     block_csv: Option<PathBuf>,
+    /// With --tracks: stop as if cancelled once this many blocks have been
+    /// rendered in all, so a render stops at a known place. For trying `kestrel
+    /// resume` by hand, and the tests of it.
+    #[arg(long = "stop-after-blocks", value_name = "N")]
+    stop_after_blocks: Option<u64>,
     /// Compile shaders without automatic bounds clamps. Faster, and unsafe if
     /// anything upstream miscounts.
     #[arg(long = "unchecked-shaders")]
@@ -622,6 +751,44 @@ impl RenderArgs {
         return DevArgs::defaults();
     }
 
+    /// The key tuning `--edo` or `--scala` asks for, read and checked: `None` for no
+    /// flag and for 12 steps to the octave, which moves no key.
+    fn tuning(&self) -> Result<Option<Arc<kestrel::tuning::Tuning>>> {
+        use kestrel::tuning::{Reference, Tuning};
+        let reference = self
+            .tuning_ref
+            .as_deref()
+            .map(Reference::parse)
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("--tuning-ref: {e}"))?;
+        let tuning = match (self.edo, &self.scala) {
+            (Some(n), _) => Tuning::edo(n, reference.unwrap_or_default()).map_err(|e| anyhow::anyhow!(e))?,
+            (None, Some(scl)) => {
+                let read = |p: &Path| -> Result<String> {
+                    let bytes = std::fs::read(p).with_context(|| format!("reading {}", p.display()))?;
+                    // Scala files are plain text, often Latin-1 in a description.
+                    Ok(String::from_utf8_lossy(&bytes).into_owned())
+                };
+                let kbm = self.kbm.as_deref().map(read).transpose()?;
+                Tuning::scala(&read(scl)?, kbm.as_deref(), reference)
+                    .map_err(|e| anyhow::anyhow!("{}: {e}", scl.display()))?
+            }
+            (None, None) => {
+                if self.tuning_ref.is_some() {
+                    bail!("--tuning-ref says where a tuning is laid out, and needs --edo or --scala");
+                }
+                return Ok(None);
+            }
+        };
+        if let Some(n) = self.edo {
+            if n != 12 && tuning.is_plain() {
+                bail!("--edo {n} moves no key; that is not a tuning");
+            }
+        }
+        // 12 equal steps is 12-tone, and a render with no tuning is not changed at all.
+        Ok((!tuning.is_plain()).then(|| Arc::new(tuning)))
+    }
+
     fn to_config(&self) -> Result<(Config, BackendKind)> {
         let dev = self.dev_args();
         let mut cfg = Config {
@@ -644,11 +811,15 @@ impl RenderArgs {
             gate_frames: dev.gate_frames,
             workgroup_size: dev.workgroup,
             max_render_workgroups: dev.render_workgroups,
+            submit_voices: dev.submit_voices,
             max_voices: self.max_voices,
             max_layers: dev.layers,
             max_steal_percent: self.steal_percent,
             min_velocity: self.min_velocity,
             note_grid: self.note_grid,
+            edo31: self.edo31,
+            tuning: self.tuning()?,
+            mts_notes: self.mts_notes,
             master_volume: self.volume / 100.0,
             dc_blocker: self.dc_blocker,
             dc_blocker_hz: dev.dc_blocker_hz,
@@ -823,6 +994,8 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Api => unreachable!("handled above, before the logger"),
         Cmd::Render(args) => render::render_cli(args),
+        Cmd::Batch { file } => render::batch_cli(&file),
+        Cmd::Resume { file } => render::resume_cli(&file),
         Cmd::Info {
             path,
             block,
@@ -850,6 +1023,9 @@ fn main() -> Result<()> {
         } => get_ffmpeg(dry_run, yes, accept_hash, dir),
         Cmd::Falconeye { pid, log } => kestrel::falconeye::watch::run(&log, pid),
         Cmd::FalconeyeSystem { out } => kestrel::falconeye::system::collect(&out),
+        Cmd::FalconeyeSelftest { adapter, backend, max_voices, sf } => {
+            kestrel::falconeye::selftest::serve(&sf, &adapter, &backend, max_voices)
+        }
         Cmd::Report { no_self_test, out, system } => {
             eprintln!("{}\n", kestrel::falconeye::report::HEADER);
             let path = kestrel::falconeye::report::build(
@@ -858,6 +1034,7 @@ fn main() -> Result<()> {
                     extra: vec![settings::report_section()],
                     out_dir: out,
                     elevate_with: if system { Some(std::env::current_exe()?) } else { None },
+                    isolate_with: std::env::current_exe().ok(),
                 },
                 &mut |l| eprintln!("{l}"),
             )?;
@@ -1281,7 +1458,13 @@ fn info(
         let mut s = kestrel::midi::MidiStream::open(&path)?;
         println!("format {} division {:?}", s.format, s.division);
         println!("{} tracks", s.track_count);
-        let mut counts = [0u64; 8];
+        if kestrel::midi::uses_extended_keys(&path).unwrap_or(false) {
+            println!(
+                "note keys over 127: written for the 31-EDO template; \
+                 render it with --31edo"
+            );
+        }
+        let mut counts = [0u64; 11];
         let mut cc_counts = [0u64; 128];
         let mut last_tick = 0u64;
 
@@ -1324,6 +1507,12 @@ fn info(
                 kestrel::midi::Event::PitchBend { .. } => 4,
                 kestrel::midi::Event::Tempo(_) => 5,
                 kestrel::midi::Event::DrumPart { .. } | kestrel::midi::Event::ResetParts => 7,
+                // A tuning message is an event for each pitch class of each
+                // channel it names: counted once for each channel, at C.
+                kestrel::midi::Event::Tune { pc: 0, .. } => 8,
+                kestrel::midi::Event::Tune { .. } => 9,
+                // A single-note change or bulk dump: an event for each key it sets.
+                kestrel::midi::Event::KeyTune { .. } => 10,
                 kestrel::midi::Event::Other => 6,
             };
             counts[i] += 1;
@@ -1333,6 +1522,15 @@ fn info(
             counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[7],
             counts[6]
         );
+        if counts[8] > 0 {
+            println!("scale/octave tuning: {} channels retuned", counts[8]);
+        }
+        if counts[10] > 0 {
+            println!(
+                "single-note tuning: {} keys retuned, which BASSMIDI ignores; --mts-notes applies them",
+                counts[10]
+            );
+        }
         if counts[2] > 0 {
             use kestrel::driver::{cc_role, CcRole};
             println!("controllers used:");
@@ -1584,6 +1782,8 @@ mod tests {
         assert_eq!(typed.max_layers, d.layers);
         assert_eq!(typed.workgroup_size, d.workgroup);
         assert_eq!(typed.max_render_workgroups, d.render_workgroups);
+        assert_eq!(typed.submit_voices, d.submit_voices);
+        assert_eq!(typed.submit_voices, kestrel::config::Config::default().submit_voices);
         assert_eq!(typed.limiter_release_ms, d.limiter_release_ms);
         assert_eq!(typed.limiter_lookahead_ms, d.lookahead_ms);
         assert_eq!(typed.dc_blocker_hz, d.dc_blocker_hz);
@@ -1705,5 +1905,68 @@ mod tests {
     #[test]
     fn a_negative_ceiling_parses_with_a_space() {
         assert_eq!(render_args(&["--ceiling-db", "-1"]).unwrap().ceiling_db, Some(-1.0));
+    }
+
+    /// `--edo` and the Scala files lay a tuning over every key, and `--31edo` plays a file
+    /// that sets its own: one or the other. A keyboard map is a map of a scale, and a
+    /// reference is where a tuning is laid out from.
+    #[test]
+    fn the_tuning_flags_conflict_where_they_must_and_need_each_other_where_they_must() {
+        for bad in [
+            &["--edo", "31", "--31edo"][..],
+            &["--scala", "x.scl", "--31edo"],
+            &["--edo", "31", "--scala", "x.scl"],
+            &["--kbm", "x.kbm"],
+        ] {
+            assert!(render_args(bad).is_err(), "{bad:?}");
+        }
+        for good in [&["--edo", "31"][..], &["--scala", "x.scl", "--kbm", "x.kbm"], &["--mts-notes"], &["--edo", "19", "--tuning-ref", "69:432", "--mts-notes"]] {
+            assert!(render_args(good).is_ok(), "{good:?}");
+        }
+        // A reference with nothing to lay out is said, when the configuration is made.
+        let e = render_args(&["--tuning-ref", "69:432"]).unwrap().to_config().unwrap_err();
+        assert!(format!("{e:#}").contains("needs --edo or --scala"), "{e:#}");
+    }
+
+    #[test]
+    fn an_edo_makes_a_tuning_and_twelve_makes_none() {
+        let tuning = |extra: &[&str]| render_args(extra).unwrap().to_config().map(|(c, _)| c.tuning);
+        assert!(tuning(&[]).unwrap().is_none());
+        let t = tuning(&["--edo", "31"]).unwrap().expect("a 31-step tuning");
+        assert_eq!(t.name, "31-EDO");
+        assert!(!t.is_plain() && t.offsets[60] == 0);
+        // 12 steps is 12-tone: no tuning at all, so the render is the one with no flag.
+        assert!(tuning(&["--edo", "12"]).unwrap().is_none());
+        // A reference moves it.
+        let moved = tuning(&["--edo", "31", "--tuning-ref", "69:432"]).unwrap().unwrap();
+        assert!(moved.offsets[69] < -3000, "{}", moved.offsets[69]);
+        for bad in [&["--edo", "0"][..], &["--edo", "5000"], &["--edo", "31", "--tuning-ref", "banana"]] {
+            assert!(render_args(bad).unwrap().to_config().is_err(), "{bad:?}");
+        }
+        assert!(render_args(&["--mts-notes"]).unwrap().to_config().unwrap().0.mts_notes);
+    }
+
+    /// A Scala file that is wrong is refused with the file and the line, before anything loads.
+    #[test]
+    fn a_scala_file_that_is_wrong_is_refused_naming_it_and_its_line() {
+        let dir = std::env::temp_dir().join("kestrel_cli_scala");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (scl, kbm) = (dir.join("good.scl"), dir.join("good.kbm"));
+        std::fs::write(&scl, "test\n2\n 600.0\n 2/1\n").unwrap();
+        std::fs::write(&kbm, "0\n0\n127\n60\n60\n261.6256\n2\n").unwrap();
+        let (s, k) = (scl.to_str().unwrap(), kbm.to_str().unwrap());
+        let t = render_args(&["--scala", s, "--kbm", k]).unwrap().to_config().unwrap().0.tuning.unwrap();
+        assert_eq!(t.name, "test");
+        assert!((t.semitones(61) - 66.0).abs() < 1e-4, "{}", t.semitones(61));
+        // A bad degree names the file and the line.
+        let bad = dir.join("bad.scl");
+        std::fs::write(&bad, "test\n2\n 600.0\n half\n").unwrap();
+        let e = render_args(&["--scala", bad.to_str().unwrap()]).unwrap().to_config().unwrap_err();
+        let e = format!("{e:#}");
+        assert!(e.contains("bad.scl") && e.contains("line 4") && e.contains("half"), "{e}");
+        // A file that is not there says so.
+        let e = render_args(&["--scala", dir.join("nowhere.scl").to_str().unwrap()]).unwrap().to_config().unwrap_err();
+        assert!(format!("{e:#}").contains("nowhere.scl"), "{e:#}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

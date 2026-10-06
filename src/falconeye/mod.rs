@@ -11,6 +11,7 @@ pub mod renderlog;
 pub mod report;
 pub mod selftest;
 pub mod system;
+pub mod verdict;
 pub mod watch;
 pub mod winsys;
 pub mod zip;

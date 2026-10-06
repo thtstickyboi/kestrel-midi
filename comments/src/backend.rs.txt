@@ -82,16 +82,31 @@
     /// holds without that argument.)
 
 [10] src/backend.rs:102
+    /// Write what the backend carries from one block to the next -- the live
+    /// voices, and the counters beside them -- so that a render can be stopped
+    /// and gone on with. Only between blocks, with none submitted.
+    ///
+    /// Everything else a backend holds is rewritten before it is read in the
+    /// block that reads it (the gates, the channel rows, the spawn commands) or
+    /// rebuilt from the soundfont. The params tables the sound controllers built
+    /// are not here either: the driver builds them again
+    /// (`Driver::reinstall_variants`), from the controller values it kept.
+
+[11] src/backend.rs:115
+    /// The other half: take back what `save_state` wrote, from a backend that
+    /// has rendered nothing yet. Reads exactly what was written.
+
+[12] src/backend.rs:121
     /// Render one block, start to finish.
     ///
     /// The unpipelined form, kept because most callers want exactly this and
     /// because a test that renders one block should not have to know the
     /// backend has a pipeline.
 
-[11] src/backend.rs:116
+[13] src/backend.rs:135
     /// Per-pass timings from the last block, for `--profile`. Empty when the
     /// backend has nothing to report.
 
-[12] src/backend.rs:122
+[14] src/backend.rs:141
     /// Lose the device on purpose, for testing what a render does when the
     /// driver resets under it. See `session::crash_test`.

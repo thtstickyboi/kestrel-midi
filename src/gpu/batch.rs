@@ -319,12 +319,12 @@ pub(super) fn batch_sources(cfg: &Config, bank: &Bank, parts: PoolParts, s: &Str
     let src = |body: &str| shader_source(body, cfg, bank);
     let render = |chan: bool, glide: bool| {
         let v = chan as u32 | ((glide as u32) << 1);
-        laned(&render_source(cfg, bank, parts, chan, glide), &[("main", Render(v))], s)
+        laned(&render_source(cfg, bank, parts, chan, glide, false), &[("main", Render(v))], s)
     };
     Ok(BatchSources {
         spawn: laned(&src(include_str!("../../shaders/spawn.wgsl")), &[("main", Plain), ("commit", Plain)], s)?,
         render: [render(false, false)?, render(true, false)?, render(false, true)?, render(true, true)?],
-        reduce: laned(&src(include_str!("../../shaders/reduce.wgsl")), &[("main", Plain)], s)?,
+        reduce: laned(&src(include_str!("../../shaders/reduce.wgsl")), &[("main", Plain), ("thin", Plain)], s)?,
         compact: laned(
             &src(include_str!("../../shaders/compact.wgsl")),
             &[
@@ -418,6 +418,8 @@ pub(super) struct BatchPipelines {
     /// Indexed by `LaneU::ctl0` bits 1-2: plain, controllers, glide, both.
     render: Vec<wgpu::ComputePipeline>,
     reduce: wgpu::ComputePipeline,
+    /// The reduce for lanes with few render workgroups; see `reduce_thin_max`.
+    reduce_thin: wgpu::ComputePipeline,
     scan_local: wgpu::ComputePipeline,
     scan_blocks: wgpu::ComputePipeline,
     scatter: wgpu::ComputePipeline,
@@ -446,7 +448,7 @@ impl BatchPipelines {
             .enumerate()
             .map(|(i, s)| compile(device, cfg, &format!("batch render {i}"), s, &l.render, &["main"]).remove(0))
             .collect();
-        let mut reduce = compile(device, cfg, "batch reduce", src.reduce, &l.reduce, &["main"]);
+        let mut reduce = compile(device, cfg, "batch reduce", src.reduce, &l.reduce, &["main", "thin"]);
         let mut compact = compile(
             device,
             cfg,
@@ -469,6 +471,7 @@ impl BatchPipelines {
             spawn_commit: spawn.remove(1),
             spawn: spawn.remove(0),
             render,
+            reduce_thin: reduce.remove(1),
             reduce: reduce.remove(0),
             note_stolen: compact.remove(5),
             mark_stolen: compact.remove(4),
@@ -618,6 +621,9 @@ pub struct GpuBatch {
     split: u64,
     /// `UPLOAD_MAX`, lowered by tests to make a small batch split.
     upload_max: u64,
+    /// How many voices one submission may cover, and what the last batch did \[22\]
+    budget: SubmitBudget,
+    sent: Option<InFlight>,
 }
 
 fn buffer(device: &wgpu::Device, label: &str, size: u64, usage: wgpu::BufferUsages) -> wgpu::Buffer {
@@ -626,10 +632,10 @@ fn buffer(device: &wgpu::Device, label: &str, size: u64, usage: wgpu::BufferUsag
 
 const STORAGE_RW: wgpu::BufferUsages = wgpu::BufferUsages::STORAGE.union(wgpu::BufferUsages::COPY_DST);
 
-/// Lanes one batch holds at most. Each lane is one track and a batch is one \[22\]
+/// Lanes one batch holds at most. Each lane is one track and a batch is one \[23\]
 pub const LANES_MAX: usize = 256;
 
-/// The batch's buffers that each have to fit in one binding, for `lanes` \[23\]
+/// The batch's buffers that each have to fit in one binding, for `lanes` \[24\]
 fn one_binding(cfg: &Config, bank: &Bank, lanes: u64) -> [(&'static str, u64); 4] {
     let capacity = cfg.pool_slots() as u64;
     let params = bank.params.len().max(1) as u64 * std::mem::size_of::<RegionParams>() as u64;
@@ -648,7 +654,7 @@ fn binds(cfg: &Config, bank: &Bank, lanes: u64, binding_bytes: u64) -> bool {
 }
 
 impl GpuBatch {
-    /// Device bytes one lane costs at `cfg`, before any lane has asked for a \[24\]
+    /// Device bytes one lane costs at `cfg`, before any lane has asked for a \[25\]
     pub fn lane_bytes(cfg: &Config, bank: &Bank) -> u64 {
         let capacity = cfg.pool_slots() as u64;
         let voice = voice_fields(cfg) * capacity * 4 * 2;
@@ -664,11 +670,11 @@ impl GpuBatch {
         voice + partials + out + sort + cmds + gates + chan + params + 4096
     }
 
-    /// The most voices each of `lanes` lanes can hold in one batch at `cfg` \[25\]
+    /// The most voices each of `lanes` lanes can hold in one batch at `cfg` \[26\]
     pub fn max_voices_each(cfg: &Config, bank: &Bank, binding_bytes: u64, lanes: usize) -> u32 {
         let lanes = lanes.max(1) as u64;
         let fits = |v: u32| binds(&Config { max_voices: v, ..cfg.clone() }, bank, lanes, binding_bytes);
-        // [26]
+        // [27]
         let (mut lo, mut hi) = (0u32, max_voices_for_config(binding_bytes, cfg).max(1));
         if fits(hi) {
             return hi;
@@ -684,7 +690,7 @@ impl GpuBatch {
         lo
     }
 
-    /// The most lanes, up to `lanes`, whose batch at `cfg` fits an adapter \[27\]
+    /// The most lanes, up to `lanes`, whose batch at `cfg` fits an adapter \[28\]
     pub fn lanes_that_bind(cfg: &Config, bank: &Bank, binding_bytes: u64, lanes: usize) -> usize {
         (1..=lanes).rev().find(|&l| binds(cfg, bank, l as u64, binding_bytes)).unwrap_or(0)
     }
@@ -734,7 +740,7 @@ impl GpuBatch {
             buffer(&device, "batch pairs a", pairs_bytes?, STORAGE_RW),
             buffer(&device, "batch pairs b", l * capacity as u64 * 8, STORAGE_RW),
         ];
-        // [28]
+        // [29]
         let cmds_cap = l * 1024u64.min(capacity as u64).max(64);
         let cmds_buf = buffer(
             &device,
@@ -750,7 +756,7 @@ impl GpuBatch {
         let lane_u_buf =
             buffer(&device, "batch lane uniforms", l * std::mem::size_of::<LaneU>() as u64, STORAGE_RW);
 
-        // [29]
+        // [30]
         let fallback = [RegionParams {
             mod_lfo_inc: 0,
             vib_lfo_inc: 0,
@@ -870,6 +876,8 @@ impl GpuBatch {
             timed: 0,
             split: 0,
             upload_max: UPLOAD_MAX,
+            budget: SubmitBudget::new(cfg.submit_voices),
+            sent: None,
         };
         if cfg.profile && shared.has_timestamps {
             let set = b.device.create_query_set(&wgpu::QuerySetDescriptor {
@@ -904,7 +912,7 @@ impl GpuBatch {
         self.upload_max = bytes;
     }
 
-    /// Under `--profile`, the device time each stage took on average over the \[30\]
+    /// Under `--profile`, the device time each stage took on average over the \[31\]
     pub fn pass_times(&self) -> Option<Vec<(&'static str, f64)>> {
         (self.timed > 0).then(|| {
             PASS_NAMES.iter().zip(self.pass_ms).map(|(n, ms)| (*n, ms / self.timed as f64)).collect()
@@ -979,7 +987,7 @@ impl GpuBatch {
         LaneBackend { lane: &mut self.lanes[lane], host: &self.host, index: lane }
     }
 
-    /// Every lane's backend at once, to be driven from as many threads as \[31\]
+    /// Every lane's backend at once, to be driven from as many threads as \[32\]
     pub fn lanes_mut(&mut self) -> Vec<LaneBackend<'_>> {
         let host = &self.host;
         self.lanes.iter_mut().enumerate().map(|(index, lane)| LaneBackend { lane, host, index }).collect()
@@ -990,12 +998,12 @@ impl GpuBatch {
         self.lanes.iter().any(|l| l.submitted)
     }
 
-    /// Whether `lane`'s driver handed its last block to the batch -- false for \[32\]
+    /// Whether `lane`'s driver handed its last block to the batch -- false for \[33\]
     pub fn lane_submitted(&self, lane: usize) -> bool {
         self.lanes[lane].submitted
     }
 
-    /// Send every submitted lane's block to the device. Returns false when no \[33\]
+    /// Send every submitted lane's block to the device. Returns false when no \[34\]
     pub fn flush(&mut self) -> Result<bool> {
         if !self.in_flight.is_empty() {
             bail!("a batch is already on the device");
@@ -1018,14 +1026,17 @@ impl GpuBatch {
             l.nwg = (l.live + plan.spawn_count).div_ceil(cfg.workgroup_size).clamp(1, self.max_nwg);
         }
 
-        // Split into submissions whose packed uploads fit.
+        // [35]
         let cmd_bytes = std::mem::size_of::<SpawnCmd>() as u64;
-        // [34]
+        let budget = self.budget.voices() as u64;
+        // [36]
         let limit = self.upload_max.min(self.binding_cap);
         let sizes = |l: &Lane| (l.spawn_count as u64 * cmd_bytes, l.gates.len() as u64 * 4, l.rows.len() as u64 * 4);
         let mut parts: Vec<Vec<usize>> = vec![Vec::new()];
         let mut sum = (0u64, 0u64, 0u64);
+        let mut voices = 0u64;
         for &i in &active {
+            let v = self.lanes[i].live as u64 + self.lanes[i].spawn_count as u64;
             let (c, g, r) = sizes(&self.lanes[i]);
             if c.max(g).max(r) > self.binding_cap {
                 bail!(
@@ -1036,16 +1047,21 @@ impl GpuBatch {
                 );
             }
             let next = (sum.0 + c, sum.1 + g, sum.2 + r);
-            if next.0.max(next.1).max(next.2) > limit && !parts.last().unwrap().is_empty() {
+            let over = next.0.max(next.1).max(next.2) > limit || voices + v > budget;
+            if over && !parts.last().unwrap().is_empty() {
                 parts.push(Vec::new());
                 sum = (c, g, r);
+                voices = v;
             } else {
                 sum = next;
+                voices += v;
             }
             parts.last_mut().unwrap().push(i);
         }
+        let total_voices: u64 = active.iter().map(|&i| self.lanes[i].live as u64 + self.lanes[i].spawn_count as u64).sum();
+        let mut first_at: Option<std::time::Instant> = None;
 
-        // [35]
+        // [37]
         let need = |f: &dyn Fn(&Lane) -> u64| {
             parts.iter().map(|p| p.iter().map(|&i| f(&self.lanes[i])).sum::<u64>()).max().unwrap_or(0)
         };
@@ -1076,7 +1092,7 @@ impl GpuBatch {
 
         let last = parts.len() - 1;
         for (n, part) in parts.iter().enumerate() {
-            // [36]
+            // [38]
             let mut lane_u = vec![LaneU::default(); self.lanes.len()];
             let (mut at_cmds, mut at_gates, mut at_chan) = (0u64, 0u64, 0u64);
             for &i in part {
@@ -1122,23 +1138,36 @@ impl GpuBatch {
             self.queue.write_buffer(&self.lane_list_buf, 0, bytemuck::cast_slice(&part.iter().map(|&i| i as u32).collect::<Vec<u32>>()));
             let mut enc = self.encode(part);
             if n == last {
-                // [37]
+                // [39]
                 let out_bytes = self.strides.out as u64 * 4;
                 for (j, &i) in active.iter().enumerate() {
                     enc.copy_buffer_to_buffer(&self.out_buf, i as u64 * out_bytes, &self.readback_out, j as u64 * out_bytes, out_bytes);
                 }
                 enc.copy_buffer_to_buffer(&self.state_buf, 0, &self.readback_state, 0, self.state_buf.size());
-                // [38]
+                // [40]
                 if let Some(t) = &self.timing {
                     enc.resolve_query_set(&t.set, 0..TIMESTAMP_COUNT, &t.resolve, 0);
                     enc.copy_buffer_to_buffer(&t.resolve, 0, &t.readback, 0, t.resolve.size());
                 }
             }
+            first_at.get_or_insert_with(std::time::Instant::now);
             self.last_submission = Some(self.queue.submit(Some(enc.finish())));
         }
         if parts.len() > 1 {
             self.split += 1;
+            if self.split == 1 {
+                log::info!(
+                    "gpu: a batch of {total_voices} voices goes up as {} submissions, over the {budget} \
+                     voices one may cover (or its uploads would not fit one); the output does not depend on it",
+                    parts.len()
+                );
+            }
         }
+        self.sent = first_at.map(|at| InFlight {
+            at,
+            voices: total_voices.min(u32::MAX as u64) as u32,
+            parts: parts.len() as u32,
+        });
 
         for &i in &active {
             let l = &mut self.lanes[i];
@@ -1216,10 +1245,17 @@ impl GpuBatch {
 
             drop(pass);
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("batch"), timestamp_writes: self.timing.as_ref().map(|t| wgpu::ComputePassTimestampWrites { query_set: &t.set, beginning_of_pass_write_index: Some(6), end_of_pass_write_index: Some(7) }) });
-            // ---- 4. reduce ----
+            // [41]
             pass.set_bind_group(0, &g.reduce, &[]);
-            pass.set_pipeline(&p.reduce);
-            pass.dispatch_workgroups(cfg.block_frames * 2, y, 1);
+            let thin_max = reduce_thin_max(cfg);
+            if part.iter().any(|&i| self.lanes[i].nwg <= thin_max) {
+                pass.set_pipeline(&p.reduce_thin);
+                pass.dispatch_workgroups((cfg.block_frames * 2).div_ceil(REDUCE_THIN_LANES), y, 1);
+            }
+            if part.iter().any(|&i| self.lanes[i].nwg > thin_max) {
+                pass.set_pipeline(&p.reduce);
+                pass.dispatch_workgroups(cfg.block_frames * 2, y, 1);
+            }
 
             drop(pass);
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("batch"), timestamp_writes: self.timing.as_ref().map(|t| wgpu::ComputePassTimestampWrites { query_set: &t.set, beginning_of_pass_write_index: Some(8), end_of_pass_write_index: Some(9) }) });
@@ -1272,7 +1308,20 @@ impl GpuBatch {
         if let Some(t) = &self.timing {
             bufs.push((&t.readback, t.readback.size()));
         }
+        let waited = std::time::Instant::now();
         let reads = map_read_prefix(&self.device, &bufs, self.concurrent, self.last_submission.clone())?;
+        // See `GpuSynth::finish`: the wait is a floor on the device's time.
+        if let Some(f) = self.sent.take() {
+            let wait = waited.elapsed().as_secs_f64();
+            if let Some((was, now)) = self.budget.observe(f.voices, f.parts, wait, f.at.elapsed().as_secs_f64()) {
+                log::info!(
+                    "gpu: submissions now cover at most {now} voices, from {was}: a batch of {} voices \
+                     in {} part(s) kept the host waiting {wait:.2} s",
+                    f.voices,
+                    f.parts
+                );
+            }
+        }
         if let Some(t) = &self.timing {
             let ticks: &[u64] = bytemuck::cast_slice(&reads[2]);
             for (i, ms) in self.pass_ms.iter_mut().enumerate() {
@@ -1315,7 +1364,7 @@ impl GpuBatch {
 }
 
 impl LaneHost {
-    /// Give `lane` -- lane `at` of the batch -- a params slot for its variant \[39\]
+    /// Give `lane` -- lane `at` of the batch -- a params slot for its variant \[42\]
     fn install(&self, lane: &mut Lane, at: usize, index: u32, data: &[RegionParams], menv: &[ModEnvParams]) -> Result<()> {
         if data.len() != self.params_per_variant as usize {
             bail!("params variant {index} has {} entries, expected {}", data.len(), self.params_per_variant);
@@ -1344,7 +1393,7 @@ impl LaneHost {
         Ok(())
     }
 
-    /// Double the variant slots, keeping every slot's contents. The next \[40\]
+    /// Double the variant slots, keeping every slot's contents. The next \[43\]
     fn grow(&self, pool: &mut SlotPool) -> Result<()> {
         let old = pool.count;
         let new = old * 2;
@@ -1374,7 +1423,7 @@ impl LaneHost {
     }
 }
 
-/// A lane of a batch, as the `Backend` its driver renders through. Every call \[41\]
+/// A lane of a batch, as the `Backend` its driver renders through. Every call \[44\]
 pub struct LaneBackend<'a> {
     lane: &'a mut Lane,
     host: &'a LaneHost,
@@ -1382,7 +1431,7 @@ pub struct LaneBackend<'a> {
 }
 
 impl LaneBackend<'_> {
-    /// Make this lane a fresh render: no voices, the counters at zero, the \[42\]
+    /// Make this lane a fresh render: no voices, the counters at zero, the \[45\]
     pub fn reset(&mut self) {
         let variants = self.lane.slots.len();
         {
@@ -1402,7 +1451,7 @@ impl LaneBackend<'_> {
         self.index
     }
 
-    /// Whether the driver handed this lane's last block to the batch -- false \[43\]
+    /// Whether the driver handed this lane's last block to the batch -- false \[46\]
     pub fn submitted(&self) -> bool {
         self.lane.submitted
     }
@@ -1484,7 +1533,7 @@ impl Backend for LaneBackend<'_> {
 mod tests {
     use super::*;
 
-    /// Every batch pass compiles and validates on the device, which is where a \[44\]
+    /// Every batch pass compiles and validates on the device, which is where a \[47\]
     #[test]
     fn the_batch_passes_compile() {
         let dir = std::env::temp_dir().join("kestrel_batch_compile");
@@ -1513,7 +1562,7 @@ mod tests {
         assert!(err.is_none(), "{err:?}");
     }
 
-    /// A render in a batch lane is the same bytes, block for block, as the \[45\]
+    /// A render in a batch lane is the same bytes, block for block, as the \[48\]
     #[test]
     fn a_lane_renders_what_a_solo_render_does_block_for_block() {
         use crate::driver::Driver;
@@ -1545,12 +1594,13 @@ mod tests {
         };
         let (a_mid, b_mid) = (midi("a.mid", 3), midi("b.mid", 11));
         let base = Config { max_voices: 48, block_frames: 512, limiter: false, ..Config::default() };
-        // [46]
+        // [49]
         let configs = [
             ("every feature off", Config { filter_enabled: false, lfo_enabled: false, mod_env_enabled: false, ..base.clone() }, false),
             ("defaults", base.clone(), false),
             ("note grid", Config { note_grid: true, ..base.clone() }, false),
             ("split in two submissions", base.clone(), true),
+            ("split by voices", Config { submit_voices: 1, workgroup_size: 32, ..base.clone() }, false),
         ];
         for (what, cfg, split) in configs {
             let bank = Arc::new(crate::load_bank(&sf, &cfg).unwrap());
@@ -1603,8 +1653,11 @@ mod tests {
                 }
             }
             assert!(finished, "{what}: the fixture did not finish");
-            if split {
+            if split || cfg.submit_voices == 1 {
                 assert!(batch.split_batches() > 0, "{what}: no batch was split, so splitting went untested");
+            }
+            if cfg.submit_voices == 1 {
+                assert!(solo.split_blocks > 0, "{what}: no solo block was split, so splitting went untested");
             }
         }
     }

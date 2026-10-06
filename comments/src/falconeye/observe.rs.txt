@@ -30,7 +30,7 @@
 /// set up, and about once a second where the render is. A log that ends
 /// mid-render ends on the last of these.
 
-[5] src/falconeye/observe.rs:203
+[5] src/falconeye/observe.rs:207
 /// Fail on purpose partway through a render, to see what each kind of failure
 /// leaves behind: `KESTREL_CRASH_TEST=<kind>@<block>`. `panic` panics, `lost`
 /// destroys the device as a driver reset would lose it, `abort` aborts,
@@ -38,6 +38,11 @@
 /// violation, and `hang` stops finishing blocks. Dev builds only; the release
 /// zips do not contain it.
 
-[6] src/falconeye/observe.rs:228
+[6] src/falconeye/observe.rs:232
         // Stops finishing blocks while the heartbeat goes on, as a render
         // stuck on the device would.
+
+[7] src/falconeye/observe.rs:245
+    /// The render log wraps the observer of every guided and API render. A wrapper
+    /// that did not say what kind of stop it had been told would turn every "stop
+    /// and discard the progress" into "stop and save it".

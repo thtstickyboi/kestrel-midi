@@ -23,7 +23,10 @@ fn windows_version_info() {
     }
     let mut res = winresource::WindowsResource::new();
     res.set("ProductName", "Kestrel")
-        .set("FileDescription", "Kestrel, a GPU renderer for black MIDI")
+        // What Task Manager and the permission dialogs call the process. Short on
+        // purpose. The FalconEye watcher is this same exe started with `falconeye`,
+        // so it is called the same.
+        .set("FileDescription", "Kestrel")
         .set("InternalName", "kestrel")
         .set("OriginalFilename", "kestrel.exe");
     // A machine without the resource compiler still builds, only without

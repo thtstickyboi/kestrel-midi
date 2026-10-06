@@ -1,0 +1,115 @@
+# Comments extracted from src/tuning.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/tuning.rs:5
+//! A tuning that gives every MIDI key a pitch of its own: `--edo N`, and Scala's
+//! `.scl` and `.kbm` files (`--scala`, `--kbm`).
+//!
+//! **A table of 128 offsets.** A tuning is where each key plays, as an offset from
+//! where 12-tone equal temperament puts it, in `mts::UNITS_PER_CENT` (1/2048 of a
+//! cent, the unit the MIDI Tuning Standard messages are held in). The offset is what
+//! the driver adds to a voice's pitch, and it also says which sample to use: the
+//! region is chosen by the key *nearest the pitch*, not by the key that was struck,
+//! so a 31-EDO key plays the sample recorded closest to its real pitch, transposed by
+//! at most half a semitone, instead of its 12-tone key's own sample stretched many
+//! semitones (`Driver::tune_note`). With no tuning there is no table and nothing is
+//! changed: every reference render is the same bytes.
+//!
+//! **What stays on the key:** note-offs, the gate, keyswitches, the analytic phase
+//! angle and every per-note identity. A tuning changes what a key sounds like, never
+//! which note it is. Drum parts are not tuned.
+//!
+//! **Scala.** The `.scl` file is the scale: a description, a count, and that many
+//! pitches in cents (a number with a `.`) or as ratios (`3/2`, or a whole number),
+//! the last being the period, usually the octave. The `.kbm` is the keyboard map
+//! that says which key plays which degree and where the reference note is; without
+//! one the keys follow the scale in order from key 60, which plays the reference
+//! pitch. Every error names the file's line.
+
+[2] src/tuning.rs:35
+/// The most a key's pitch can be moved from where 12-tone puts it, in semitones: far
+/// more than a sample can be played at, and well inside what an `i32` of units holds
+/// (10,485 semitones).
+
+[3] src/tuning.rs:40
+/// The pitch, in 12-tone semitones above key 0, that a key is tuned to: A4 is key 69
+/// at 440 Hz, so `69 + 12 * log2(hz / 440)`.
+
+[4] src/tuning.rs:46
+/// A key and the pitch it is tuned to, which a tuning is laid out around. The default
+/// is key 60 where 12-tone has it, so a tuning leaves middle C where it is.
+
+[5] src/tuning.rs:62
+    /// `KEY:HZ`, as `--tuning-ref` takes it: `60:261.6256`, or a key and a frequency
+    /// that is not middle C's, such as `69:432`.
+
+[6] src/tuning.rs:91
+    /// `n` equal steps to the octave, one on each key: key `k` is `(k - ref) * 12 / n`
+    /// semitones from the reference. 12 is 12-tone and changes nothing.
+
+[7] src/tuning.rs:103
+    /// A `.scl` and, optionally, a `.kbm`. `reference` (`--tuning-ref`) wins over the
+    /// map's own reference note and frequency; without either, key 60 is where 12-tone
+    /// has it. Both are the text of the file, so a front end reads them and this stays
+    /// free of the file system.
+
+[8] src/tuning.rs:114
+        // The reference: the map's own unless `--tuning-ref` names one. Its pitch in
+        // the scale's cents, to lay the rest of the keys out from.
+
+[9] src/tuning.rs:135
+    /// The table from a pitch for each key, in 12-tone semitones; `None` is a key
+    /// that does not sound.
+
+[10] src/tuning.rs:151
+    /// Whether the table moves no key and silences none: 12-tone, which a render can
+    /// do without.
+
+[11] src/tuning.rs:167
+/// The key a pitch is nearest, and the cents left over: what a voice is built with.
+/// `units` is the pitch above key 0 in `UNITS_PER_CENT` -- the key's own 100 cents a
+/// key plus its offset. The key is clamped to 0..=127, and the remainder takes up
+/// whatever the clamp cut off, so the pitch is the same either way.
+
+[12] src/tuning.rs:181
+    /// Degree 0, which is 0 cents, then each pitch the file lists; the last is the
+    /// period.
+
+[13] src/tuning.rs:197
+/// The lines of a Scala file that count: a `!` begins a comment, and the rest is
+/// numbered from 1 as an editor numbers it. A blank line is kept, because the
+/// description of a scale may be one.
+
+[14] src/tuning.rs:204
+/// The first word of a line: Scala puts pitches, counts and map entries first and
+/// anything after them is a comment.
+
+[15] src/tuning.rs:254
+/// One pitch of a scale in cents: a number with a `.` is cents, otherwise a ratio, `a/b`
+/// or a whole number.
+
+[16] src/tuning.rs:357
+    /// `key`'s pitch in cents above the scale's degree 0, as the map has it: `None`
+    /// outside the range it retunes, `Some(None)` for a key mapped to `x`.
+
+[17] src/tuning.rs:377
+            // A degree past the scale's last wraps into the next period, as a map
+            // written for a longer scale would have it.
+
+[18] src/tuning.rs:400
+    /// Every key one step: key 60 where it is, a key an octave of steps up is a
+    /// 12-tone octave up, and the keys between are `12/31` of a semitone apart.
+
+[19] src/tuning.rs:495
+        // 12 tones to the octave on a 7-key map: the white keys of a 12-tone scale
+        // mapped onto 7 degrees of 31-EDO would be this kind of thing; here a simple
+        // one: 4 keys to the period, the degrees 0, 2, x, 3 of a 5-note scale.
+
+[20] src/tuning.rs:531
+    /// The same 31 steps by three roads: --edo 31, a scale of 31 cents values, and a
+    /// scale of 31 ratios of the 31st root of two written as cents -- all one table.

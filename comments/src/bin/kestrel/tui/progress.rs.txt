@@ -26,63 +26,124 @@
 /// The widest the panel's content goes in a wide terminal: a normal render's,
 /// and a per-track render's, which has more on each row.
 
-[5] src/bin/kestrel/tui/progress.rs:41
+[5] src/bin/kestrel/tui/progress.rs:33
+/// The footer after a first Ctrl+C, for a render that saves its progress. It sits
+/// in the panel's bottom edge, so it has to fit the narrowest panel (40 columns
+/// of content): a test holds it to that.
+
+[6] src/bin/kestrel/tui/progress.rs:46
     /// A per-track render, which gets `track_frame`: its tracks render many at
     /// once, so there is no one render's voices or position to show.
 
-[6] src/bin/kestrel/tui/progress.rs:46
+[7] src/bin/kestrel/tui/progress.rs:49
+    /// Set for each job of a batch: the frame then opens with a row saying
+    /// which job of how many this is.
+
+[8] src/bin/kestrel/tui/progress.rs:54
 /// Recent speed and note rate, smoothed over a couple of seconds so the
 /// figures move rather than flicker. The snapshot's own `speed()` is the whole
 /// render's average, which is the figure the command line reports at the end.
 
-[7] src/bin/kestrel/tui/progress.rs:126
+[9] src/bin/kestrel/tui/progress.rs:113
+/// The stop a key asks for, if it asks for one. Either takes a second press to
+/// act, see `CONFIRM`; this only says which.
+///
+/// Ctrl+C and Esc stop and keep. **Ctrl+D** stops and discards, the same on every
+/// system: raw mode takes it as a key and not as the end of input. (Ctrl+Shift+C,
+/// which was tried, never arrives: Windows Terminal keeps it for Copy.) Ctrl+D is
+/// only meant when the render has progress to keep (`saving`); a render that has
+/// none has one kind of stop. Either is a press in the same terms as the other,
+/// so a Ctrl+D can arm the stop as a Ctrl+C does. Caps Lock or Shift makes the
+/// letter a capital, and does not change which key it is.
+
+[10] src/bin/kestrel/tui/progress.rs:168
     // The whole adapter, every process counted. Kestrel's own figure alone
     // cannot say whether the card is nearly full.
 
-[8] src/bin/kestrel/tui/progress.rs:205
+[11] src/bin/kestrel/tui/progress.rs:260
             // Once the events are all read there is nothing left to estimate
             // from, so the middle field says what is happening instead.
 
-[9] src/bin/kestrel/tui/progress.rs:296
+[12] src/bin/kestrel/tui/progress.rs:352
 /// A per-track render's frame: its tracks, many at once, rather than one
 /// render's blocks. The same rows in every phase, as `frame`'s are.
 
-[10] src/bin/kestrel/tui/progress.rs:448
+[13] src/bin/kestrel/tui/progress.rs:505
 /// The terminal while the screen owns it: raw mode so Ctrl+C arrives as a key
 /// rather than killing the process, and no cursor. Restored on drop, which
 /// includes an unwinding panic.
 
-[11] src/bin/kestrel/tui/progress.rs:538
+[14] src/bin/kestrel/tui/progress.rs:595
         // A per-track render has more to say a row, and was cramped at a
         // normal render's width (2026-09-24).
 
-[12] src/bin/kestrel/tui/progress.rs:573
+[15] src/bin/kestrel/tui/progress.rs:636
             // The poll is the frame clock: it returns at the next key, or when
             // the frame is up.
 
-[13] src/bin/kestrel/tui/progress.rs:683
+[16] src/bin/kestrel/tui/progress.rs:644
+                    // The first press only arms it: one keypress should not throw
+                    // away an hour of rendering, whichever kind of stop it is.
+
+[17] src/bin/kestrel/tui/progress.rs:664
+    /// Its soundfont set, from 1, and how many sets the batch loads. Filled in
+    /// by `run_batch`, which knows the grouping.
+
+[18] src/bin/kestrel/tui/progress.rs:675
+    /// The monitor of the job on the screen: each job gets a fresh one, so its
+    /// counters start from nothing.
+
+[19] src/bin/kestrel/tui/progress.rs:691
+/// The batch's observer: each job's own render reports to a monitor of its own,
+/// which the screen reads, and a stop asked for on the screen reaches whichever
+/// job is running -- or none of them yet, between two.
+
+[20] src/bin/kestrel/tui/progress.rs:700
+    /// Put job `index` on the screen, on a monitor of its own, unless it
+    /// already is.
+
+[21] src/bin/kestrel/tui/progress.rs:749
+        // A job that never started, because its set would not load, still gets
+        // its end on the screen.
+
+[22] src/bin/kestrel/tui/progress.rs:765
+/// Run a batch with the progress screen up, one job at a time on the screen.
+/// `labels` has one entry for each job, in the order they were listed; each
+/// carries its `BatchRow`, which this fills in as the batch goes.
+
+[23] src/bin/kestrel/tui/progress.rs:945
     /// Every phase lays out to the same rectangle, so the screen never leaves
     /// a stale row behind when it moves from setup to rendering.
 
-[14] src/bin/kestrel/tui/progress.rs:712
+[24] src/bin/kestrel/tui/progress.rs:974
+    /// The footer that offers both stops sits in the panel's bottom edge, which has
+    /// the room of the content's width: at the narrowest it still has to make the
+    /// same rectangle, or the edge breaks.
+
+[25] src/bin/kestrel/tui/progress.rs:1008
+    /// Which stop a key asks for: Ctrl+C and Esc keep the progress, Ctrl+D does not,
+    /// and Ctrl+D means nothing to a render that has none to keep. A bare D, which
+    /// was the key for a while, is just a letter now.
+
+[26] src/bin/kestrel/tui/progress.rs:1038
     /// And so does a per-track render's, whose rows differ from a normal
     /// render's but must not move between phases either.
 
-[15] src/bin/kestrel/tui/progress.rs:731
+[27] src/bin/kestrel/tui/progress.rs:1057
                 // Half the notes read and 30% of the blocks inside them, not
                 // the 40% of all blocks: 0.55 x 50% + 0.45 x 30%.
 
-[16] src/bin/kestrel/tui/progress.rs:734
+[28] src/bin/kestrel/tui/progress.rs:1060
                 // Of the file being made: 240 s x 41% in 4 s, not the
                 // tracks' summed audio (102.1 s in 4 s).
 
-[17] src/bin/kestrel/tui/progress.rs:750
+[29] src/bin/kestrel/tui/progress.rs:1076
     /// At its own width a per-track render's rows fit whole, with figures the
     /// size a render of thousands of tracks reaches. At a normal render's
     /// width they were
     /// cut ("now 740.…", 2026-09-24).
 
-[18] src/bin/kestrel/tui/progress.rs:776
+[30] src/bin/kestrel/tui/progress.rs:1102
     /// Not a check: prints one frame per phase as plain text, to look at a
     /// layout change without a terminal.
     /// `cargo test --bin kestrel preview_frames -- --ignored --nocapture`
