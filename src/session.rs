@@ -8,7 +8,6 @@ use crate::backend::{Backend, BlockStats};
 use crate::config::{BackendKind, Config};
 use crate::limiter::LimiterMode;
 use crate::falconeye::{observe, renderlog};
-use crate::single;
 use crate::{bank::Bank, cpu::CpuSynth, driver::Driver, gpu, load_bank, wav};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
@@ -273,14 +272,12 @@ pub struct Tick<'a> {
     pub start: Instant,
     /// This is the last block: the file ran out or `Job::seconds` was reached. \[15\]
     pub last: bool,
-    /// Seconds of audio a resumed render had already rendered when this run \[16\]
-    pub resumed_secs: f64,
 }
 
-/// The share of a per-track render's progress that is its notes read; the \[17\]
+/// The share of a per-track render's progress that is its notes read; the \[16\]
 pub const PER_TRACK_NOTE_SHARE: f64 = 0.55;
 
-/// A per-track render as it stands, which [`Observer::tracks`] is handed \[18\]
+/// A per-track render as it stands, which [`Observer::tracks`] is handed \[17\]
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct TrackProgress {
     /// Tracks the render has, has finished, and is rendering now.
@@ -289,16 +286,16 @@ pub struct TrackProgress {
     pub running: usize,
     /// Finished tracks that had to steal voices.
     pub stole: usize,
-    /// Blocks rendered over every track; those of them that were silent and \[19\]
+    /// Blocks rendered over every track; those of them that were silent and \[18\]
     pub blocks: u64,
     pub silent_blocks: u64,
     pub blocks_total: u64,
-    /// Blocks rendered inside each track's notes -- from the block its first \[20\]
+    /// Blocks rendered inside each track's notes -- from the block its first \[19\]
     pub span_blocks: u64,
     pub span_total: u64,
-    /// Note-ons the tracks hold in all, after `--min-velocity`: where `notes` \[21\]
+    /// Note-ons the tracks hold in all, after `--min-velocity`: where `notes` \[20\]
     pub notes_total: u64,
-    /// Seconds of audio each track renders: the file's length, or \[22\]
+    /// Seconds of audio each track renders: the file's length, or \[21\]
     pub length_secs: f64,
     /// Voices each track may hold: the total, split evenly.
     pub voices_each: u32,
@@ -309,9 +306,9 @@ pub struct TrackProgress {
     pub notes: u64,
     pub stolen: u64,
     pub dropped: u64,
-    /// The loudest track, before any limiter. Merged, the mix's own peak is \[23\]
+    /// The loudest track, before any limiter. Merged, the mix's own peak is \[22\]
     pub peak_level: f32,
-    /// Microseconds the longest batch of tracks took, from going up to the \[24\]
+    /// Microseconds the longest batch of tracks took, from going up to the \[23\]
     #[serde(skip)]
     pub longest_wait_us: u64,
     /// Up to three of the busiest tracks still rendering.
@@ -328,20 +325,16 @@ pub struct TrackNow {
     pub secs: f64,
 }
 
-/// A front end's view of a render. Every method has a default, so an observer \[25\]
+/// A front end's view of a render. Every method has a default, so an observer \[24\]
 pub trait Observer {
     fn phase(&mut self, _phase: Phase) {}
     fn setup(&mut self, _setup: &Setup) {}
-    /// Called after every block. Cheap counters only are in `Tick`; anything \[26\]
+    /// Called after every block. Cheap counters only are in `Tick`; anything \[25\]
     fn block(&mut self, _tick: &Tick) {}
     /// A per-track render's progress, from the thread `run` was called on.
     fn tracks(&mut self, _progress: &TrackProgress) {}
-    /// Polled during analytic preparation and once per block. True stops after \[27\]
+    /// Polled during analytic preparation and once per block. True stops after \[26\]
     fn cancelled(&self) -> bool {
-        false
-    }
-    /// With [`cancelled`](Observer::cancelled): the stop does not want its \[28\]
-    fn discard_progress(&self) -> bool {
         false
     }
 }
@@ -364,40 +357,32 @@ pub struct Summary {
     pub clipped: u64,
     /// Stopped by the observer rather than by the end of the file.
     pub cancelled: bool,
-    /// Where a render that was stopped left its progress, the `.krsm` that \[29\]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub checkpoint: Option<PathBuf>,
-    /// A stop that was asked to keep none of its progress \[30\]
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub discarded: bool,
 }
 
-/// A render, described completely: what to read, what to write, and how. \[31\]
+/// A render, described completely: what to read, what to write, and how. \[27\]
 #[derive(Debug, Clone)]
 pub struct Job {
     pub midi: PathBuf,
     /// Layered in order, each merged on top of the ones before it.
     pub soundfonts: Vec<PathBuf>,
-    /// Programs of bank 0 the last soundfont takes over, spelled the way \[32\]
+    /// Programs of bank 0 the last soundfont takes over, spelled the way \[28\]
     pub sf_programs: Option<String>,
     /// The extension picks the container; see [`resolve_output_target`].
     pub out: PathBuf,
     /// An ffmpeg to encode with, instead of searching for one.
     pub ffmpeg: Option<PathBuf>,
-    /// The sample format of a WAV. Encoded containers take float and refuse \[33\]
+    /// The sample format of a WAV. Encoded containers take float and refuse \[29\]
     pub wav_format: wav::SampleFormat,
-    /// Brickwall ceiling in dBFS, when one was chosen. `None` keeps `cfg`'s \[34\]
+    /// Brickwall ceiling in dBFS, when one was chosen. `None` keeps `cfg`'s \[30\]
     pub ceiling_db: Option<f64>,
     /// Stop after this many seconds of audio.
     pub seconds: Option<f64>,
     /// Write one CSV row per block here: the admission diagnostic.
     pub block_csv: Option<PathBuf>,
-    /// Render this one track alone rather than the whole file: its own notes \[35\]
+    /// Render this one track alone rather than the whole file: its own notes \[31\]
     pub track: Option<crate::tracks::TrackPick>,
-    /// Render every track `stems.tracks` names, each alone and to a file of \[36\]
+    /// Render every track `stems.tracks` names, each alone and to a file of \[32\]
     pub stems: Option<crate::tracks::Stems>,
-    /// Checkpoints of a render of one file or one track: where, how often, and \[37\]
-    pub checkpoint: Option<crate::resume::Spec>,
     pub backend: BackendKind,
     pub cfg: Config,
 }
@@ -409,7 +394,7 @@ pub struct Plan {
     pub(crate) encoder: Option<(crate::ffmpeg::Ffmpeg, &'static crate::ffmpeg::Preset)>,
 }
 
-/// Validate a render and resolve its output, without loading anything. \[38\]
+/// Validate a render and resolve its output, without loading anything. \[33\]
 pub fn plan(job: &Job) -> Result<Plan> {
     let mut cfg = job.cfg.clone();
     if let Some(db) = job.ceiling_db {
@@ -418,7 +403,7 @@ pub fn plan(job: &Job) -> Result<Plan> {
     if job.track.is_some() && job.stems.is_some() {
         bail!("--track renders one track and --tracks renders stems; give one of them");
     }
-    // [39]
+    // [34]
     if (job.track.is_some() || job.stems.is_some())
         && cfg.phase != crate::phase::PhaseSettings::default()
     {
@@ -441,10 +426,10 @@ pub fn plan(job: &Job) -> Result<Plan> {
         );
         cfg.max_voices = crate::tracks::MAX_TOTAL_VOICES;
     }
-    // [40]
+    // [35]
     let stems = job.stems.as_ref().filter(|s| !s.merge);
     if let Some(pick) = job.track {
-        // [41]
+        // [36]
         let h = crate::midi::SmfHeader::read(&job.midi)?;
         if pick.index >= h.tracks.len() {
             bail!(
@@ -457,12 +442,12 @@ pub fn plan(job: &Job) -> Result<Plan> {
     }
     cfg.validate()?;
     let kind = job.backend;
-    // [42]
+    // [37]
     let target = match stems {
         Some(stems) => resolve_output_target(Path::new(&format!("stem.{}", stems.ext)))?,
         None => resolve_output_target(&job.out)?,
     };
-    // [43]
+    // [38]
     if stems.is_some()
         && matches!(target, Target::Wav)
         && job.wav_format == wav::SampleFormat::Float32
@@ -480,7 +465,7 @@ pub fn plan(job: &Job) -> Result<Plan> {
     let encoder = match &target {
         Target::Wav => None,
         Target::Encoded(preset) => {
-            // [44]
+            // [39]
             if cfg.limiter_mode == LimiterMode::Off || !cfg.limiter {
                 bail!(
                     "--limiter off cannot be used with .{}: encoding clamps anything \
@@ -490,7 +475,7 @@ pub fn plan(job: &Job) -> Result<Plan> {
                     preset.ext
                 );
             }
-            // [45]
+            // [40]
             if job.wav_format != wav::SampleFormat::Float32 {
                 bail!(
                     "--format pcm16 applies to .wav output only; .{} is encoded from \
@@ -498,7 +483,7 @@ pub fn plan(job: &Job) -> Result<Plan> {
                     preset.ext
                 );
             }
-            // [46]
+            // [41]
             if preset.lossy && job.ceiling_db.is_none() {
                 cfg.limiter_ceiling_db = crate::ffmpeg::LOSSY_CEILING_DB;
             }
@@ -539,7 +524,7 @@ pub fn plan(job: &Job) -> Result<Plan> {
     Ok(Plan { cfg, kind, encoder })
 }
 
-/// A soundfont that drives no LFO should not pay for the machinery. This turns \[47\]
+/// A soundfont that drives no LFO should not pay for the machinery. This turns \[42\]
 pub(crate) fn fit_to_bank(cfg: &mut Config, bank: &Bank) {
     if !bank.uses_lfo {
         cfg.lfo_enabled = false;
@@ -549,7 +534,7 @@ pub(crate) fn fit_to_bank(cfg: &mut Config, bank: &Bank) {
     }
 }
 
-/// Say what the soundfont holds once loaded: its sample pool is what goes to \[48\]
+/// Say what the soundfont holds once loaded: its sample pool is what goes to \[43\]
 pub(crate) fn log_bank(bank: &Bank, took: Option<std::time::Duration>) {
     match took {
         Some(t) => log::info!(target: TARGET, "loaded {} in {t:.2?}", bank.describe()),
@@ -557,7 +542,7 @@ pub(crate) fn log_bank(bank: &Bank, took: Option<std::time::Duration>) {
     }
 }
 
-/// Render `args` as `plan` settled it. \[49\]
+/// Render `args` as `plan` settled it. \[44\]
 pub fn run(
     job: &Job,
     plan: Plan,
@@ -578,18 +563,6 @@ pub fn run(
     result
 }
 
-/// A file written for the 31-EDO template says so by a note key over 127, \[50\]
-pub(crate) fn warn_extended_keys(cfg: &Config, midi: &Path) {
-    if !cfg.edo31 && crate::midi::uses_extended_keys(midi).unwrap_or(false) {
-        log::warn!(
-            target: TARGET,
-            "{} has note keys over 127: it is written for the 31-EDO template, and \
-             without --31edo it plays as the wrong notes",
-            midi.display()
-        );
-    }
-}
-
 fn run_inner(
     job: &Job,
     plan: Plan,
@@ -604,29 +577,6 @@ fn run_inner(
         kind,
         encoder,
     } = plan;
-
-    // [51]
-    let mut ckpt_spec = job.checkpoint.clone();
-    if let Some(why) = single::unsupported(job, &cfg) {
-        if ckpt_spec.as_ref().is_some_and(|s| s.restore.is_some()) {
-            bail!("this render cannot be resumed: {why}");
-        }
-        if ckpt_spec.take().is_some() {
-            log::warn!(target: TARGET, "this render cannot save its progress: {why}");
-        }
-    }
-    let identity = match &ckpt_spec {
-        Some(_) => Some(single::identity(job, &cfg)?),
-        None => None,
-    };
-    let restore = ckpt_spec.as_ref().and_then(|s| s.restore.clone());
-    if let (Some(cp), Some(id)) = (&restore, &identity) {
-        cp.header.check(id)?;
-    }
-    let mut saver = match (&ckpt_spec, identity) {
-        (Some(spec), Some(id)) => Some(single::Saver::new(spec, job, id, String::new(), 0)),
-        _ => None,
-    };
 
     obs.phase(Phase::LoadingSoundfont);
     let t0 = Instant::now();
@@ -660,8 +610,7 @@ fn run_inner(
             phase.sample_count(), phase.cache_bytes() as f64 / 1048576.0, phase_started.elapsed());
     }
     obs.phase(Phase::OpeningMidi);
-    warn_extended_keys(&cfg, &job.midi);
-    // [52]
+    // [45]
     if job.track.is_some() {
         cfg.max_block_candidates = crate::tracks::candidates_each(&cfg);
     }
@@ -697,15 +646,7 @@ fn run_inner(
         }
     };
 
-    // [53]
-    let mut out = match (&saver, &restore) {
-        (Some(s), Some(cp)) => {
-            let single = cp.header.single.as_ref().context("the checkpoint is not of a render of one file")?;
-            single::Output::resume(job, &cfg, encoder.as_ref(), &single.audio, &s.partial(&job.out), &s.pcm())?
-        }
-        (Some(s), None) => single::Output::create(job, &cfg, encoder.as_ref(), &s.partial(&job.out), &s.pcm())?,
-        (None, _) => single::Output::plain(&job.out, &cfg, encoder.as_ref(), job.wav_format)?,
-    };
+    let mut out = Sink::create(&job.out, &cfg, encoder.as_ref(), job.wav_format)?;
     let mut block = vec![0.0f32; cfg.block_samples()];
 
     let max_frames = job
@@ -725,52 +666,6 @@ fn run_inner(
         }
     };
     log::info!(target: TARGET, "rendering with the {} backend", backend.name());
-    // [54]
-    let backend_id = match &adapter {
-        Some(a) => format!("gpu: {a}"),
-        None => "cpu".to_string(),
-    };
-    if let Some(s) = saver.as_mut() {
-        s.set_run(backend_id.clone(), cfg.max_voices);
-    }
-    let mut peak_voices = 0u64;
-    if let Some(cp) = &restore {
-        if cp.header.backend != backend_id {
-            bail!(
-                "this checkpoint cannot be resumed: it was made on {} and this render runs on {backend_id}, \
-                 and another backend or card can write different bytes for the same render",
-                cp.header.backend
-            );
-        }
-        if cp.header.voices_each != cfg.max_voices {
-            bail!(
-                "this checkpoint cannot be resumed: its render ran under {} voices and this render's limit is {}",
-                cp.header.voices_each,
-                cfg.max_voices
-            );
-        }
-        let single = cp.header.single.as_ref().context("the checkpoint is not of a render of one file")?;
-        let t0 = Instant::now();
-        single::load(cp, &mut driver, backend.as_mut())
-            .with_context(|| format!("resuming from {}", cp.path.display()))?;
-        if driver.stats.blocks != single.blocks {
-            bail!(
-                "{} is damaged: it says {} blocks and holds {}",
-                cp.path.display(),
-                single.blocks,
-                driver.stats.blocks
-            );
-        }
-        peak_voices = single.peak_voices;
-        log::info!(
-            target: TARGET,
-            "resuming {} at {:.2}s of audio ({} blocks); its state loaded in {:.2}s",
-            cp.path.display(),
-            driver.seconds_rendered(),
-            single.blocks,
-            t0.elapsed().as_secs_f64()
-        );
-    }
     obs.setup(&Setup {
         backend: backend.name(),
         adapter,
@@ -783,9 +678,8 @@ fn run_inner(
     });
 
     let start = Instant::now();
-    // Audio a resumed render had made before this run began: not this run's work.
-    let resumed_secs = driver.seconds_rendered();
     obs.phase(Phase::Rendering);
+    let mut peak_voices = 0u64;
 
     let mut csv = match &job.block_csv {
         Some(p) => {
@@ -799,15 +693,8 @@ fn run_inner(
     };
 
     let mut cancelled = false;
-    // [55]
-    let mut discarded = false;
     loop {
-        // [56]
-        let done = driver.stats.blocks;
-        let (more, held) = match saver.as_ref() {
-            None => (driver.next_block(backend.as_mut(), &mut block)?, false),
-            Some(s) => driver.next_block_or_hold(backend.as_mut(), &mut block, || s.hold(obs.cancelled(), done))?,
-        };
+        let more = driver.next_block(backend.as_mut(), &mut block)?;
         out.write_block(&block)?;
 
         let st = backend.stats();
@@ -845,7 +732,6 @@ fn run_inner(
             peak_voices,
             start,
             last,
-            resumed_secs,
         });
 
         #[cfg(feature = "dev")]
@@ -854,66 +740,14 @@ fn run_inner(
         if last {
             break;
         }
-        match saver.as_mut() {
-            None => {
-                if obs.cancelled() {
-                    cancelled = true;
-                    break;
-                }
-            }
-            Some(s) => {
-                // [57]
-                if obs.cancelled() && obs.discard_progress() {
-                    cancelled = true;
-                    discarded = true;
-                    break;
-                }
-                let stopping = obs.cancelled() || s.stop_hook(driver.stats.blocks);
-                if held {
-                    // [58]
-                    match out.checkpoint() {
-                        Ok(audio) => {
-                            s.save_or_warn(&driver, backend.as_mut(), audio, peak_voices, stopping);
-                        }
-                        Err(e) => log::warn!(
-                            target: TARGET,
-                            "progress could not be saved to {}: {e:#}. The render goes on, and cannot be resumed from here",
-                            s.path.display()
-                        ),
-                    }
-                    if stopping {
-                        cancelled = true;
-                        break;
-                    }
-                }
-                // [59]
-            }
+        if obs.cancelled() {
+            cancelled = true;
+            break;
         }
     }
 
     obs.phase(Phase::Finishing);
     let bytes = out.finish()?;
-    // [60]
-    if let Some(s) = &saver {
-        let partial = s.partial(&job.out);
-        if cancelled {
-            if encoder.is_some() || discarded {
-                let _ = std::fs::remove_file(&partial);
-            }
-            if discarded {
-                // [61]
-                s.discard();
-                log::warn!(
-                    target: TARGET,
-                    "stopped, and its progress was not kept: no resume file was written, and none is left"
-                );
-            }
-        } else {
-            std::fs::rename(&partial, &job.out)
-                .with_context(|| format!("renaming {} to {}", partial.display(), job.out.display()))?;
-            s.discard();
-        }
-    }
     let wall = start.elapsed().as_secs_f64();
     let secs = driver.seconds_rendered();
     let st = backend.stats();
@@ -934,8 +768,7 @@ fn run_inner(
         bytes as f64 / 1048576.0,
         secs,
         wall,
-        // Of what this run rendered: a resumed render's earlier audio was not.
-        (secs - resumed_secs) / wall.max(1e-9)
+        secs / wall.max(1e-9)
     );
     log::info!(
         target: TARGET,
@@ -944,7 +777,7 @@ fn run_inner(
         driver.stats.voices_spawned,
         peak_voices,
         st.stolen,
-        // [62]
+        // [46]
         driver.stats.dropped,
         driver.stats.peak
     );
@@ -1025,12 +858,10 @@ fn run_inner(
         peak_level: driver.stats.peak,
         clipped: driver.stats.clipped,
         cancelled,
-        checkpoint: saver.as_ref().filter(|_| cancelled).map(|s| s.path.clone()).filter(|p| p.exists()),
-        discarded,
     })
 }
 
-/// Everything a front end can show about a render in progress, at one moment. \[63\]
+/// Everything a front end can show about a render in progress, at one moment. \[47\]
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Snapshot {
     pub phase: Phase,
@@ -1042,10 +873,7 @@ pub struct Snapshot {
     pub render_secs: f64,
     /// Audio rendered so far.
     pub audio_secs: f64,
-    /// Of `audio_secs`, what a resumed render had already made when this run \[64\]
-    #[serde(skip)]
-    pub resumed_secs: f64,
-    /// Track data read so far, and in the whole file. A streamed MIDI has no \[65\]
+    /// Track data read so far, and in the whole file. A streamed MIDI has no \[48\]
     pub bytes_read: u64,
     pub bytes_total: u64,
     pub blocks: u64,
@@ -1067,20 +895,20 @@ pub struct Snapshot {
     pub backend: Option<String>,
     pub adapter: Option<String>,
     pub tracks: u16,
-    /// Device buffers this render allocated. Not the whole GPU's usage; that \[66\]
+    /// Device buffers this render allocated. Not the whole GPU's usage; that \[49\]
     pub device_bytes: Option<u64>,
-    /// The whole adapter's memory, every process on it counted, once the first \[67\]
+    /// The whole adapter's memory, every process on it counted, once the first \[50\]
     pub gpu_memory: Option<crate::gpu::vram::GpuMemory>,
-    /// This process's resident memory now, and its highest since the monitor \[68\]
+    /// This process's resident memory now, and its highest since the monitor \[51\]
     pub host_rss_bytes: Option<u64>,
     pub host_rss_peak_bytes: Option<u64>,
-    /// A per-track render's tracks, once it is rendering. Its sums are also \[69\]
+    /// A per-track render's tracks, once it is rendering. Its sums are also \[52\]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub per_track: Option<TrackProgress>,
 }
 
 impl Snapshot {
-    /// How far along, 0 to 1: the MIDI's track data read, once the file is \[70\]
+    /// How far along, 0 to 1: the MIDI's track data read, once the file is \[53\]
     pub fn progress(&self) -> Option<f64> {
         if let Some(p) = &self.per_track {
             let spans = (p.span_total > 0).then(|| (p.span_blocks as f64 / p.span_total as f64).min(1.0));
@@ -1095,7 +923,7 @@ impl Snapshot {
             .then(|| (self.bytes_read as f64 / self.bytes_total as f64).min(1.0))
     }
 
-    /// Audio the render has made so far: `audio_secs`, or for a per-track \[71\]
+    /// Audio the render has made so far: `audio_secs`, or for a per-track \[54\]
     pub fn audio_done(&self) -> f64 {
         match &self.per_track {
             Some(p) => p.length_secs * self.progress().unwrap_or(0.0),
@@ -1103,12 +931,12 @@ impl Snapshot {
         }
     }
 
-    /// Seconds of audio per second of rendering, over the render so far: the \[72\]
+    /// Seconds of audio per second of rendering, over the render so far: the \[55\]
     pub fn speed(&self) -> Option<f64> {
-        (self.render_secs > 0.2).then(|| (self.audio_done() - self.resumed_secs).max(0.0) / self.render_secs)
+        (self.render_secs > 0.2).then(|| self.audio_done() / self.render_secs)
     }
 
-    /// Seconds of rendering left, extrapolated from progress. `None` until \[73\]
+    /// Seconds of rendering left, extrapolated from progress. `None` until \[56\]
     pub fn eta_secs(&self) -> Option<f64> {
         let p = self.progress()?;
         (p > 0.005 && p < 1.0 && self.render_secs > 1.0)
@@ -1127,7 +955,7 @@ pub enum Event {
         #[serde(flatten)]
         setup: Setup,
     },
-    /// The render ended normally or was cancelled. Always the last event of a \[74\]
+    /// The render ended normally or was cancelled. Always the last event of a \[57\]
     Summary {
         t: f64,
         #[serde(flatten)]
@@ -1137,13 +965,11 @@ pub enum Event {
     Failed { t: f64, message: String },
 }
 
-/// A render's live state, shared between the thread rendering it and any \[75\]
+/// A render's live state, shared between the thread rendering it and any \[58\]
 pub struct Monitor {
     created: Instant,
     inner: Mutex<Inner>,
     cancel: AtomicBool,
-    /// With `cancel`: the stop is not to be resumed. Set before it.
-    discard: AtomicBool,
     rss_peak: AtomicU64,
 }
 
@@ -1153,7 +979,7 @@ struct Inner {
     phase_since: Option<Instant>,
     render_started: Option<Instant>,
     events: Vec<Event>,
-    /// Started when the render reports its adapter, and stopped when the \[76\]
+    /// Started when the render reports its adapter, and stopped when the \[59\]
     vram: Option<crate::gpu::vram::VramWatch>,
 }
 
@@ -1163,13 +989,12 @@ impl Monitor {
             created: Instant::now(),
             inner: Mutex::new(Inner::default()),
             cancel: AtomicBool::new(false),
-            discard: AtomicBool::new(false),
             rss_peak: AtomicU64::new(0),
         })
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
-        // [77]
+        // [60]
         self.inner.lock().unwrap_or_else(|p| p.into_inner())
     }
 
@@ -1201,30 +1026,20 @@ impl Monitor {
         snap
     }
 
-    /// Every event from index `from` on, and the index to pass next time. \[78\]
+    /// Every event from index `from` on, and the index to pass next time. \[61\]
     pub fn events_since(&self, from: usize) -> (Vec<Event>, usize) {
         let inner = self.lock();
         let from = from.min(inner.events.len());
         (inner.events[from..].to_vec(), inner.events.len())
     }
 
-    /// Ask the render to stop after the block it is on. A render that saves \[79\]
+    /// Ask the render to stop after the block it is on.
     pub fn cancel(&self) {
-        self.cancel.store(true, Ordering::Release);
-    }
-
-    /// [`cancel`](Monitor::cancel), and the progress is not wanted: see \[80\]
-    pub fn cancel_discarding(&self) {
-        self.discard.store(true, Ordering::Release);
-        self.cancel.store(true, Ordering::Release);
+        self.cancel.store(true, Ordering::Relaxed);
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.cancel.load(Ordering::Acquire)
-    }
-
-    pub fn is_discarding(&self) -> bool {
-        self.discard.load(Ordering::Acquire)
+        self.cancel.load(Ordering::Relaxed)
     }
 
     /// The observer that feeds this monitor, to hand to [`run`].
@@ -1235,7 +1050,7 @@ impl Monitor {
         }
     }
 
-    /// Record how a render ended. [`run_monitored`] does this; a caller that \[81\]
+    /// Record how a render ended. [`run_monitored`] does this; a caller that \[62\]
     pub fn finish(&self, result: &Result<Summary>) {
         let now = Instant::now();
         let t = self.secs(now);
@@ -1267,7 +1082,7 @@ impl Monitor {
     }
 }
 
-/// How often the observer walks every track to count the bytes read. The \[82\]
+/// How often the observer walks every track to count the bytes read. The \[63\]
 const BYTES_EVERY: Duration = Duration::from_millis(50);
 
 /// The [`Observer`] half of a [`Monitor`].
@@ -1281,7 +1096,7 @@ impl Observer for MonitorObserver {
         let now = Instant::now();
         let t = self.monitor.secs(now);
         let mut inner = self.monitor.lock();
-        // [83]
+        // [64]
         if inner.snap.phase == phase {
             return;
         }
@@ -1329,7 +1144,6 @@ impl Observer for MonitorObserver {
         let d = &tick.driver.stats;
         let snap = &mut inner.snap;
         snap.audio_secs = tick.driver.seconds_rendered();
-        snap.resumed_secs = tick.resumed_secs;
         snap.blocks = d.blocks;
         snap.notes = d.notes;
         snap.voices = tick.stats.active_voices;
@@ -1362,13 +1176,9 @@ impl Observer for MonitorObserver {
     fn cancelled(&self) -> bool {
         self.monitor.is_cancelled()
     }
-
-    fn discard_progress(&self) -> bool {
-        self.monitor.is_discarding()
-    }
 }
 
-/// [`run`], reporting into `monitor`, which is marked finished however the \[84\]
+/// [`run`], reporting into `monitor`, which is marked finished however the \[65\]
 pub fn run_monitored(
     job: &Job,
     plan: Plan,
@@ -1407,7 +1217,7 @@ mod tests {
         resolve_output_target(Path::new(p)).map_err(|e| e.to_string())
     }
 
-    /// The bug this guards: `-o mix.mp3` wrote a RIFF/WAVE file named `.mp3` \[85\]
+    /// The bug this guards: `-o mix.mp3` wrote a RIFF/WAVE file named `.mp3` \[66\]
     #[test]
     fn wav_and_every_preset_resolve_and_nothing_else_does() {
         assert!(matches!(target("out/mix.wav"), Ok(Target::Wav)));
@@ -1428,7 +1238,7 @@ mod tests {
         }
     }
 
-    /// A typo should name the thing it probably meant. These four are the ones \[86\]
+    /// A typo should name the thing it probably meant. These four are the ones \[67\]
     #[test]
     fn a_near_miss_extension_suggests_the_real_one() {
         for (typo, want) in [
@@ -1446,7 +1256,7 @@ mod tests {
         }
     }
 
-    /// A real container Kestrel does not write is a considered request, not a \[87\]
+    /// A real container Kestrel does not write is a considered request, not a \[68\]
     #[test]
     fn a_real_but_unsupported_container_is_not_treated_as_a_typo() {
         let e = target("out/mix.aiff").unwrap_err();
@@ -1466,9 +1276,9 @@ mod tests {
     fn edit_distance_is_a_metric_on_the_cases_that_matter() {
         assert_eq!(edit_distance("opus", "opus"), 0);
         assert_eq!(edit_distance("opis", "opus"), 1);
-        // [88]
+        // [69]
         assert_eq!(edit_distance("fkac", "flac"), 1);
-        // [89]
+        // [70]
         assert_eq!(edit_distance("flca", "flac"), 2);
         assert_eq!(edit_distance("", "wav"), 3);
     }
@@ -1487,12 +1297,10 @@ mod tests {
             peak_level: 0.5,
             clipped: 0,
             cancelled,
-            checkpoint: None,
-            discarded: false,
         }
     }
 
-    /// A reader that looks rarely still sees every phase, in order; a reader \[90\]
+    /// A reader that looks rarely still sees every phase, in order; a reader \[71\]
     #[test]
     fn a_monitor_keeps_every_event_for_every_reader() {
         use super::{Event, Monitor, Observer, Phase, Setup};
@@ -1549,7 +1357,7 @@ mod tests {
         assert!(obs.cancelled());
     }
 
-    /// Progress, speed and the estimate say nothing until they mean \[91\]
+    /// Progress, speed and the estimate say nothing until they mean \[72\]
     #[test]
     fn derived_figures_wait_until_they_mean_something() {
         use super::Snapshot;
@@ -1566,7 +1374,7 @@ mod tests {
         assert_eq!(s.eta_secs(), None);
     }
 
-    /// A per-track render's progress is its notes read and its blocks inside \[92\]
+    /// A per-track render's progress is its notes read and its blocks inside \[73\]
     #[test]
     fn a_per_track_render_is_measured_by_its_notes_and_its_file() {
         use super::{Snapshot, TrackProgress, PER_TRACK_NOTE_SHARE};
@@ -1599,7 +1407,7 @@ mod tests {
         assert_eq!(s.progress(), Some(0.8));
     }
 
-    /// The progress feed's wire format is this serialisation, so it is pinned: \[93\]
+    /// The progress feed's wire format is this serialisation, so it is pinned: \[74\]
     #[test]
     fn events_serialise_with_a_type_tag_and_snake_case_names() {
         use super::{Event, Phase};

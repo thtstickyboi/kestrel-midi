@@ -12,48 +12,6 @@ var<workgroup> red: array<f32, WG>;
 
 const KAHAN: bool = {{KAHAN}};
 
-// [2]
-const THIN_MAX: u32 = {{REDUCE_THIN}}u;
-
-// [3]
-const THIN_LANES: u32 = 64u;
-
-@compute @workgroup_size(64)
-fn thin(
-    @builtin(local_invocation_index) tid: u32,
-    @builtin(workgroup_id) wgid: vec3<u32>,
-) {
-    let j = wgid.x * THIN_LANES + tid;
-    let nwg = u.render_workgroups;
-    if (j >= u.block_frames * 2u || nwg > THIN_MAX) { return; }
-
-    let base = j * nwg;
-    // The smallest m with 2^m >= nwg.
-    var m = 0u;
-    while ((1u << m) < nwg) { m = m + 1u; }
-
-    // [4]
-    let zero = bitcast<f32>(u.zero);
-
-    var stack: array<f32, 9>;
-    let size = 1u << m;
-    for (var k = 0u; k < size; k = k + 1u) {
-        var t = 0u;
-        if (m > 0u) { t = reverseBits(k) >> (32u - m); }
-        var v = 0.0;
-        if (t < nwg) { v = partials[base + t] + zero; }
-        var level = 0u;
-        var c = k;
-        while ((c & 1u) == 1u) {
-            v = stack[level] + v;
-            level = level + 1u;
-            c = c >> 1u;
-        }
-        stack[level] = v;
-    }
-    out_block[j] = stack[m];
-}
-
 @compute @workgroup_size({{WG}})
 fn main(
     @builtin(local_invocation_index) tid: u32,
@@ -63,8 +21,6 @@ fn main(
     if (j >= u.block_frames * 2u) { return; }
 
     let nwg = u.render_workgroups;
-    // `thin` has this block.
-    if (nwg <= THIN_MAX) { return; }
     let base = j * nwg;
 
     var acc = 0.0;

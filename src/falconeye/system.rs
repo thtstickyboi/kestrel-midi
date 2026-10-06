@@ -50,21 +50,12 @@ pub fn collect(out: &Path) -> Result<()> {
         }
     }
     reports.sort_by_key(|r| std::cmp::Reverse(r.0));
-    let (mut copied, mut left_out, mut seen) = (0, 0, 0);
-    for (_, dir) in &reports {
-        if copied >= WER_MAX {
-            break;
-        }
-        seen += 1;
+    let mut copied = 0;
+    for (_, dir) in reports.iter().take(WER_MAX) {
         let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         match std::fs::read(dir.join("Report.wer")) {
             Ok(bytes) => {
-                let decoded = decode_wer(&bytes);
-                if !keep(&decoded) {
-                    left_out += 1;
-                    continue;
-                }
-                let body = redact.apply(&decoded);
+                let body = redact.apply(&decode_wer(&bytes));
                 std::fs::write(out.join("wer").join(format!("{name}.txt")), body)?;
                 text.push_str(&format!("{name}: copied\n"));
                 copied += 1;
@@ -74,15 +65,10 @@ pub fn collect(out: &Path) -> Result<()> {
     }
     if reports.is_empty() {
         text.push_str("(none)\n");
-    } else if reports.len() > seen {
-        text.push_str(&format!("({} older ones not read)\n", reports.len() - seen));
+    } else if reports.len() > WER_MAX {
+        text.push_str(&format!("({} older ones not read)\n", reports.len() - WER_MAX));
     }
     text.push_str(&format!("{copied} copied\n"));
-    if left_out > 0 {
-        text.push_str(&format!(
-            "{left_out} left out: not a GPU or kernel reset and not kestrel.exe's, so about another program\n"
-        ));
-    }
 
     text.push_str(
         "\nNothing was changed. To have Windows keep a full dump of each kestrel.exe crash, set \
@@ -132,14 +118,7 @@ fn listing(dir: &Path) -> String {
     out
 }
 
-/// Whether a Windows report is one the machine report may carry: a \[3\]
-fn keep(wer: &str) -> bool {
-    let field = |key: &str| wer.lines().find_map(|l| l.trim().strip_prefix(key)).map(str::trim);
-    field("EventType=") == Some("LiveKernelEvent")
-        || field("NsAppName=").is_some_and(|n| n.eq_ignore_ascii_case("kestrel.exe"))
-}
-
-/// A `Report.wer` is UTF-16LE with a byte-order mark; read anything else as \[4\]
+/// A `Report.wer` is UTF-16LE with a byte-order mark; read anything else as \[3\]
 fn decode_wer(bytes: &[u8]) -> String {
     match bytes {
         [0xFF, 0xFE, rest @ ..] => {
@@ -160,20 +139,6 @@ mod tests {
         bytes.extend("EventType=LiveKernelEvent\r\n".encode_utf16().flat_map(u16::to_le_bytes));
         assert_eq!(decode_wer(&bytes), "EventType=LiveKernelEvent\r\n");
         assert_eq!(decode_wer(b"plain"), "plain");
-    }
-
-    /// The three kinds in that report, as Windows writes them (CRLF).
-    #[test]
-    fn only_gpu_resets_and_kestrels_own_reports_are_kept() {
-        let reset = "EventType=LiveKernelEvent\r\nNsAppName=LiveKernelEvent\r\nAppName=Windows\r\n";
-        let crash = "EventType=BEX64\r\nNsAppName=kestrel.exe\r\nAppName=Kestrel\r\n";
-        let hang = "EventType=AppTermFailureEvent\r\nNsAppName=AppTermFailureEvent\r\n\
-                    FriendlyEventName=Stopped responding and was closed\r\nAppName=other.exe\r\n";
-        assert!(keep(reset), "a GPU reset names no program");
-        assert!(keep(crash), "kestrel.exe's own crash");
-        assert!(!keep(hang), "another program's hang is not ours to send");
-        assert!(keep("EventType=AppHangB1\r\nNsAppName=Kestrel.EXE\r\n"), "kestrel's hang, however Windows cases it");
-        assert!(!keep(""), "an unreadable report is left out");
     }
 
     #[test]

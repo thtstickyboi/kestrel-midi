@@ -27,11 +27,11 @@
 //! sound. Nothing can be written early, because the last track to start may
 //! still add to the first block.
 
-[2] src/mix.rs:37
+[2] src/mix.rs:36
 /// Blocks added to the table at a time when a track reaches past its end, so
 /// the table's write lock is taken rarely.
 
-[3] src/mix.rs:41
+[3] src/mix.rs:40
 /// `v` in units of 2^-96. Exact for every magnitude from 2^-73 to 2^30,
 /// because it shifts the f32's 24-bit significand into place instead of
 /// converting through a float, which is a library call for `i128` and costs
@@ -39,55 +39,38 @@
 /// truncated toward zero -- one fixed answer, 440 dB down -- and anything
 /// larger, or not finite, is refused rather than wrapped.
 
-[4] src/mix.rs:72
+[4] src/mix.rs:71
 /// Back to f32, rounded once. `i128 as f32` rounds to nearest, and the scale
 /// is a power of two that leaves every nonzero result a normal float, so it
 /// is exact.
 
-[5] src/mix.rs:82
+[5] src/mix.rs:81
     /// One entry per block; empty until some track adds sound to it, and
     /// zeros where none ever does.
 
-[6] src/mix.rs:85
+[6] src/mix.rs:84
     /// Blocks the longest track ran for, silent ones included: how long the
     /// merged file is.
 
-[7] src/mix.rs:94
+[7] src/mix.rs:93
     /// Largest magnitude in the mix before the output stage, as a render's
     /// `peak level` is.
 
-[8] src/mix.rs:107
+[8] src/mix.rs:106
     /// Add a track's block number `block`. A block of zeros only counts
     /// towards the length.
 
-[9] src/mix.rs:141
-    /// Write every block that holds sound -- its number, then its samples, each
-    /// an `i128` as 16 little-endian bytes -- and leave out the silent ones,
-    /// which are most of some files. The mix itself is not changed. The caller
-    /// holds the render still: see `stems`, which takes the counts of what each
-    /// track has added at the same instant.
-
-[10] src/mix.rs:166
-    /// The mix `save` wrote, running for `len` blocks. Refused if a block is
-    /// outside `len`, or the data ends early: a checkpoint is checked whole
-    /// before this runs, so that is a bug, and it is said as one.
-
-[11] src/mix.rs:197
+[9] src/mix.rs:135
     /// Write the mix to `path` through the output stage `cfg` describes:
     /// the limiter, the clamp, the non-finite check, block by block as a
     /// render's driver runs them.
 
-[12] src/mix.rs:237
+[10] src/mix.rs:175
     /// Every f32 in the range the mix promises comes back as itself: all of
     /// them, by exponent, with the significand's extremes and a pattern
     /// between. This is what makes a one-track merge a normal render.
 
-[13] src/mix.rs:267
-    /// A mix saved and loaded is the same mix, and one that has had more added
-    /// to it since is what adding everything to one mix would have made: the
-    /// property a resume stands on.
-
-[14] src/mix.rs:319
+[11] src/mix.rs:200
     /// The same blocks added in any order make the same mix, which float
     /// addition would not: these three values sum differently depending on
     /// which two meet first.

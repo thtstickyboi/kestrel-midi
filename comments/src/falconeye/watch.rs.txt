@@ -86,23 +86,19 @@
 /// `write_report`, with the system's records already read, where reading
 /// them was how the watcher learned what happened (`posix::death`).
 
-[14] src/falconeye/watch.rs:317
-    // The conclusion goes first, where it is read first, and only when the
-    // evidence below it supports one.
-
-[15] src/falconeye/watch.rs:391
+[14] src/falconeye/watch.rs:383
 /// Windows' own records from the last `window_ms`: GPU driver events from
 /// the System log, and from the Application log the errors and hangs of
 /// kestrel.exe and Windows' reports of a GPU reset (LiveKernelEvent).
 
-[16] src/falconeye/watch.rs:416
+[15] src/falconeye/watch.rs:408
 /// The system's records from the last `window_ms`, for a report about a
 /// render the watcher can still see: a hang.
 
-[17] src/falconeye/watch.rs:425
+[16] src/falconeye/watch.rs:417
         // A render still alive has no crash to find; the GPU drivers' errors
         // are what a hang leaves. No process has the pid `u32::MAX`.
 
-[18] src/falconeye/watch.rs:447
+[17] src/falconeye/watch.rs:439
 /// `wevtutil /f:text` output, one string per event, each cut to its first 40
 /// lines.

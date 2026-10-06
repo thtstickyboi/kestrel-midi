@@ -18,9 +18,6 @@
 
 //! Soft limiter, ported from the one OmniConverter already ships. \[1\]
 
-use crate::snap::{Dec, Enc};
-use anyhow::{bail, Result};
-
 #[derive(Debug, Clone)]
 pub struct Limiter {
     loudness_l: f64,
@@ -59,37 +56,6 @@ impl Limiter {
         self.reduce_high_pitch = true;
         self.velocity_thresh = 1.0 / frequency_reduce;
         self
-    }
-
-    /// The followers, which are all that changes as it runs. The rest is its \[2\]
-    pub fn save_state(&self, e: &mut Enc) {
-        let Limiter {
-            loudness_l,
-            loudness_r,
-            velocity_l,
-            velocity_r,
-            attack: _,
-            falloff: _,
-            min_thresh: _,
-            strength: _,
-            reduce_high_pitch: _,
-            velocity_thresh: _,
-            first_sample,
-        } = self;
-        e.f64(*loudness_l);
-        e.f64(*loudness_r);
-        e.f64(*velocity_l);
-        e.f64(*velocity_r);
-        e.bool(*first_sample);
-    }
-
-    pub fn load_state(&mut self, d: &mut Dec) -> Result<()> {
-        self.loudness_l = d.f64()?;
-        self.loudness_r = d.f64()?;
-        self.velocity_l = d.f64()?;
-        self.velocity_r = d.f64()?;
-        self.first_sample = d.bool()?;
-        Ok(())
     }
 
     /// Process one interleaved stereo block in place.
@@ -156,7 +122,7 @@ impl Limiter {
     }
 }
 
-/// What every finished block goes through on its way out, in this order: \[3\]
+/// What every finished block goes through on its way out, in this order: \[2\]
 pub struct OutputStage {
     limiter: Limiter,
     brickwall: Brickwall,
@@ -196,53 +162,14 @@ impl OutputStage {
         }
     }
 
-    /// The largest magnitude this stage has written so far, before the clamp: \[4\]
+    /// The largest magnitude this stage has written so far, before the clamp: \[3\]
     pub fn peak(&self) -> f32 {
         self.peak
     }
 
-    /// What the stage carries from one block to the next: the limiters' state, \[5\]
-    pub fn save_state(&self, e: &mut Enc) {
-        let OutputStage {
-            limiter,
-            brickwall,
-            enabled: _,
-            mode: _,
-            clamp: _,
-            nan_guard: _,
-            pre_gain: _,
-            post_gain: _,
-            dc,
-            peak,
-        } = self;
-        limiter.save_state(e);
-        brickwall.save_state(e);
-        match dc {
-            Some(dc) => {
-                e.bool(true);
-                dc.save_state(e);
-            }
-            None => e.bool(false),
-        }
-        e.f32(*peak);
-    }
-
-    pub fn load_state(&mut self, d: &mut Dec) -> Result<()> {
-        self.limiter.load_state(d)?;
-        self.brickwall.load_state(d)?;
-        let had_dc = d.bool()?;
-        match (&mut self.dc, had_dc) {
-            (Some(dc), true) => dc.load_state(d)?,
-            (None, false) => {}
-            _ => bail!("the saved output stage and this render disagree about --dc-blocker"),
-        }
-        self.peak = d.f32()?;
-        Ok(())
-    }
-
-    /// Scale, filter, limit, clamp and check block number `block` in place. \[6\]
+    /// Scale, filter, limit, clamp and check block number `block` in place. \[4\]
     pub fn process(&mut self, out: &mut [f32], block: u64) -> anyhow::Result<u64> {
-        // [7]
+        // [5]
         if self.pre_gain != 1.0 {
             out.iter_mut().for_each(|v| *v *= self.pre_gain);
         }
@@ -252,7 +179,7 @@ impl OutputStage {
         if self.enabled {
             match self.mode {
                 LimiterMode::Off => {}
-                // [8]
+                // [6]
                 LimiterMode::Omni => {
                     self.limiter.process(out);
                     self.brickwall.process(out);
@@ -260,12 +187,12 @@ impl OutputStage {
                 LimiterMode::Brickwall => self.brickwall.process(out),
             }
         }
-        // [9]
+        // [7]
         if self.post_gain != 1.0 {
             out.iter_mut().for_each(|v| *v *= self.post_gain);
         }
         self.peak = out.iter().fold(self.peak, |m, v| m.max(v.abs()));
-        // [10]
+        // [8]
         let clipped = if self.clamp { clamp_block(out) } else { 0 };
 
         if self.nan_guard {
@@ -282,7 +209,7 @@ impl OutputStage {
     }
 }
 
-/// Second-order Butterworth high-pass on an interleaved stereo stream: the DC \[11\]
+/// Second-order Butterworth high-pass on an interleaved stereo stream: the DC \[9\]
 #[derive(Debug, Clone)]
 pub struct DcBlocker {
     b0: f64,
@@ -311,18 +238,6 @@ impl DcBlocker {
         }
     }
 
-    /// The two delay registers per channel; the coefficients are the render's \[12\]
-    pub fn save_state(&self, e: &mut Enc) {
-        let DcBlocker { b0: _, b1: _, b2: _, a1: _, a2: _, z1, z2 } = self;
-        e.f64s(z1);
-        e.f64s(z2);
-    }
-
-    pub fn load_state(&mut self, d: &mut Dec) -> Result<()> {
-        d.fill_f64s(&mut self.z1, "DC blocker registers")?;
-        d.fill_f64s(&mut self.z2, "DC blocker registers")
-    }
-
     /// Filter one interleaved stereo block in place.
     pub fn process(&mut self, buf: &mut [f32]) {
         debug_assert_eq!(buf.len() % 2, 0);
@@ -338,7 +253,7 @@ impl DcBlocker {
     }
 }
 
-/// Hard clamp, always applied last so nothing leaves the renderer out of range. \[13\]
+/// Hard clamp, always applied last so nothing leaves the renderer out of range. \[10\]
 pub fn clamp_block(buf: &mut [f32]) -> u64 {
     let mut n = 0u64;
     for v in buf.iter_mut() {
@@ -350,16 +265,16 @@ pub fn clamp_block(buf: &mut [f32]) -> u64 {
     n
 }
 
-// [14]
+// [11]
 
 /// Which limiter runs on the mixed block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LimiterMode {
     /// No limiting. `clamp_block` still runs, so loud material hard-clips.
     Off,
-    /// The port of the realtime limiter OmniConverter ships, above, with \[15\]
+    /// The port of the realtime limiter OmniConverter ships, above, with \[12\]
     Omni,
-    /// Lookahead true-peak brickwall. Guarantees the output never exceeds the \[16\]
+    /// Lookahead true-peak brickwall. Guarantees the output never exceeds the \[13\]
     Brickwall,
 }
 
@@ -378,15 +293,15 @@ impl LimiterMode {
 const TP_PHASES: usize = 4;
 const TP_TAPS: usize = 8;
 
-/// Lookahead true-peak brickwall limiter. \[17\]
+/// Lookahead true-peak brickwall limiter. \[14\]
 pub struct Brickwall {
     ceiling: f64,
     look: usize,
     release_coef: f64,
-    /// Attack and release coefficients of the sustained stage. Both zero when \[18\]
+    /// Attack and release coefficients of the sustained stage. Both zero when \[15\]
     sustain_atk: f64,
     sustain_rel: f64,
-    /// Gain the sustained stage is holding: a slow envelope of the \[19\]
+    /// Gain the sustained stage is holding: a slow envelope of the \[16\]
     g_slow: f64,
     /// Gain the fast stage is holding, on top of the sustained one.
     g_fast: f64,
@@ -405,13 +320,13 @@ pub struct Brickwall {
     hist: [[f64; TP_TAPS]; 2],
     /// Polyphase coefficients, indexed by phase then tap.
     poly: [[f64; TP_TAPS]; TP_PHASES],
-    /// Frames the audio is delayed by: the lookahead plus the detector's own \[20\]
+    /// Frames the audio is delayed by: the lookahead plus the detector's own \[17\]
     delay_frames: usize,
     true_peak: bool,
     idx: u64,
     /// Largest true peak seen at the input, for reporting.
     pub peak_in: f64,
-    /// Smallest gain the limiter had to apply, for reporting. **Not wired up** \[21\]
+    /// Smallest gain the limiter had to apply, for reporting. **Not wired up** \[18\]
     pub min_gain: f64,
 }
 
@@ -427,7 +342,7 @@ impl Brickwall {
         let sr = sample_rate as f64;
         let look = ((lookahead_ms * 1e-3 * sr).round() as usize).max(1);
         let rel = (release_ms * 1e-3 * sr).max(1.0);
-        // [22]
+        // [19]
         let (sustain_atk, sustain_rel) = if sustain_ms > 0.0 {
             let a = (sustain_ms * 1e-3 * sr).max(1.0);
             (
@@ -437,9 +352,9 @@ impl Brickwall {
         } else {
             (0.0, 0.0)
         };
-        // [23]
+        // [20]
         let release_coef = 1.0 - (-1.0 / rel).exp();
-        // [24]
+        // [21]
         let group = if true_peak { TP_TAPS / 2 - 1 } else { 0 };
         let delay_frames = look + group;
         Brickwall {
@@ -472,92 +387,7 @@ impl Brickwall {
         self.delay_frames
     }
 
-    /// Everything the limiter carries from one block to the next: the audio in \[25\]
-    pub fn save_state(&self, e: &mut Enc) {
-        let Brickwall {
-            ceiling: _,
-            look: _,
-            release_coef: _,
-            sustain_atk: _,
-            sustain_rel: _,
-            g_slow,
-            g_fast,
-            delay,
-            dpos,
-            dq,
-            gr_ring,
-            gr_pos,
-            gr_sum,
-            gain,
-            hist,
-            poly: _,
-            delay_frames: _,
-            true_peak: _,
-            idx,
-            peak_in,
-            min_gain,
-        } = self;
-        e.f64(*g_slow);
-        e.f64(*g_fast);
-        e.f32s(delay);
-        e.u64(*dpos as u64);
-        e.len_of(dq.len());
-        for &(v, i) in dq {
-            e.f64(v);
-            e.u64(i);
-        }
-        e.f64s(gr_ring);
-        e.u64(*gr_pos as u64);
-        e.f64(*gr_sum);
-        e.f64(*gain);
-        for h in hist {
-            e.f64s(h);
-        }
-        e.u64(*idx);
-        e.f64(*peak_in);
-        e.f64(*min_gain);
-    }
-
-    pub fn load_state(&mut self, d: &mut Dec) -> Result<()> {
-        self.g_slow = d.f64()?;
-        self.g_fast = d.f64()?;
-        let delay = d.f32s()?;
-        if delay.len() != self.delay.len() {
-            bail!(
-                "the saved limiter holds {} frames of delay and this one holds {}: the limiter settings are different",
-                delay.len() / 2,
-                self.delay.len() / 2
-            );
-        }
-        self.delay = delay;
-        self.dpos = d.u64()? as usize;
-        let n = d.len_of(16)?;
-        self.dq.clear();
-        for _ in 0..n {
-            let (v, i) = (d.f64()?, d.u64()?);
-            self.dq.push_back((v, i));
-        }
-        let ring = d.f64s()?;
-        if ring.len() != self.gr_ring.len() {
-            bail!("the saved limiter's gain window is {} long and this one's is {}", ring.len(), self.gr_ring.len());
-        }
-        self.gr_ring = ring;
-        self.gr_pos = d.u64()? as usize;
-        self.gr_sum = d.f64()?;
-        self.gain = d.f64()?;
-        for h in &mut self.hist {
-            d.fill_f64s(h, "oversampler history")?;
-        }
-        self.idx = d.u64()?;
-        self.peak_in = d.f64()?;
-        self.min_gain = d.f64()?;
-        if self.dpos >= self.delay_frames.max(1) || self.gr_pos >= self.gr_ring.len() {
-            bail!("the saved limiter's positions are outside its buffers");
-        }
-        Ok(())
-    }
-
-    /// True peak of one frame: the largest magnitude of the 4x oversampled \[26\]
+    /// True peak of one frame: the largest magnitude of the 4x oversampled \[22\]
     fn detect(&mut self, l: f64, r: f64) -> f64 {
         if !self.true_peak {
             return l.abs().max(r.abs());
@@ -589,7 +419,7 @@ impl Brickwall {
         }
     }
 
-    /// Pass a block of exact zeros through a limiter that has settled, without \[27\]
+    /// Pass a block of exact zeros through a limiter that has settled, without \[23\]
     fn skip_if_settled(&mut self, buf: &[f32]) -> bool {
         let n = buf.len() / 2;
         if n == 0
@@ -608,7 +438,7 @@ impl Brickwall {
             (self.g_slow, self.g_fast, self.gain) = before;
             return false;
         }
-        // [28]
+        // [24]
         if self.true_peak {
             let k = n.min(TP_TAPS);
             for h in &mut self.hist {
@@ -624,7 +454,7 @@ impl Brickwall {
         true
     }
 
-    /// The per-sample limiter, which `process` runs on anything that is not \[29\]
+    /// The per-sample limiter, which `process` runs on anything that is not \[25\]
     fn process_frames(&mut self, buf: &mut [f32]) {
         for i in (0..buf.len()).step_by(2) {
             let in_l = buf[i] as f64;
@@ -682,7 +512,7 @@ impl Brickwall {
     /// One frame's gain, from the moving average of the requirement.
     #[inline]
     fn step_gain(&mut self, ma: f64) {
-        // [30]
+        // [26]
         if self.sustain_atk > 0.0 {
             let c = if ma < self.g_slow {
                 self.sustain_atk
@@ -709,7 +539,7 @@ impl Brickwall {
     }
 }
 
-/// A 4x polyphase interpolator for true-peak detection: a Blackman-windowed \[31\]
+/// A 4x polyphase interpolator for true-peak detection: a Blackman-windowed \[27\]
 fn design_polyphase() -> [[f64; TP_TAPS]; TP_PHASES] {
     let mut out = [[0.0f64; TP_TAPS]; TP_PHASES];
     let n = (TP_TAPS * TP_PHASES) as f64;
@@ -727,7 +557,7 @@ fn design_polyphase() -> [[f64; TP_TAPS]; TP_PHASES] {
                 + 0.08 * (4.0 * std::f64::consts::PI * k / (n - 1.0)).cos();
             *c = sinc * w;
         }
-        // [32]
+        // [28]
         let sum: f64 = phase.iter().sum();
         if sum.abs() > 1e-12 {
             for c in phase.iter_mut() {
@@ -745,7 +575,7 @@ mod tests {
     #[test]
     fn quiet_signal_passes_through_scaled() {
         let mut lim = Limiter::new(48000);
-        // [33]
+        // [29]
         let mut buf = vec![0.1f32; 48000 * 6];
         lim.process(&mut buf);
         for &v in &buf[buf.len() - 1000..] {
@@ -777,12 +607,12 @@ mod tests {
         assert_eq!(make(), make());
     }
 
-    /// The whole point of a brickwall: whatever goes in, nothing comes out \[34\]
+    /// The whole point of a brickwall: whatever goes in, nothing comes out \[30\]
     #[test]
     fn brickwall_never_exceeds_the_ceiling() {
         for ceiling in [1.0f64, 0.5] {
             let mut bw = Brickwall::new(48000, ceiling, 2.0, 60.0, 400.0, true);
-            // [35]
+            // [31]
             let mut buf: Vec<f32> = (0..48000 * 2)
                 .map(|i| {
                     let t = i / 2;
@@ -805,7 +635,7 @@ mod tests {
         }
     }
 
-    /// The reason it exists. A brief transient must not pull down the material \[36\]
+    /// The reason it exists. A brief transient must not pull down the material \[32\]
     #[test]
     fn brickwall_recovers_quickly_after_a_transient() {
         let quiet = 0.5f32;
@@ -833,7 +663,7 @@ mod tests {
             "quiet material before the transient was attenuated: {}",
             level(0.02)
         );
-        // [37]
+        // [33]
         assert!(
             (level(0.35) - quiet).abs() < 0.02,
             "still ducking 250 ms after a 1 ms transient: {}",
@@ -841,7 +671,7 @@ mod tests {
         );
     }
 
-    /// True-peak detection has to catch overshoot that sample-peak detection \[38\]
+    /// True-peak detection has to catch overshoot that sample-peak detection \[34\]
     #[test]
     fn true_peak_detection_catches_intersample_overshoot() {
         // A half-Nyquist tone whose samples sit exactly at full scale.
@@ -849,7 +679,7 @@ mod tests {
             (0..48000 * 2)
                 .map(|i| {
                     let t = (i / 2) as f64;
-                    // [39]
+                    // [35]
                     ((t * std::f64::consts::PI / 2.0 + std::f64::consts::PI / 4.0).sin()
                         * std::f64::consts::SQRT_2) as f32
                 })
@@ -868,7 +698,7 @@ mod tests {
         );
     }
 
-    /// Skipping a settled limiter's silence has to be invisible: the same \[40\]
+    /// Skipping a settled limiter's silence has to be invisible: the same \[36\]
     #[test]
     fn skipping_settled_silence_changes_nothing() {
         fn state(b: &Brickwall) -> Vec<u64> {
@@ -888,7 +718,7 @@ mod tests {
             v.extend(b.dq.iter().flat_map(|&(x, j)| [x.to_bits(), j]));
             v
         }
-        // [41]
+        // [37]
         let tone = |len: usize, amp: f64| -> Vec<f32> {
             (0..len * 2).map(|i| (((i / 2) as f64 * 0.07).sin() * amp) as f32).collect()
         };
@@ -952,11 +782,11 @@ mod tests {
         assert_eq!(run(), run());
     }
 
-    /// The point of the sustained stage. \[42\]
+    /// The point of the sustained stage. \[38\]
     #[test]
     fn the_sustained_stage_holds_the_gain_steady_on_a_loud_passage() {
         let wobble = |sustain_ms: f64| -> f64 {
-            // [43]
+            // [39]
             let src: Vec<f32> = (0..48000 * 2 * 2)
                 .map(|i| {
                     let t = (i / 2) as f64 / 48000.0;
@@ -970,7 +800,7 @@ mod tests {
             let mut bw = Brickwall::new(48000, 1.0, 2.0, 5.0, sustain_ms, true);
             let d = bw.latency() * 2;
             bw.process(&mut buf);
-            // [44]
+            // [40]
             let start = src.len() / 2;
             let g: Vec<f64> = (start..src.len() - d)
                 .filter(|&k| src[k].abs() > 4.0)
@@ -984,7 +814,7 @@ mod tests {
 
         let single = wobble(0.0);
         let staged = wobble(400.0);
-        // [45]
+        // [41]
         assert!(
             staged < single * 0.85,
             "the sustained stage did not steady the gain: it wobbles by \
@@ -992,7 +822,7 @@ mod tests {
         );
     }
 
-    /// And it must not have cost the thing the fast release was for: a brief \[46\]
+    /// And it must not have cost the thing the fast release was for: a brief \[42\]
     #[test]
     fn the_sustained_stage_does_not_reintroduce_pumping() {
         let quiet = 0.5f32;
@@ -1014,10 +844,10 @@ mod tests {
         );
     }
 
-    /// `--limiter omni` runs the brickwall behind the follower as a safety \[47\]
+    /// `--limiter omni` runs the brickwall behind the follower as a safety \[43\]
     #[test]
     fn omni_with_the_safety_stage_never_exceeds_the_ceiling() {
-        // [48]
+        // [44]
         let src: Vec<f32> = (0..48000 * 2 * 2)
             .map(|i| {
                 let t = i / 2;
@@ -1068,7 +898,7 @@ mod tests {
         20.0 * (rms(tail) / (0.5 / std::f64::consts::SQRT_2)).log10()
     }
 
-    /// The pedestal goes and the music stays: DC to nothing, the 2.6 Hz swell \[49\]
+    /// The pedestal goes and the music stays: DC to nothing, the 2.6 Hz swell \[45\]
     #[test]
     fn dc_blocker_removes_the_pedestal_and_keeps_the_music() {
         let mut dc = stereo(96000, |_| 0.5);
@@ -1083,7 +913,7 @@ mod tests {
         }
     }
 
-    /// State carries across blocks, so cutting the stream differently \[50\]
+    /// State carries across blocks, so cutting the stream differently \[46\]
     #[test]
     fn dc_blocker_does_not_depend_on_the_block_size() {
         let src = stereo(48000, |t| 0.3 + (std::f64::consts::TAU * 3.0 * t).sin() * 0.4);
@@ -1096,7 +926,7 @@ mod tests {
         assert!(run(4096) == run(512), "block size changed the output");
     }
 
-    /// `--volume` at or below 100% scales the limited output, so a dense \[51\]
+    /// `--volume` at or below 100% scales the limited output, so a dense \[47\]
     #[test]
     fn volume_sets_the_level_of_the_limited_output() {
         // Far over full scale, as a dense mix is.

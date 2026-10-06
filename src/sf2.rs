@@ -740,7 +740,6 @@ fn build_pool(
             declared_loop,
             rate: if pool_rate != 0 { pool_rate } else { src_rate },
             root_key: sh.original_pitch.min(127),
-            unity_note: None,
             correction_cents: sh.pitch_correction as f32,
             resample_ratio: if pool_rate != 0 {
                 pool_rate as f32 / src_rate as f32

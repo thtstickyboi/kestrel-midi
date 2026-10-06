@@ -69,11 +69,6 @@ the render is gone.
   files loaded into its render, while the crashed render waits.
 - **For a crash, or a render that stopped finishing blocks for a minute,** it
   also writes `<log> CRASH.txt` or `<log> HANG.txt`. That holds:
-  - when the log and Windows' records show the graphics driver was reset, a
-    short paragraph at the top saying so, and what helps, with your Windows
-    graphics timeout settings. (A driver reset can end the process with an
-    exit code that does not mention the GPU at all, so the report says it
-    for itself.) Nothing is said when the evidence is not there;
   - the log's last lines;
   - Windows' own records from the render's time: graphics driver resets,
     and Windows' record of Kestrel's crash. They come from the System and
@@ -111,9 +106,7 @@ anything, and writes one file, `reports\kestrel-report-<date time>.zip`.
 - **a GPU self-test**, which you're asked about first. It renders one block
   with every voice sounding, starting at 4,096 voices and doubling, and
   stops before any block could take half a second. Then it tells you how
-  close your GPU runs to Windows' 2-second limit. Each GPU is tested in a
-  process of its own: if a driver crashes the test, the report says so, and
-  at how many voices, instead of being lost with it.
+  close your GPU runs to Windows' 2-second limit.
 
 **What it never collects:** your files, the names of other programs,
 network details (IP or MAC addresses), serial numbers, or environment
@@ -132,9 +125,7 @@ running as administrator **only reads**:
   dumps themselves are never copied**, because they hold raw system memory
   that nothing can check for personal data;
 - Windows Error Reporting's short text reports of GPU resets and Kestrel
-  crashes from the last 30 days, with names hidden. A report about any other
-  program is left out, whatever folder Windows filed it in, and the report
-  says how many it left out.
+  crashes from the last 30 days, with names hidden.
 
 It changes nothing and never renders as administrator. If you'd like
 Windows to keep a full dump of each Kestrel crash, the report says which

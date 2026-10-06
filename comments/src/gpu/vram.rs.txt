@@ -54,29 +54,22 @@
 /// a `VramWatch` from anything that should not wait.
 
 [9] src/gpu/vram.rs:105
-/// What DXGI says alone -- the adapter's dedicated memory, and the budget and
-/// usage of this process -- without the performance counters `sample` also
-/// loads, which are the slow part and are only for the whole-adapter figures.
-/// Quick enough to take before a device is opened, which is when a render log
-/// most needs it: `dedicated_used` and `shared_used` are `None`.
-
-[10] src/gpu/vram.rs:114
 /// The adapter's dedicated video memory, without opening the performance
 /// counters `sample` does, so it is quick. It never changes on a machine,
 /// which is why `gpu::auto_pool_budget` sizes from it and not from what is
 /// free: a budget that moved with other programs could load one soundfont
 /// at two rates on two runs.
 
-[11] src/gpu/vram.rs:123
+[10] src/gpu/vram.rs:114
 /// On Linux (1.2.3): the card's own figure in sysfs, which amdgpu and
 /// Intel's xe publish, or `nvidia-smi` for NVIDIA's driver, which does not.
 /// Plain files and a tool, no `unsafe`.
 
-[12] src/gpu/vram.rs:157
+[11] src/gpu/vram.rs:148
 /// Nothing to read on macOS yet: Apple silicon shares memory with the CPU,
 /// and wgpu does not pass on Metal's working-set figure.
 
-[13] src/gpu/vram.rs:167
+[12] src/gpu/vram.rs:158
 /// The instance-name prefix the performance counters give an adapter,
 /// `luid_0x<high>_0x<low>_phys_` in lower-case hex. A linked multi-GPU adapter
 /// has several `phys` instances under one LUID, and they are summed.
@@ -84,60 +77,56 @@
 /// Only the Windows probe calls it, but it is plain formatting and its test
 /// runs everywhere, so it is not compiled out elsewhere -- only the lint is.
 
-[14] src/gpu/vram.rs:219
+[13] src/gpu/vram.rs:210
         // SAFETY: takes no arguments and returns an owned COM reference,
         // released when the wrapper drops.
 
-[15] src/gpu/vram.rs:224
+[14] src/gpu/vram.rs:215
             // SAFETY: an index past the last adapter returns
             // DXGI_ERROR_NOT_FOUND, which ends the walk through `?`; an
             // adapter that is returned is an owned reference.
 
-[16] src/gpu/vram.rs:244
-        /// `counters` is whether to open the performance counters too, which is
-        /// what makes the first reading slow.
-
-[17] src/gpu/vram.rs:263
+[15] src/gpu/vram.rs:252
                 // SAFETY: `info` is a live, writable struct of exactly the type
                 // the call fills, and node 0 exists on every adapter.
 
-[18] src/gpu/vram.rs:293
+[16] src/gpu/vram.rs:282
             // SAFETY: a null data source asks for live data, and `query` is a
             // writable handle slot.
 
-[19] src/gpu/vram.rs:299
+[17] src/gpu/vram.rs:288
             // SAFETY: `query` is the query just opened; both paths are static
             // NUL-terminated wide strings; the handle slots are writable, and
             // the counters they receive belong to the query.
 
-[20] src/gpu/vram.rs:323
+[18] src/gpu/vram.rs:312
         /// A counter's value summed over this adapter's instances, or `None`
         /// if the adapter has none.
 
-[21] src/gpu/vram.rs:327
+[19] src/gpu/vram.rs:316
             // SAFETY: with no buffer the call writes only the size it needs and
             // the item count, both into writable locals.
 
-[22] src/gpu/vram.rs:335
+[20] src/gpu/vram.rs:324
             // Whole u64 words, so the buffer is aligned for the item structs
             // the call writes at its start. The names those items point to are
             // written later in the same buffer.
 
-[23] src/gpu/vram.rs:340
+[21] src/gpu/vram.rs:329
             // SAFETY: the buffer holds at least the `bytes` the first call
             // asked for and is aligned for PDH_FMT_COUNTERVALUE_ITEM_W.
 
-[24] src/gpu/vram.rs:351
+[22] src/gpu/vram.rs:340
                 // SAFETY: the call wrote `count` items at the start of `buf`,
                 // which is neither freed nor moved during this loop, and each
                 // name points at a NUL-terminated string inside it.
 
-[25] src/gpu/vram.rs:383
+[23] src/gpu/vram.rs:372
     /// The instance names as Windows writes them, taken from `Get-Counter
     /// '\GPU Adapter Memory(*)\Dedicated Usage'` on the RTX 5060 machine,
     /// 2026-09-12.
 
-[26] src/gpu/vram.rs:393
+[24] src/gpu/vram.rs:382
     /// The adapter wgpu would render on reports a total, and a usage no
     /// larger than it. Windows only: elsewhere there is no implementation, and
     /// `sample` saying so is the correct answer.

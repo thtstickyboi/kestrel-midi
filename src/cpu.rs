@@ -12,7 +12,6 @@ use crate::bank::{
 };
 use crate::config::{AdmitRule, Config, EnvelopeCurve, Interpolation, StealRule};
 use crate::fixed::{Fixed, FRAC_SCALE_F32};
-use crate::snap::{Dec, Enc};
 use crate::voice::*;
 use anyhow::Result;
 use std::sync::Arc;
@@ -56,115 +55,6 @@ struct Pool {
 impl Pool {
     fn len(&self) -> usize {
         self.phase.len()
-    }
-
-    /// Every voice, field by field. Exhaustive, as `CpuSynth::save_state` is.
-    fn save(&self, e: &mut Enc) {
-        let Pool {
-            rotation,
-            phase,
-            step,
-            smp_base,
-            smp_len,
-            loop_start,
-            loop_end,
-            flags,
-            env_stage,
-            env_level,
-            gain_l,
-            gain_r,
-            filt_z1,
-            filt_z2,
-            params,
-            region,
-            gate_slot,
-            ordinal,
-            start_rel,
-            born_variant,
-            stop_rel,
-            age,
-            rel_age,
-            note_id,
-            glide,
-        } = self;
-        e.len_of(self.len());
-        e.pod(rotation);
-        e.u64s(&phase.iter().map(|f| f.0).collect::<Vec<_>>());
-        e.u64s(&step.iter().map(|f| f.0).collect::<Vec<_>>());
-        for v in [smp_base, smp_len, loop_start, loop_end, flags, env_stage] {
-            e.u32s(v);
-        }
-        for v in [env_level, gain_l, gain_r, filt_z1, filt_z2] {
-            e.f32s(v);
-        }
-        for v in [params, region, gate_slot, ordinal, start_rel, born_variant, stop_rel, age, rel_age] {
-            e.u32s(v);
-        }
-        e.u64s(note_id);
-        e.u32s(glide);
-    }
-
-    fn load(d: &mut Dec) -> Result<Pool> {
-        let n = d.u64()? as usize;
-        // Read in the order `save` wrote them, which is the order written here.
-        let p = Pool {
-            rotation: d.pod()?,
-            phase: d.u64s()?.into_iter().map(Fixed).collect(),
-            step: d.u64s()?.into_iter().map(Fixed).collect(),
-            smp_base: d.u32s()?,
-            smp_len: d.u32s()?,
-            loop_start: d.u32s()?,
-            loop_end: d.u32s()?,
-            flags: d.u32s()?,
-            env_stage: d.u32s()?,
-            env_level: d.f32s()?,
-            gain_l: d.f32s()?,
-            gain_r: d.f32s()?,
-            filt_z1: d.f32s()?,
-            filt_z2: d.f32s()?,
-            params: d.u32s()?,
-            region: d.u32s()?,
-            gate_slot: d.u32s()?,
-            ordinal: d.u32s()?,
-            start_rel: d.u32s()?,
-            born_variant: d.u32s()?,
-            stop_rel: d.u32s()?,
-            age: d.u32s()?,
-            rel_age: d.u32s()?,
-            note_id: d.u64s()?,
-            glide: d.u32s()?,
-        };
-        let lens = [
-            p.rotation.len(),
-            p.phase.len(),
-            p.step.len(),
-            p.smp_base.len(),
-            p.smp_len.len(),
-            p.loop_start.len(),
-            p.loop_end.len(),
-            p.flags.len(),
-            p.env_stage.len(),
-            p.env_level.len(),
-            p.gain_l.len(),
-            p.gain_r.len(),
-            p.filt_z1.len(),
-            p.filt_z2.len(),
-            p.params.len(),
-            p.region.len(),
-            p.gate_slot.len(),
-            p.ordinal.len(),
-            p.start_rel.len(),
-            p.born_variant.len(),
-            p.stop_rel.len(),
-            p.age.len(),
-            p.rel_age.len(),
-            p.note_id.len(),
-            p.glide.len(),
-        ];
-        if lens.iter().any(|&l| l != n) {
-            anyhow::bail!("the saved voice pool has fields of different lengths");
-        }
-        Ok(p)
     }
 
     /// `env_phase` is the block's position on the envelope grid, from which \[8\]
@@ -1110,67 +1000,5 @@ impl Backend for CpuSynth {
 
     fn name(&self) -> &'static str {
         "cpu-reference"
-    }
-
-    fn save_state(&mut self, w: &mut dyn std::io::Write) -> Result<()> {
-        // Exhaustive: a field added here has to be saved or named as scratch.
-        let CpuSynth {
-            // Rebuilt from the configuration and the soundfont, or by the driver.
-            phase_bank: _,
-            cfg: _,
-            bank: _,
-            variants: _,
-            menv_variants: _,
-            glide_tab: _,
-            tiles: _,
-            tile_frames: _,
-            // [65]
-            mix: _,
-            off_meta: _,
-            off_runs: _,
-            chan_rows: _,
-            channels: _,
-            bend_active: _,
-            gain_active: _,
-            variant_active: _,
-            cut_active: _,
-            // The last block's, written again by the next.
-            peak: _,
-            // Saved.
-            pool,
-            env_phase,
-            stolen,
-            dropped,
-        } = self;
-        let mut e = Enc::new();
-        e.u32(*env_phase);
-        e.u64(*stolen);
-        e.u64(*dropped);
-        pool.save(&mut e);
-        let bytes = e.into_bytes();
-        w.write_all(&(bytes.len() as u64).to_le_bytes())?;
-        w.write_all(&bytes)?;
-        Ok(())
-    }
-
-    fn load_state(&mut self, r: &mut dyn std::io::Read) -> Result<()> {
-        if self.pool.len() != 0 || self.env_phase != 0 {
-            anyhow::bail!("a saved state can be loaded only into a backend that has rendered nothing");
-        }
-        let mut n = [0u8; 8];
-        r.read_exact(&mut n)?;
-        let len = u64::from_le_bytes(n) as usize;
-        let mut bytes = vec![0u8; len];
-        r.read_exact(&mut bytes)?;
-        let mut d = Dec::new(&bytes);
-        self.env_phase = d.u32()?;
-        self.stolen = d.u64()?;
-        self.dropped = d.u64()?;
-        self.pool = Pool::load(&mut d)?;
-        d.finish()?;
-        if self.env_phase >= self.cfg.env_step_frames() {
-            anyhow::bail!("the saved envelope position is outside the envelope grid");
-        }
-        Ok(())
     }
 }

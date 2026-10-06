@@ -45,7 +45,7 @@ impl VramWatch {
         let _ = std::thread::Builder::new()
             .name("kestrel-vram".into())
             .spawn(move || {
-                let Some(mut probe) = Probe::open(vendor, device, true) else {
+                let Some(mut probe) = Probe::open(vendor, device) else {
                     return;
                 };
                 while !stopped.load(Ordering::Relaxed) {
@@ -76,20 +76,15 @@ impl Drop for VramWatch {
 
 /// One reading, taken now. Slow the first time in a process; read it through \[8\]
 pub fn sample(vendor: u32, device: u32) -> Option<GpuMemory> {
-    Probe::open(vendor, device, true).map(|mut probe| probe.read())
+    Probe::open(vendor, device).map(|mut probe| probe.read())
 }
 
-/// What DXGI says alone -- the adapter's dedicated memory, and the budget and \[9\]
-pub fn sample_quick(vendor: u32, device: u32) -> Option<GpuMemory> {
-    Probe::open(vendor, device, false).map(|mut probe| probe.read())
-}
-
-/// The adapter's dedicated video memory, without opening the performance \[10\]
+/// The adapter's dedicated video memory, without opening the performance \[9\]
 pub fn dedicated_total(vendor: u32, device: u32) -> Option<u64> {
     total(vendor, device)
 }
 
-/// On Linux (1.2.3): the card's own figure in sysfs, which amdgpu and \[11\]
+/// On Linux (1.2.3): the card's own figure in sysfs, which amdgpu and \[10\]
 #[cfg(target_os = "linux")]
 fn total(vendor: u32, device: u32) -> Option<u64> {
     let id = |p: &std::path::Path| {
@@ -121,7 +116,7 @@ fn total(vendor: u32, device: u32) -> Option<u64> {
     None
 }
 
-/// Nothing to read on macOS yet: Apple silicon shares memory with the CPU, \[12\]
+/// Nothing to read on macOS yet: Apple silicon shares memory with the CPU, \[11\]
 #[cfg(not(any(windows, target_os = "linux")))]
 fn total(_vendor: u32, _device: u32) -> Option<u64> {
     None
@@ -130,7 +125,7 @@ fn total(_vendor: u32, _device: u32) -> Option<u64> {
 #[cfg(windows)]
 use windows_probe::total;
 
-/// The instance-name prefix the performance counters give an adapter, \[13\]
+/// The instance-name prefix the performance counters give an adapter, \[12\]
 #[cfg_attr(not(windows), allow(dead_code))]
 fn counter_prefix(luid_high: i32, luid_low: u32) -> String {
     format!("luid_0x{:08x}_0x{:08x}_phys_", luid_high as u32, luid_low)
@@ -141,7 +136,7 @@ struct Probe;
 
 #[cfg(not(windows))]
 impl Probe {
-    fn open(_vendor: u32, _device: u32, _counters: bool) -> Option<Probe> {
+    fn open(_vendor: u32, _device: u32) -> Option<Probe> {
         None
     }
 
@@ -177,11 +172,11 @@ mod windows_probe {
 
     /// The DXGI adapter with these PCI ids, and its description.
     fn find(vendor: u32, device: u32) -> Option<(IDXGIAdapter1, DXGI_ADAPTER_DESC1)> {
-        // [14]
+        // [13]
         let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.ok()?;
         let mut index = 0;
         loop {
-            // [15]
+            // [14]
             let adapter = unsafe { factory.EnumAdapters1(index) }.ok()?;
             index += 1;
             // SAFETY: fills a plain-data struct from a live adapter.
@@ -199,14 +194,13 @@ mod windows_probe {
     }
 
     impl Probe {
-        /// `counters` is whether to open the performance counters too, which is \[16\]
-        pub(super) fn open(vendor: u32, device: u32, counters: bool) -> Option<Probe> {
+        pub(super) fn open(vendor: u32, device: u32) -> Option<Probe> {
             let (adapter, desc) = find(vendor, device)?;
             Some(Probe {
                 adapter: adapter.cast::<IDXGIAdapter3>().ok(),
                 dedicated_total: desc.DedicatedVideoMemory as u64,
                 prefix: counter_prefix(desc.AdapterLuid.HighPart, desc.AdapterLuid.LowPart),
-                counters: if counters { Counters::open() } else { None },
+                counters: Counters::open(),
             })
         }
 
@@ -217,7 +211,7 @@ mod windows_probe {
             };
             if let Some(adapter) = &self.adapter {
                 let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
-                // [17]
+                // [15]
                 let asked = unsafe {
                     adapter.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut info)
                 };
@@ -246,12 +240,12 @@ mod windows_probe {
     impl Counters {
         fn open() -> Option<Counters> {
             let mut query = 0isize;
-            // [18]
+            // [16]
             if unsafe { PdhOpenQueryW(PCWSTR::null(), 0, &mut query) } != 0 {
                 return None;
             }
             let (mut dedicated, mut shared) = (0isize, 0isize);
-            // [19]
+            // [17]
             let added = unsafe {
                 PdhAddEnglishCounterW(query, w!("\\GPU Adapter Memory(*)\\Dedicated Usage"), 0, &mut dedicated) == 0
                     && PdhAddEnglishCounterW(query, w!("\\GPU Adapter Memory(*)\\Shared Usage"), 0, &mut shared) == 0
@@ -273,20 +267,20 @@ mod windows_probe {
             unsafe { PdhCollectQueryData(self.query) == 0 }
         }
 
-        /// A counter's value summed over this adapter's instances, or `None` \[20\]
+        /// A counter's value summed over this adapter's instances, or `None` \[18\]
         fn sum(&self, counter: isize, prefix: &str) -> Option<u64> {
             let (mut bytes, mut count) = (0u32, 0u32);
-            // [21]
+            // [19]
             let status = unsafe {
                 PdhGetFormattedCounterArrayW(counter, PDH_FMT_LARGE, &mut bytes, &mut count, None)
             };
             if status != PDH_MORE_DATA {
                 return None;
             }
-            // [22]
+            // [20]
             let mut buf = vec![0u64; (bytes as usize).div_ceil(8)];
             let items = buf.as_mut_ptr() as *mut PDH_FMT_COUNTERVALUE_ITEM_W;
-            // [23]
+            // [21]
             let status = unsafe {
                 PdhGetFormattedCounterArrayW(counter, PDH_FMT_LARGE, &mut bytes, &mut count, Some(items))
             };
@@ -296,7 +290,7 @@ mod windows_probe {
             let mut total = 0u64;
             let mut found = false;
             for i in 0..count as usize {
-                // [24]
+                // [22]
                 let (name, valid, value) = unsafe {
                     let item = &*items.add(i);
                     (
@@ -326,7 +320,7 @@ mod windows_probe {
 mod tests {
     use super::*;
 
-    /// The instance names as Windows writes them, taken from `Get-Counter \[25\]
+    /// The instance names as Windows writes them, taken from `Get-Counter \[23\]
     #[test]
     fn the_counter_prefix_matches_the_instance_names_windows_uses() {
         assert_eq!(counter_prefix(0, 0x0001_1d6f), "luid_0x00000000_0x00011d6f_phys_");
@@ -334,7 +328,7 @@ mod tests {
         assert_eq!(counter_prefix(-1, 1), "luid_0xffffffff_0x00000001_phys_");
     }
 
-    /// The adapter wgpu would render on reports a total, and a usage no \[26\]
+    /// The adapter wgpu would render on reports a total, and a usage no \[24\]
     #[test]
     #[cfg(windows)]
     fn the_render_adapter_reports_its_memory() {

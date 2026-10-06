@@ -120,31 +120,19 @@
         // has somewhere to loop, but it is recorded as undeclared so the
         // `loop_mode` default can tell the two apart.
 
-[18] src/sfz.rs:684
-            // **Not the wav's.** A region with no `pitch_keycenter` is rooted on
-            // key 60, the SFZ default, and is not corrected by a fraction of a
-            // semitone, whatever the file's `smpl` chunk says: BASSMIDI plays
-            // one-region SFZs with the chunk saying unity note 60, 72, a pitch
-            // fraction of 50 cents and no chunk at all at one and the same pitch
-            // (measured against BASSMIDI 2026-10-05, key 60
-            // sounding the sample's own 261.7 Hz in all four). This used to take
-            // them from the chunk, read from the wrong offsets -- the SMPTE
-            // fields -- which made the root key 0 for any wav with a chunk, five
-            // octaves high for a region that leaves `pitch_keycenter` out.
-
-[19] src/sfz.rs:706
+[18] src/sfz.rs:695
 /// Every opcode this loader reads. Anything outside it is dropped, and being
 /// dropped silently is how a soundfont ends up sounding wrong for a session:
 /// a widely used piano port carries `fil_veltrack=9600` against an 89 Hz
 /// cutoff, and without it every note plays under an 89 Hz lowpass. So the set
 /// is written down and what falls outside it is counted and reported.
 
-[20] src/sfz.rs:759
+[19] src/sfz.rs:748
     // Read so that a rate and a delay with no depth -- inert in BASSMIDI too,
     // and what most libraries set -- are not reported. A depth or a fade that
     // would actually do something is reported by name in `region_from_opcodes`.
 
-[21] src/sfz.rs:768
+[20] src/sfz.rs:757
 /// Opcodes recognised as deliberately unimplemented, grouped by the feature
 /// they belong to so the log says *why* each one is being dropped.
 ///
@@ -157,51 +145,41 @@
 /// unclassified opcode, so the two can be reported in different words. Not a
 /// character an opcode name can contain.
 
-[22] src/sfz.rs:782
+[21] src/sfz.rs:771
     // What is left of the LFOs once `amplfo_*` and `pitchlfo_*` run on the SF2
     // oscillators: depth and rate driven by a controller or aftertouch, and
     // SFZ v2's numbered `lfoN_*`.
 
-[23] src/sfz.rs:789
+[22] src/sfz.rs:778
     // Effects. `CLAUDE.md` defers these until the throughput phases are done,
     // so they are omitted on purpose rather than missed.
 
-[24] src/sfz.rs:792
+[23] src/sfz.rs:781
     // Per-stage envelope velocity tracking. Not implemented because the unit
     // is genuinely ambiguous between generators -- seconds in SFZ v1's
     // `ampeg_vel2*`, percent in what this library appears to mean -- and
     // guessing wrong silently reshapes every envelope in the bank.
 
-[25] src/sfz.rs:810
+[24] src/sfz.rs:799
     // Voice-management semantics, not DSP. Needs the gate/ordinal path to
     // grow a self-masking rule.
 
-[26] src/sfz.rs:813
+[25] src/sfz.rs:802
     // Crossfade curve selection. The ramps themselves are implemented; only
     // the choice between the linear and equal-power pairings is not.
 
-[27] src/sfz.rs:819
+[26] src/sfz.rs:808
 /// Controller ranges: `loccN`/`hiccN`, which gate a region on a controller's
 /// value, and the `xfin_`/`xfout_` crossfades over one. Ignored without a
 /// word, decided 2026-09-19. BASSMIDI ignores the crossfades too, measured on
 /// every form of them; it does honour the plain range as a gate at the
 /// note-on, and that is left unimplemented on purpose rather than reported.
 
-[28] src/sfz.rs:861
+[27] src/sfz.rs:850
     // `key` is gone by now: `canonicalise` expanded it into the three
     // opcodes below at the level that wrote it.
 
-[29] src/sfz.rs:872
-        // `pitch_keycenter=sample`, SFZ 2: the wav's own unity note, from its `smpl`
-        // chunk. A wav with none is rooted on 60, as a region that says nothing is.
-        // **Not what BASSMIDI does**, which reads the word as key 0 and plays the
-        // region six octaves up (measured against BASSMIDI 2026-10-05, key
-        // 60 on a 440 Hz sample at 14,080 Hz in all four of: unity note 69, 72, and a
-        // pitch fraction of 50 cents on 60 and on 69); the spec is followed here. The
-        // chunk's pitch fraction is not applied, as it is not for a region that names
-        // no keycenter.
-
-[30] src/sfz.rs:911
+[28] src/sfz.rs:890
     // The default here follows the sample: a wav that declares a loop in its
     // `smpl` chunk gets looped. That makes an unrecognised `loop_mode` value
     // fail *towards looping*, which is why `off` mattered so much -- a region
@@ -209,31 +187,31 @@
     // anyway, for the whole length of the note. `off` is not in the SFZ 1.0
     // list but generators emit it constantly and every other player takes it.
 
-[31] src/sfz.rs:930
+[29] src/sfz.rs:909
         // Anything else is a value this build does not know. Falling through
         // to the sample's own loop silently is what hid `off`; say so instead.
 
-[32] src/sfz.rs:938
+[30] src/sfz.rs:917
     // Velocity crossfade. Absent opcodes keep the wide-open defaults, so a
     // region that sets only `xfout_*` still fades in from nothing.
 
-[33] src/sfz.rs:952
+[31] src/sfz.rs:931
     // A backwards pair would make the ramp run the wrong way and, worse, is
     // indistinguishable from a deliberate hard switch once clamped. Report it.
 
-[34] src/sfz.rs:965
+[32] src/sfz.rs:944
     // `lorand`/`hirand` carve [0, 1) into slices; a note-on draws once and
     // keeps the regions whose slice contains the draw. Out-of-order or
     // out-of-range values are clamped rather than rejected: a slice that
     // cannot match would silently remove a sample from the library, which is
     // exactly the class of failure this loader is trying to stop having.
 
-[35] src/sfz.rs:981
+[33] src/sfz.rs:960
         // Widened back to "always matches", not narrowed to "never matches".
         // An empty slice removes a sample from the library for the whole
         // render and nothing downstream would report it.
 
-[36] src/sfz.rs:991
+[34] src/sfz.rs:970
     // These four opcodes are absolute positions in source frames, but the
     // `Region` stores offsets from the sample's own points, and `build_voice`
     // scales those offsets by the resample ratio before applying them. So the
@@ -241,7 +219,7 @@
     // already at pool rate, and mixing the two put an overridden loop up to a
     // resample ratio's worth of frames off its mark.
 
-[37] src/sfz.rs:1016
+[35] src/sfz.rs:995
     // SFZ's amplitude and pitch LFOs, on the two SF2 oscillators the engine
     // already runs. Measured against BASSMIDI 2026-09-15 on a 400 Hz sine: a
     // triangle starting at zero, positive depth going up first, and the depth,
@@ -253,40 +231,40 @@
     // 8.176, which leaves a depth with no rate at the triangle's zero: inert,
     // as it is in BASSMIDI.
 
-[38] src/sfz.rs:1036
+[36] src/sfz.rs:1015
     // Measured too, and not implemented yet: BASSMIDI ramps the depth in
     // linearly over `*_fade` seconds after the delay, and has a third LFO for
     // the filter. Neither SF2 oscillator can carry them, so they are reported
     // only where they would change the sound.
 
-[39] src/sfz.rs:1067
+[37] src/sfz.rs:1046
     // Only lowpasses are implemented. Applying a lowpass where the file asked
     // for a highpass would be worse than applying nothing, so anything else
     // switches the filter off for the region rather than being approximated.
 
-[40] src/sfz.rs:1076
+[38] src/sfz.rs:1055
     // In SFZ `group` only labels; `off_by` is what mutes. The two together,
     // naming the same number, are the self-exclusive case that
     // `exclusive_class` already implements. `group` on its own used to switch
     // exclusion on by itself, which mutes notes the library meant to keep.
 
-[41] src/sfz.rs:1085
+[39] src/sfz.rs:1064
         // Muting a *different* group is a thing this engine cannot express,
         // so it is reported rather than approximated by self-exclusion.
 
-[42] src/sfz.rs:1139
+[40] src/sfz.rs:1118
     /// The samples an `.sfz` names, for the render log: each file once however
     /// many regions and layers name it, under the `<control>` it was written
     /// below, and a disabled region's left out, as `load` leaves it out.
 
-[43] src/sfz.rs:1192
+[41] src/sfz.rs:1171
     /// `$KEY` and `$KEYS` can both be defined. Replacing the shorter one first
     /// welds its leftover characters onto the substituted value.
 
-[44] src/sfz.rs:1200
+[42] src/sfz.rs:1179
     /// Redefinition takes effect from that point on, which is how a library
     /// re-includes one keymap per velocity layer.
 
-[45] src/sfz.rs:1220
+[43] src/sfz.rs:1199
     /// Left in place rather than blanked, so it survives into the resolved
     /// path and the loader can say which variable was never defined.

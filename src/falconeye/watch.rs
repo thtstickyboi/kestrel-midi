@@ -269,26 +269,19 @@ fn write_report_with(
             d.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
         ));
     }
+    out.push_str(&format!("\n== The last {TAIL_LINES} lines of the render log ==\n"));
+    out.push_str(&tail(log, TAIL_LINES));
     // From the render's start, with a minute before it to spare.
     let window_ms = started.elapsed().as_millis() as u64 + 60_000;
-    let records = records.unwrap_or_else(|| system_records(window_ms));
-    let log_tail = tail(log, TAIL_LINES);
-    // [14]
-    if let Some(v) = super::verdict::gpu_reset(&log_tail, &records) {
-        out.push_str(&format!("\n== What this looks like ==\n{v}\n"));
-        let settings = super::report::graphics_text();
-        if !settings.is_empty() {
-            out.push_str(&format!("\nWindows' graphics settings:\n{settings}"));
-        }
-    }
-    out.push_str(&format!("\n== The last {TAIL_LINES} lines of the render log ==\n"));
-    out.push_str(&log_tail);
     out.push_str(if cfg!(windows) {
         "\n== Windows' records from the render's time ==\n"
     } else {
         "\n== The system's records from the render's time ==\n"
     });
-    out.push_str(&records);
+    match records {
+        Some(r) => out.push_str(&r),
+        None => out.push_str(&system_records(window_ms)),
+    }
     out.push_str("\n== The GPU now ==\n");
     out.push_str(&gpu_now());
     let text = redactor(log).apply(&out);
@@ -346,7 +339,7 @@ pub(crate) fn tool(program: &str, args: &[&str], timeout: Duration) -> Result<St
     reader.join().map_err(|_| format!("{program}'s output could not be read"))
 }
 
-/// Windows' own records from the last `window_ms`: GPU driver events from \[15\]
+/// Windows' own records from the last `window_ms`: GPU driver events from \[14\]
 #[cfg(windows)]
 pub(crate) fn windows_events(window_ms: u64) -> String {
     let when = format!("TimeCreated[timediff(@SystemTime) <= {window_ms}]");
@@ -369,7 +362,7 @@ pub(crate) fn windows_events(window_ms: u64) -> String {
     out
 }
 
-/// The system's records from the last `window_ms`, for a report about a \[16\]
+/// The system's records from the last `window_ms`, for a report about a \[15\]
 fn system_records(window_ms: u64) -> String {
     #[cfg(windows)]
     {
@@ -377,7 +370,7 @@ fn system_records(window_ms: u64) -> String {
     }
     #[cfg(not(windows))]
     {
-        // [17]
+        // [16]
         super::posix::death(u32::MAX, Duration::from_millis(window_ms)).1
     }
 }
@@ -398,7 +391,7 @@ fn events(log: &str, query: &str, wanted: impl Fn(&str) -> bool) -> String {
     }
 }
 
-/// `wevtutil /f:text` output, one string per event, each cut to its first 40 \[18\]
+/// `wevtutil /f:text` output, one string per event, each cut to its first 40 \[17\]
 #[cfg_attr(not(windows), allow(dead_code))]
 fn split_events(text: &str) -> Vec<String> {
     let mut events: Vec<Vec<&str>> = Vec::new();

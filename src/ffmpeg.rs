@@ -345,18 +345,7 @@ impl Encoder {
         Ok(())
     }
 
-    /// Feed samples that are already bytes: the `f32le` stream a render fed an \[24\]
-    pub fn write_raw(&mut self, bytes: &[u8]) -> Result<()> {
-        use std::io::Write;
-        let w = self.stdin.as_mut().expect("write after finish");
-        if let Err(e) = w.write_all(bytes) {
-            return Err(self.fail(Some(e)));
-        }
-        self.bytes_in += bytes.len() as u64;
-        Ok(())
-    }
-
-    /// Collect ffmpeg's own complaint, which is the useful half of any failure \[25\]
+    /// Collect ffmpeg's own complaint, which is the useful half of any failure \[24\]
     fn fail(&mut self, io: Option<std::io::Error>) -> anyhow::Error {
         let _ = self.child.kill();
         let err = self
@@ -376,7 +365,7 @@ impl Encoder {
         }
     }
 
-    /// Close the pipe, wait for the encode to finish, and return the size of \[26\]
+    /// Close the pipe, wait for the encode to finish, and return the size of \[25\]
     pub fn finish(mut self) -> Result<u64> {
         use std::io::Write;
         let mut w = self.stdin.take().expect("finish called twice");
@@ -392,7 +381,7 @@ impl Encoder {
         if !status.success() {
             return Err(self.fail(None));
         }
-        // [27]
+        // [26]
         if let Some(h) = self.stderr.take() {
             if let Ok(s) = h.join() {
                 let s = s.trim();
@@ -405,7 +394,7 @@ impl Encoder {
     }
 }
 
-/// True when `name` looks like a path rather than a bare command. Used to keep \[28\]
+/// True when `name` looks like a path rather than a bare command. Used to keep \[27\]
 pub fn looks_like_path(name: &OsStr) -> bool {
     let s = name.to_string_lossy();
     s.contains('/') || s.contains('\\')
@@ -556,20 +545,20 @@ pub mod sha256 {
 pub struct Release {
     pub platform: &'static str,
     pub url: &'static str,
-    /// Pinned digest of the archive, checked before anything is extracted or \[29\]
+    /// Pinned digest of the archive, checked before anything is extracted or \[28\]
     pub sha256: Option<&'static str>,
     pub size_hint: &'static str,
     pub license: &'static str,
     pub origin: &'static str,
 }
 
-/// **No pins are shipped, on purpose.** These URLs are rolling "latest release" \[30\]
+/// **No pins are shipped, on purpose.** These URLs are rolling "latest release" \[29\]
 pub const RELEASES: &[Release] = &[
     Release {
         platform: "windows-x86_64",
         url: "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
         sha256: None,
-        // [31]
+        // [30]
         size_hint: "106 MiB download, 98 MiB installed (measured)",
         license: "GPLv3 (gyan.dev essentials build)",
         origin: "gyan.dev, linked from ffmpeg.org/download.html",
@@ -606,7 +595,7 @@ pub fn release_for_host() -> Option<&'static Release> {
     RELEASES.iter().find(|r| r.platform == want)
 }
 
-/// Where `get-ffmpeg` installs: an `ffmpeg/` directory beside the Kestrel \[32\]
+/// Where `get-ffmpeg` installs: an `ffmpeg/` directory beside the Kestrel \[31\]
 pub fn install_dir() -> Result<PathBuf> {
     let exe = std::env::current_exe().context("locating the kestrel executable")?;
     let dir = exe
@@ -615,7 +604,7 @@ pub fn install_dir() -> Result<PathBuf> {
     Ok(dir.join("ffmpeg"))
 }
 
-/// Compare a computed digest against what the operator or the build pinned. \[33\]
+/// Compare a computed digest against what the operator or the build pinned. \[32\]
 pub fn verify(release: &Release, got: &str, accept: Option<&str>) -> Result<()> {
     let want = accept.or(release.sha256);
     let Some(want) = want else {
@@ -661,7 +650,7 @@ fn run_tool(what: &str, cmd: &mut Command) -> Result<()> {
     Ok(())
 }
 
-/// Download `url` to `dest` with the platform's own curl. \[34\]
+/// Download `url` to `dest` with the platform's own curl. \[33\]
 pub fn download(url: &str, dest: &Path) -> Result<()> {
     run_tool(
         "curl",
@@ -681,7 +670,7 @@ pub fn download(url: &str, dest: &Path) -> Result<()> {
     )
 }
 
-/// Pull just the ffmpeg binary out of `archive` into `into`. \[35\]
+/// Pull just the ffmpeg binary out of `archive` into `into`. \[34\]
 pub fn extract_binary(archive: &Path, into: &Path) -> Result<PathBuf> {
     std::fs::create_dir_all(into).with_context(|| format!("creating {}", into.display()))?;
     run_tool(
@@ -691,19 +680,19 @@ pub fn extract_binary(archive: &Path, into: &Path) -> Result<PathBuf> {
             &archive.to_string_lossy(),
             "-C",
             &into.to_string_lossy(),
-            // [36]
+            // [35]
             &format!("*{}", exe_name()),
         ]),
     )?;
 
-    // [37]
+    // [36]
     let found = find_binary(into, 6)
         .with_context(|| format!("no {} found under {}", exe_name(), into.display()))?;
     let want = into.join(exe_name());
     if found != want {
         std::fs::rename(&found, &want)
             .with_context(|| format!("moving {} to {}", found.display(), want.display()))?;
-        // [38]
+        // [37]
         if let Some(mut p) = found.parent() {
             while p != into && std::fs::remove_dir(p).is_ok() {
                 match p.parent() {
@@ -773,7 +762,7 @@ mod tests {
         }
     }
 
-    /// FIPS-180-4 vectors, plus a multi-block case that catches a wrong length \[39\]
+    /// FIPS-180-4 vectors, plus a multi-block case that catches a wrong length \[38\]
     #[test]
     fn sha256_matches_the_published_vectors() {
         fn hex(s: &[u8]) -> String {
@@ -843,7 +832,7 @@ mod tests {
         assert!(release_for_host().is_some());
     }
 
-    /// The wildcard extract plus relocate, which is the fiddly half of \[40\]
+    /// The wildcard extract plus relocate, which is the fiddly half of \[39\]
     #[test]
     fn extract_binary_finds_and_flattens_a_versioned_archive() {
         let base = std::env::temp_dir().join(format!("kestrel-xtest-{}", std::process::id()));
@@ -851,7 +840,7 @@ mod tests {
         let nested = base.join("src").join("ffmpeg-9.9-essentials_build").join("bin");
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(nested.join(exe_name()), b"not really ffmpeg").unwrap();
-        // [41]
+        // [40]
         std::fs::write(nested.join("ffplay-decoy.txt"), b"x").unwrap();
 
         let archive = base.join("a.tar");
@@ -874,14 +863,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// The bug this guards, found 2026-09-02: `.opus` rendered at the 0 dBFS \[42\]
+    /// The bug this guards, found 2026-09-02: `.opus` rendered at the 0 dBFS \[41\]
     #[test]
     fn every_lossy_container_is_flagged_and_flac_is_not() {
         assert!(!preset_for("flac").unwrap().lossy, "flac is lossless");
         for ext in ["opus", "mp3", "ogg", "m4a"] {
             assert!(preset_for(ext).unwrap().lossy, "{ext} is lossy");
         }
-        // [43]
+        // [42]
         assert!(
             (-2.0..=-0.5).contains(&LOSSY_CEILING_DB),
             "{LOSSY_CEILING_DB}"

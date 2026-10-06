@@ -54,11 +54,9 @@ pub struct Options {
     pub out_dir: Option<PathBuf>,
     /// The administrator step, once the user has agreed to it: this \[2\]
     pub elevate_with: Option<PathBuf>,
-    /// The executable that has `falconeye-selftest`, which runs each GPU's \[3\]
-    pub isolate_with: Option<PathBuf>,
 }
 
-/// Collect the report and write it. `say` hears each step as it starts. \[4\]
+/// Collect the report and write it. `say` hears each step as it starts. \[3\]
 pub fn build(opts: Options, say: &mut dyn FnMut(&str)) -> Result<PathBuf> {
     let mut sections = Vec::new();
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
@@ -93,14 +91,14 @@ pub fn build(opts: Options, say: &mut dyn FnMut(&str)) -> Result<PathBuf> {
     if opts.self_test {
         say("GPU self-test");
         let dir = std::env::temp_dir().join(format!("kestrel-selftest-{}", std::process::id()));
-        // [5]
+        // [4]
         let level = log::max_level();
         log::set_max_level(log::LevelFilter::Warn);
-        match selftest::Runner::new(&dir, opts.isolate_with.clone()) {
-            Ok(runner) => {
+        match selftest::prepare(&dir) {
+            Ok(bank) => {
                 for (name, backend, max_voices) in &adapters.1 {
                     say(&format!("  {name} ({backend})"));
-                    let outcome = runner.run(&dir, name, backend, *max_voices, &mut |l| say(&format!("    {l}")));
+                    let outcome = selftest::run(&bank, &dir, name, backend, *max_voices, &mut |l| say(&format!("    {l}")));
                     say(&format!("    {}", outcome.verdict));
                     sections.push(self_test_section(&outcome));
                     tests.push(outcome);
@@ -147,7 +145,7 @@ pub fn build(opts: Options, say: &mut dyn FnMut(&str)) -> Result<PathBuf> {
         } else {
             data = redact.apply(&String::from_utf8_lossy(&data)).into_bytes();
         }
-        // [6]
+        // [5]
         let at = if name.contains('/') { name.clone() } else { format!("logs/{name}") };
         zip.add(&redact.apply(&at), &data)?;
     }
@@ -171,7 +169,7 @@ fn render_text(sections: &[Section], created: &str) -> String {
     out
 }
 
-/// `reports` beside the logs: beside the executable, or in local app data \[7\]
+/// `reports` beside the logs: beside the executable, or in local app data \[6\]
 fn out_dir() -> Result<PathBuf> {
     for logs in super::renderlog::default_dirs() {
         let d = logs.with_file_name("reports");
@@ -198,7 +196,7 @@ fn kestrel() -> Section {
     s
 }
 
-/// Windows' facts, read from the registry and kernel32 directly -- not \[8\]
+/// Windows' facts, read from the registry and kernel32 directly -- not \[7\]
 #[cfg(windows)]
 fn windows() -> Section {
     use super::winsys::{memory, power, reg_dword, reg_string};
@@ -270,13 +268,13 @@ fn windows() -> Section {
     s
 }
 
-/// Linux's or macOS's facts, from files and the system's own tools; see \[9\]
+/// Linux's or macOS's facts, from files and the system's own tools; see \[8\]
 #[cfg(not(windows))]
 fn windows() -> Section {
     super::posix::os_section()
 }
 
-/// Every adapter on every backend, and which of them the self-test runs on: \[10\]
+/// Every adapter on every backend, and which of them the self-test runs on: \[9\]
 fn adapters() -> (Section, Vec<(String, String, u32)>) {
     let mut s = Section::new("GPUs, as wgpu sees them on every backend");
     let mut text = String::new();
@@ -320,11 +318,6 @@ fn adapters() -> (Section, Vec<(String, String, u32)>) {
                 mib(m.process_budget)
             ));
         }
-        // [11]
-        match crate::gpu::memory_for(&i) {
-            Some(b) => text.push_str(&format!("  memory a render plans on {} MiB\n", b >> 20)),
-            None => text.push_str("  memory a render plans on: no figure on this system\n"),
-        }
         let hardware = i.device_type != wgpu::DeviceType::Cpu;
         let backend = match i.backend {
             wgpu::Backend::Vulkan => Some("vulkan"),
@@ -344,7 +337,7 @@ fn yes(b: bool) -> &'static str {
     if b { "yes" } else { "no" }
 }
 
-/// `nvidia-smi`, where NVIDIA's driver is installed: the state now, the link, \[12\]
+/// `nvidia-smi`, where NVIDIA's driver is installed: the state now, the link, \[10\]
 fn nvidia() -> Section {
     let mut s = Section::new("NVIDIA (nvidia-smi)");
     let query = "--query-gpu=name,driver_version,vbios_version,pstate,temperature.gpu,power.draw,\
@@ -381,7 +374,7 @@ fn count_processes(table: &str) -> usize {
         .count()
 }
 
-/// Windows' timeout settings and GPU scheduling. Absent means Windows' \[13\]
+/// Windows' timeout settings and GPU scheduling. Absent means Windows' \[11\]
 #[cfg(windows)]
 fn graphics_settings() -> Section {
     let mut s = Section::new("Windows' graphics settings");
@@ -400,13 +393,6 @@ fn graphics_settings() -> Section {
     Section::new("Graphics settings (Windows only)")
 }
 
-/// `graphics_settings` as lines, for a crash report: it is the first thing \[14\]
-pub(crate) fn graphics_text() -> String {
-    let s = graphics_settings();
-    let width = s.items.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0);
-    s.items.iter().map(|(k, v)| format!("{k:<width$}  {v}\n")).collect()
-}
-
 fn driver_history() -> Section {
     let mut s = Section::new("Driver resets and Kestrel crashes, last 30 days");
     #[cfg(windows)]
@@ -420,7 +406,7 @@ fn driver_history() -> Section {
     s
 }
 
-/// The render logs and FalconEye's reports: listed, and the recent ones added \[15\]
+/// The render logs and FalconEye's reports: listed, and the recent ones added \[12\]
 fn kestrel_history(files: &mut Vec<(String, Vec<u8>)>) -> (Section, Vec<String>) {
     let mut s = Section::new("Kestrel's render logs and reports");
     let mut found: Vec<(SystemTime, PathBuf)> = Vec::new();
@@ -477,7 +463,7 @@ fn kestrel_history(files: &mut Vec<(String, Vec<u8>)>) -> (Section, Vec<String>)
     (s, keep)
 }
 
-/// Run the administrator step and take in what it read: its listing as the \[16\]
+/// Run the administrator step and take in what it read: its listing as the \[13\]
 fn administrator_step(exe: &Path, files: &mut Vec<(String, Vec<u8>)>) -> Section {
     use super::winsys::{run_elevated, Elevated};
     let mut s = Section::new("Windows' own GPU crash records (administrator)");

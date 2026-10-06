@@ -315,13 +315,7 @@ fn machine_report(io: &mut dyn Io) {
     }
     style::blank();
     let built = report::build(
-        report::Options {
-            self_test,
-            extra: vec![settings::report_section()],
-            out_dir: None,
-            elevate_with,
-            isolate_with: std::env::current_exe().ok(),
-        },
+        report::Options { self_test, extra: vec![settings::report_section()], out_dir: None, elevate_with },
         &mut |line| style::say(vec![c(line, DIM)]),
     );
     style::blank();

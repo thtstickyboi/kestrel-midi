@@ -37,8 +37,6 @@ const COMMANDS: &[&str] = &[
     "load_soundfonts",
     "unload",
     "render",
-    "resume",
-    "batch",
     "cancel",
     "set_interval",
     "snapshot",
@@ -52,7 +50,6 @@ const NOT_OPTIONS: &[&str] = &[
     "soundfont",
     "sf-programs",
     "out",
-    "out-format",
     "progress",
     "progress-interval",
     "force-cli",
@@ -243,7 +240,7 @@ pub fn run() -> Result<()> {
                 respond_ok(&id, json!({}));
                 return Ok(());
             }
-            "cancel" => cancel(&id, req, &state),
+            "cancel" => cancel(&id, &state),
             "set_interval" => set_interval(&id, req, &state),
             "snapshot" => snapshot(&id, &state),
             "status" => status(&id, &state),
@@ -269,7 +266,7 @@ pub fn run() -> Result<()> {
                     }
                 }));
             }
-            "load_soundfonts" | "scan_midi" | "render" | "resume" | "batch" => {
+            "load_soundfonts" | "scan_midi" | "render" => {
                 start_long(cmd, &id, req, &state, &mut worker)
             }
             other => respond_err(&id, format!("unknown command {other:?}; the ready line lists the commands")),
@@ -303,7 +300,6 @@ enum Long {
     Load(Box<LoadJob>),
     Scan(ScanJob),
     Render(Box<RenderJob>),
-    Batch(Box<BatchJob>),
 }
 
 struct LoadJob {
@@ -352,14 +348,6 @@ fn start_long(
             prepare_load(req).map(|l| Long::Load(Box::new(l))),
         ),
         "scan_midi" => ("scan_midi", prepare_scan(req).map(Long::Scan)),
-        "batch" => (
-            "batch",
-            prepare_batch(req, state).map(|b| Long::Batch(Box::new(b))),
-        ),
-        "resume" => (
-            "resume",
-            prepare_resume(req, state).map(|r| Long::Render(Box::new(r))),
-        ),
         _ => (
             "render",
             prepare_render(req, state).map(|r| Long::Render(Box::new(r))),
@@ -402,7 +390,6 @@ fn start_long(
                 monitor.expect("a render has a monitor"),
                 rx.expect("a render has a control channel"),
             ),
-            Long::Batch(job) => run_batch(*job, &id, &state, &cancel),
         }))
         .unwrap_or_else(|payload| {
             Err(anyhow!(
@@ -516,10 +503,7 @@ fn prepare_render(req: &Map<String, Value>, state: &Shared) -> Result<RenderJob>
 
     let argv = render_argv(&midi, &soundfonts, sf_programs.as_deref(), &out, &flags);
     kestrel::falconeye::renderlog::set_args(&argv);
-    // [20]
-    let args = parse_render(argv.clone())?;
-    let mut job = args.to_job()?;
-    args.with_checkpoints(&mut job, argv);
+    let job = parse_render(argv)?.to_job()?;
     let plan = session::plan(&job)?;
     let budget = plan.cfg.sample_pool_budget;
     let interval_ms = match req.get("progress_interval_ms") {
@@ -536,36 +520,6 @@ fn prepare_render(req: &Map<String, Value>, state: &Shared) -> Result<RenderJob>
             soundfonts,
             sf_programs,
             flags: load_flags(&flags),
-            budget,
-        },
-        interval_ms,
-    })
-}
-
-/// `resume`: a render continued from the checkpoint it saved, as the command \[21\]
-fn prepare_resume(req: &Map<String, Value>, state: &Shared) -> Result<RenderJob> {
-    let file = PathBuf::from(str_param(req, "file")?);
-    let crate::render::Resuming { args, job, argv, .. } = crate::render::resume_job(&file)?;
-    kestrel::falconeye::renderlog::set_args(&argv);
-    let plan = session::plan(&job)?;
-    let budget = plan.cfg.sample_pool_budget;
-    let interval_ms = match req.get("progress_interval_ms") {
-        None | Some(Value::Null) => lock(state).interval_ms,
-        Some(v) => feed::clamp_interval(
-            v.as_u64()
-                .context("\"progress_interval_ms\" is a whole number of milliseconds")?,
-        ),
-    };
-    // [22]
-    let mut flags: Vec<String> = argv.iter().map(|a| a.to_string_lossy().into_owned()).collect();
-    flags.sort();
-    Ok(RenderJob {
-        job,
-        plan,
-        key: LoadKey {
-            soundfonts: args.soundfont.clone(),
-            sf_programs: args.sf_programs.clone(),
-            flags,
             budget,
         },
         interval_ms,
@@ -679,138 +633,7 @@ fn render(job: RenderJob, id: &Value, state: &Shared, monitor: Arc<Monitor>, rx:
     let summary = result?;
     let mut value = serde_json::to_value(&summary)?;
     value["out"] = json!(out);
-    // [23]
-    let (spec, merged) = match &job.stems {
-        Some(stems) => (stems.resume.as_ref(), stems.merge),
-        None => (job.checkpoint.as_ref(), true),
-    };
-    if let Some(spec) = spec {
-        let path = spec.path.clone().unwrap_or_else(|| kestrel::resume::default_path(&job.out, &job.midi, merged));
-        if path.exists() {
-            value["checkpoint"] = json!(path);
-        }
-    }
     Ok(value)
-}
-
-// ---- Batch ----------------------------------------------------------------
-
-struct BatchJob {
-    plan: kestrel::batch::BatchPlan,
-    /// Whether the session's loaded soundfonts are this batch's one set, which \[24\]
-    keeps_loaded: bool,
-    interval_ms: u64,
-}
-
-/// What `jobs` and the rest of a `batch` request ask for, checked and planned \[25\]
-fn prepare_batch(req: &Map<String, Value>, state: &Shared) -> Result<BatchJob> {
-    let flags = option_flags(req.get("options"))?;
-    let entries_json = match req.get("jobs") {
-        Some(Value::Array(a)) if !a.is_empty() => Value::Array(a.clone()),
-        _ => bail!(
-            "\"jobs\" is a non-empty list of {{\"midi\": ...}}, each with optional soundfonts, \
-             sf_programs, out and seconds"
-        ),
-    };
-    let listed: Vec<kestrel::batch::FileEntry> =
-        serde_json::from_value(entries_json).map_err(|e| anyhow!("\"jobs\": {e}"))?;
-
-    // Soundfonts for a job that names none: the request's, else the ones loaded.
-    let (fonts, programs) = match soundfonts_param(req)? {
-        Some(fonts) => (fonts, programs_param(req)?),
-        None => {
-            let st = lock(state);
-            match st.loaded.as_ref() {
-                Some(l) => (
-                    l.key.soundfonts.clone(),
-                    programs_param(req)?.or_else(|| l.key.sf_programs.clone()),
-                ),
-                None => (Vec::new(), programs_param(req)?),
-            }
-        }
-    };
-    let entries = kestrel::batch::entries_from(&fonts, programs.as_deref(), &listed, &|p| p.to_path_buf())?;
-
-    let out_dir = match req.get("out") {
-        None | Some(Value::Null) => None,
-        Some(_) => Some(PathBuf::from(str_param(req, "out")?)),
-    };
-    let ext = match req.get("out_format") {
-        None | Some(Value::Null) => "wav".to_string(),
-        Some(_) => str_param(req, "out_format")?.trim_start_matches('.').to_ascii_lowercase(),
-    };
-
-    // [26]
-    let first = &entries[0];
-    let argv = render_argv(
-        PLACEHOLDER_MIDI.as_ref(),
-        &first.soundfonts,
-        first.sf_programs.as_deref(),
-        PLACEHOLDER_OUT.as_ref(),
-        &flags,
-    );
-    kestrel::falconeye::renderlog::set_args(&argv);
-    let template = parse_render(argv)?.to_job()?;
-    let jobs = kestrel::batch::jobs_from(&template, &entries, out_dir.as_deref(), &ext)?;
-    let mut plan = kestrel::batch::plan(jobs)?;
-
-    // When every job uses the set that is loaded, the batch takes it.
-    let mut keeps_loaded = false;
-    if plan.groups().len() == 1 {
-        let key = LoadKey {
-            soundfonts: first.soundfonts.clone(),
-            sf_programs: first.sf_programs.clone(),
-            flags: load_flags(&flags),
-            budget: template.cfg.sample_pool_budget,
-        };
-        let loaded = lock(state)
-            .loaded
-            .as_ref()
-            .filter(|l| l.key == key)
-            .map(|l| Arc::clone(&l.bank));
-        if let Some(bank) = loaded {
-            keeps_loaded = plan.preload(bank);
-        }
-    }
-    let interval_ms = match req.get("progress_interval_ms") {
-        None | Some(Value::Null) => lock(state).interval_ms,
-        Some(v) => feed::clamp_interval(
-            v.as_u64()
-                .context("\"progress_interval_ms\" is a whole number of milliseconds")?,
-        ),
-    };
-    Ok(BatchJob { plan, keeps_loaded, interval_ms })
-}
-
-/// Run a batch, its telemetry written by `feed::BatchFeed`: each job's lines with \[27\]
-fn run_batch(job: BatchJob, id: &Value, state: &Shared, cancel: &Arc<AtomicBool>) -> Result<Value> {
-    let BatchJob { plan, keeps_loaded, interval_ms } = job;
-    if !keeps_loaded {
-        lock(state).loaded = None;
-    }
-    // [28]
-    let session_interval_ms = lock(state).interval_ms;
-    let on_stage: feed::OnStageFn = {
-        let state = Arc::clone(state);
-        Box::new(move |monitor, tx| {
-            let mut st = lock(&state);
-            if let Some(r) = st.running.as_mut() {
-                r.monitor = Some(Arc::clone(monitor));
-                r.control = Some(tx);
-            }
-            (st.interval_ms != session_interval_ms).then_some(st.interval_ms)
-        })
-    };
-    let mut obs = feed::BatchFeed::new(
-        Some(id.clone()),
-        Arc::new(|line: &Value| send(line)),
-        Arc::clone(cancel),
-        interval_ms,
-        &plan,
-        on_stage,
-    );
-    let summary = kestrel::batch::run(plan, &mut obs);
-    Ok(feed::batch_result(&summary))
 }
 
 /// Read a MIDI to its end for what it holds, which only a full read can say.
@@ -919,7 +742,7 @@ fn adapters() -> Result<Value> {
     Ok(json!({"adapters": adapters}))
 }
 
-/// The guided renderer's update check, on the person's update ring from \[29\]
+/// The guided renderer's update check, on the person's update ring from \[20\]
 fn check_update() -> Result<Value> {
     if crate::update::opted_out() {
         bail!("update checks are turned off by {}", crate::update::OPT_OUT);
@@ -979,7 +802,7 @@ fn inspect_midi(req: &Map<String, Value>) -> Result<Value> {
             "format": m.format,
             "tracks": m.tracks,
             "division": division_value(m.division),
-            // [30]
+            // [21]
             "warnings": m.notes,
         }),
         Verdict::Invalid { path, reason } => json!({
@@ -1010,7 +833,7 @@ struct OptionSpec {
     help: String,
 }
 
-/// Every option `render` takes that a request passes in `options`, read off \[31\]
+/// Every option `render` takes that a request passes in `options`, read off \[22\]
 fn option_specs() -> Vec<OptionSpec> {
     let cli = Cli::command();
     let render = cli
@@ -1080,7 +903,7 @@ fn options() -> Value {
 
 // ---- Options to arguments -------------------------------------------------
 
-/// Turn `options` into the arguments the command line would have been given. \[32\]
+/// Turn `options` into the arguments the command line would have been given. \[23\]
 fn option_flags(options: Option<&Value>) -> Result<Vec<String>> {
     let map = match options {
         None | Some(Value::Null) => return Ok(Vec::new()),
@@ -1113,7 +936,7 @@ fn option_flags(options: Option<&Value>) -> Result<Vec<String>> {
             Value::Null => continue,
             Value::String(s) => s.clone(),
             Value::Bool(b) => b.to_string(),
-            // [33]
+            // [24]
             Value::Number(n) => match n.as_f64() {
                 Some(f) if !n.is_i64() && !n.is_u64() && f.fract() == 0.0 && f.abs() < 9.0e15 => {
                     format!("{}", f as i64)
@@ -1188,14 +1011,11 @@ fn render_argv(
 fn parse_render(argv: Vec<OsString>) -> Result<RenderArgs> {
     match Cli::try_parse_from(argv) {
         Ok(cli) => match cli.cmd {
-            Cmd::Render(args) => match args.not_a_single_render() {
-                Some(why) => Err(anyhow::anyhow!("{why}")),
-                None => Ok(args),
-            },
+            Cmd::Render(args) => Ok(args),
             _ => unreachable!("the argument list names the render subcommand"),
         },
         Err(e) => {
-            // [34]
+            // [25]
             let text = e.render().to_string();
             let kept: Vec<&str> = text
                 .lines()
@@ -1210,34 +1030,21 @@ fn parse_render(argv: Vec<OsString>) -> Result<RenderArgs> {
 
 // ---- Controls -------------------------------------------------------------
 
-/// `cancel`. With `"discard": true` a render or a resume that saves its progress \[35\]
-fn cancel(id: &Value, req: &Map<String, Value>, state: &Shared) {
-    let discard = match req.get("discard") {
-        None => false,
-        Some(v) => match v.as_bool() {
-            Some(b) => b,
-            None => return respond_err(id, "\"discard\" is true or false"),
-        },
-    };
+fn cancel(id: &Value, state: &Shared) {
     let st = lock(state);
     match &st.running {
         Some(r) if r.cmd == "load_soundfonts" => {
             respond_err(id, "a soundfont load cannot be stopped part way; it answers when it is done")
         }
         Some(r) => {
-            let discard = discard && matches!(r.cmd, "render" | "resume");
             r.cancel.store(true, Ordering::Relaxed);
             if let Some(m) = &r.monitor {
-                if discard {
-                    m.cancel_discarding();
-                } else {
-                    m.cancel();
-                }
+                m.cancel();
             }
             if let Some(c) = &r.control {
                 let _ = c.send(FeedCommand::Cancelled);
             }
-            respond_ok(id, json!({"cancelling": r.id, "cmd": r.cmd, "discard": discard}));
+            respond_ok(id, json!({"cancelling": r.id, "cmd": r.cmd}));
         }
         None => respond_err(id, "nothing is running"),
     }

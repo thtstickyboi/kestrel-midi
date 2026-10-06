@@ -618,10 +618,8 @@ fn load_sample_channels(
             loop_end: le.min(len),
             declared_loop,
             rate: if pool_rate != 0 { pool_rate } else { src_rate },
-            // [18]
-            root_key: 60,
-            unity_note: w.root_key,
-            correction_cents: 0.0,
+            root_key: w.root_key.unwrap_or(60),
+            correction_cents: w.fine_tune_cents,
             resample_ratio: ratio as f32,
             name: spath.file_name().unwrap_or_default().to_string_lossy().into_owned(),
         });
@@ -631,7 +629,7 @@ fn load_sample_channels(
     Ok(out)
 }
 
-/// Every opcode this loader reads. Anything outside it is dropped, and being \[19\]
+/// Every opcode this loader reads. Anything outside it is dropped, and being \[18\]
 const KNOWN_OPCODES: &[&str] = &[
     "sample",
     "lokey",
@@ -680,25 +678,25 @@ const KNOWN_OPCODES: &[&str] = &[
     "pitchlfo_depth",
     "pitchlfo_delay",
     "pitchlfo_fade",
-    // [20]
+    // [19]
     "fillfo_freq",
     "fillfo_delay",
     "fillfo_depth",
     "fillfo_fade",
 ];
 
-/// Opcodes recognised as deliberately unimplemented, grouped by the feature \[21\]
+/// Opcodes recognised as deliberately unimplemented, grouped by the feature \[20\]
 const UNIMPL_TAG: char = '';
 
 const UNIMPLEMENTED_GROUPS: &[(&str, &[&str])] = &[
-    // [22]
+    // [21]
     (
         "LFO controller modulation",
         &["amplfo_", "fillfo_", "pitchlfo_", "pitchlfo", "amplfo", "fillfo", "lfo"],
     ),
-    // [23]
+    // [22]
     ("effects", &["reverb_", "chorus_", "delay_", "send_effect", "send", "effect"]),
-    // [24]
+    // [23]
     (
         "envelope veltrack",
         &[
@@ -713,14 +711,14 @@ const UNIMPLEMENTED_GROUPS: &[(&str, &[&str])] = &[
             "gain_veltrack",
         ],
     ),
-    // [25]
+    // [24]
     ("voice masking", &["note_selfmask", "note_polyphony", "polyphony"]),
-    // [26]
+    // [25]
     ("crossfade curve", &["xf_velcurve", "xf_keycurve", "xf_cccurve"]),
     ("CC labelling", &["set_cc", "label_cc", "label_key"]),
 ];
 
-/// Controller ranges: `loccN`/`hiccN`, which gate a region on a controller's \[27\]
+/// Controller ranges: `loccN`/`hiccN`, which gate a region on a controller's \[26\]
 const SILENT_CC_RANGES: &[&str] =
     &["locc", "hicc", "xfin_locc", "xfin_hicc", "xfout_locc", "xfout_hicc"];
 
@@ -758,7 +756,7 @@ fn region_from_opcodes(
         ..Default::default()
     };
 
-    // [28]
+    // [27]
     if let Some(k) = ops.key("lokey") {
         r.key_lo = k.clamp(0, 127) as u8;
     }
@@ -767,9 +765,6 @@ fn region_from_opcodes(
     }
     if let Some(k) = ops.key("pitch_keycenter") {
         r.root_key_override = k.clamp(0, 127) as i16;
-    } else if ops.get("pitch_keycenter").is_some_and(|v| v.trim().eq_ignore_ascii_case("sample")) {
-        // [29]
-        r.root_key_override = info.unity_note.map_or(info.root_key as i16, i16::from);
     }
     if r.root_key_override < 0 {
         r.root_key_override = info.root_key as i16;
@@ -800,7 +795,7 @@ fn region_from_opcodes(
         r.amp_veltrack = v.clamp(-100.0, 100.0);
     }
 
-    // [30]
+    // [28]
     r.loop_mode = match ops.get("loop_mode").unwrap_or("") {
         "loop_continuous" => LoopMode::Continuous,
         "loop_sustain" => LoopMode::UntilRelease,
@@ -814,14 +809,14 @@ fn region_from_opcodes(
                 LoopMode::NoLoop
             }
         }
-        // [31]
+        // [29]
         other => {
             unhandled.push(format!("loop_mode={other} (unknown, treated as no_loop)"));
             LoopMode::NoLoop
         }
     };
 
-    // [32]
+    // [30]
     if let Some(v) = ops.i32("xfin_lovel") {
         r.xfin_lo = v.clamp(0, 127) as u8;
     }
@@ -834,7 +829,7 @@ fn region_from_opcodes(
     if let Some(v) = ops.i32("xfout_hivel") {
         r.xfout_hi = v.clamp(0, 127) as u8;
     }
-    // [33]
+    // [31]
     if r.xfin_hi < r.xfin_lo {
         unhandled.push("xfin_hivel < xfin_lovel (ignored)".to_string());
         r.xfin_lo = 0;
@@ -846,7 +841,7 @@ fn region_from_opcodes(
         r.xfout_hi = 127;
     }
 
-    // [34]
+    // [32]
     if let Some(v) = ops.f32("lorand") {
         r.rand_lo = v.clamp(0.0, 1.0);
     }
@@ -858,7 +853,7 @@ fn region_from_opcodes(
             "lorand={} > hirand={} (empty range, ignored)",
             r.rand_lo, r.rand_hi
         ));
-        // [35]
+        // [33]
         r.rand_lo = 0.0;
         r.rand_hi = 1.0;
     }
@@ -866,7 +861,7 @@ fn region_from_opcodes(
     if let Some(o) = ops.i32("offset") {
         r.addr_start = o.max(0);
     }
-    // [36]
+    // [34]
     let to_source = |resampled: u32| {
         if info.resample_ratio > 0.0 {
             (resampled as f32 / info.resample_ratio).round() as i32
@@ -886,7 +881,7 @@ fn region_from_opcodes(
         r.addr_loop_end = le - to_source(info.loop_end);
     }
 
-    // [37]
+    // [35]
     if let Some(d) = ops.f32("amplfo_depth") {
         r.mod_lfo_to_volume = -10.0 * d;
         r.mod_lfo_hz = ops.f32("amplfo_freq").unwrap_or(0.0).max(0.0);
@@ -897,7 +892,7 @@ fn region_from_opcodes(
         r.vib_lfo_hz = ops.f32("pitchlfo_freq").unwrap_or(0.0).max(0.0);
         r.vib_lfo_delay = ops.f32("pitchlfo_delay").unwrap_or(0.0).max(0.0);
     }
-    // [38]
+    // [36]
     if ops.f32("fillfo_depth").is_some_and(|d| d != 0.0) {
         unhandled.push("fillfo_depth (the filter LFO is not implemented)".to_string());
     }
@@ -925,20 +920,20 @@ fn region_from_opcodes(
     if let Some(vt) = ops.f32("fil_veltrack") {
         r.filter_veltrack_cents = vt.clamp(-9600.0, 9600.0);
     }
-    // [39]
+    // [37]
     if let Some(kind) = ops.get("fil_type") {
         if !kind.starts_with("lpf") {
             r.filter_fc_cents = 13500.0;
             r.filter_veltrack_cents = 0.0;
         }
     }
-    // [40]
+    // [38]
     let group_id = ops.i32("group").unwrap_or(0).clamp(0, 255);
     match ops.i32("off_by") {
         Some(off) if off.clamp(0, 255) == group_id && group_id > 0 => {
             r.exclusive_class = group_id as u8;
         }
-        // [41]
+        // [39]
         Some(_) => unhandled.push("off_by (cross-group, not implemented)".to_string()),
         None => {}
     }
@@ -991,7 +986,7 @@ mod tests {
         }
     }
 
-    /// The samples an `.sfz` names, for the render log: each file once however \[42\]
+    /// The samples an `.sfz` names, for the render log: each file once however \[40\]
     #[test]
     fn sample_files_lists_each_named_sample_once() {
         let dir = std::env::temp_dir().join(format!("kestrel_sfz_sample_files_{}", std::process::id()));
@@ -1042,14 +1037,14 @@ mod tests {
         assert_eq!(out, ["sample=WYV-64-64.wav"]);
     }
 
-    /// `$KEY` and `$KEYS` can both be defined. Replacing the shorter one first \[43\]
+    /// `$KEY` and `$KEYS` can both be defined. Replacing the shorter one first \[41\]
     #[test]
     fn longest_name_wins() {
         let out = expand(&["#define $KEY a", "#define $KEYS b", "sample=$KEYS/$KEY.wav"]);
         assert_eq!(out, ["sample=b/a.wav"]);
     }
 
-    /// Redefinition takes effect from that point on, which is how a library \[44\]
+    /// Redefinition takes effect from that point on, which is how a library \[42\]
     #[test]
     fn redefinition_applies_from_that_point() {
         let out = expand(&["#define $L 1", "a=$L", "#define $L 2", "b=$L"]);
@@ -1068,7 +1063,7 @@ mod tests {
         assert_eq!(out, ["sample=root/v1/s.wav"]);
     }
 
-    /// Left in place rather than blanked, so it survives into the resolved \[45\]
+    /// Left in place rather than blanked, so it survives into the resolved \[43\]
     #[test]
     fn an_undefined_name_survives_for_the_report() {
         let out = expand(&["#define $A a", "sample=$A-$NOPE.wav"]);
