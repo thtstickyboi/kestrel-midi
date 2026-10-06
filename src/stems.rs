@@ -14,14 +14,16 @@ use crate::mix::Mix;
 use crate::gpu::{GpuBatch, GpuShared, LaneBackend, LANES_MAX};
 use crate::midi::TrackSelection;
 use crate::phase::PhaseBank;
+use crate::resume;
 use crate::session::{fit_to_bank, load_layered, Job, Observer, Phase, Plan, Setup, Sink, Summary, TrackNow, TrackProgress};
 use crate::tracks::{self, TrackScan};
 use crate::wav;
 use anyhow::{anyhow, bail, Context, Result};
 use std::cmp::Reverse;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 const TARGET: &str = "kestrel";
@@ -32,6 +34,10 @@ const VRAM_MARGIN: u64 = 512 << 20;
 /// One stem to render.
 struct Stem {
     track: usize,
+    /// Where it is in the list of stems being rendered.
+    index: usize,
+    /// Merging only, on a resume: blocks of this track already in the mix, which \[3\]
+    skip_below: u64,
     sel: TrackSelection,
     /// Its file; unused when merging.
     path: PathBuf,
@@ -41,13 +47,14 @@ struct Stem {
     name: Option<String>,
     /// Note-ons it keeps after `--min-velocity`: the order stems start in.
     notes: u64,
-    /// The blocks its notes span, both ends counted: from the one its first \[3\]
+    /// The blocks its notes span, both ends counted: from the one its first \[4\]
     span: (u64, u64),
 }
 
 /// How one stem went.
 #[derive(Debug, Default)]
 struct Done {
+    track: usize,
     bytes: u64,
     audio_secs: f64,
     notes: u64,
@@ -63,13 +70,52 @@ struct Done {
     cancelled: bool,
 }
 
-/// A job's renderer. A GPU job keeps one batch of lanes for every stem it \[4\]
+impl Done {
+    /// What a checkpoint keeps of a finished track.
+    fn stats(&self) -> resume::Stats {
+        resume::Stats {
+            bytes: self.bytes,
+            audio_secs: self.audio_secs,
+            notes: self.notes,
+            notes_skipped: self.notes_skipped,
+            voices_spawned: self.voices_spawned,
+            peak_voices: self.peak_voices,
+            stolen: self.stolen,
+            dropped: self.dropped,
+            peak_level: self.peak_level,
+            clipped: self.clipped,
+            silent_blocks: self.silent_blocks,
+            blocks: self.blocks,
+        }
+    }
+
+    fn restored(track: usize, s: &resume::Stats) -> Done {
+        Done {
+            track,
+            bytes: s.bytes,
+            audio_secs: s.audio_secs,
+            notes: s.notes,
+            notes_skipped: s.notes_skipped,
+            voices_spawned: s.voices_spawned,
+            peak_voices: s.peak_voices,
+            stolen: s.stolen,
+            dropped: s.dropped,
+            peak_level: s.peak_level,
+            clipped: s.clipped,
+            silent_blocks: s.silent_blocks,
+            blocks: s.blocks,
+            cancelled: false,
+        }
+    }
+}
+
+/// A job's renderer. A GPU job keeps one batch of lanes for every stem it \[5\]
 enum JobBackend {
     Gpu(Box<GpuBatch>),
     Cpu,
 }
 
-/// What the thread `run` was called on reads to report progress: counters \[5\]
+/// What the thread `run` was called on reads to report progress: counters \[6\]
 struct Progress {
     blocks: AtomicU64,
     silent: AtomicU64,
@@ -78,16 +124,16 @@ struct Progress {
     notes: AtomicU64,
     stolen: AtomicU64,
     dropped: AtomicU64,
-    /// The loudest track's peak, as f32 bits: magnitudes are never negative, \[6\]
+    /// The loudest track's peak, as f32 bits: magnitudes are never negative, \[7\]
     peak: AtomicU32,
     stole: AtomicUsize,
-    /// The longest a batch took from `flush` to `wait` returning since the \[7\]
+    /// The longest a batch took from `flush` to `wait` returning since the \[8\]
     wait_us: AtomicU64,
-    /// Per lane or job: one more than the rank of the track in it, 0 when \[8\]
+    /// Per lane or job: one more than the rank of the track in it, 0 when \[9\]
     slots: Vec<(AtomicUsize, AtomicU64)>,
 }
 
-/// What a track has already added to `Progress`, so each block adds only \[9\]
+/// What a track has already added to `Progress`, so each block adds only \[10\]
 #[derive(Default)]
 struct Seen {
     notes: u64,
@@ -112,6 +158,20 @@ impl Progress {
         }
     }
 
+    /// A track a resume found finished: what it came to counts towards the \[11\]
+    fn credit(&self, d: &Done, span: u64) {
+        self.blocks.fetch_add(d.blocks, Ordering::Relaxed);
+        self.silent.fetch_add(d.silent_blocks, Ordering::Relaxed);
+        self.span.fetch_add(span, Ordering::Relaxed);
+        self.notes.fetch_add(d.notes, Ordering::Relaxed);
+        self.stolen.fetch_add(d.stolen, Ordering::Relaxed);
+        self.dropped.fetch_add(d.dropped, Ordering::Relaxed);
+        self.peak.fetch_max(d.peak_level.abs().to_bits(), Ordering::Relaxed);
+        if d.stolen > 0 {
+            self.stole.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     fn enter(&self, slot: usize, rank: usize) {
         self.slots[slot].1.store(0, Ordering::Relaxed);
         self.slots[slot].0.store(rank + 1, Ordering::Relaxed);
@@ -121,7 +181,7 @@ impl Progress {
         self.slots[slot].0.store(0, Ordering::Relaxed);
     }
 
-    /// The block `driver` just finished for `stem`, `stolen` being its track's \[10\]
+    /// The block `driver` just finished for `stem`, `stolen` being its track's \[12\]
     fn block(&self, slot: usize, seen: &mut Seen, stem: &Stem, driver: &Driver, stolen: u64) {
         let d = &driver.stats;
         let add = |counter: &AtomicU64, now: u64, before: &mut u64| {
@@ -159,10 +219,25 @@ struct Ctx<'a> {
     /// Where every block goes when merging, in place of a file per stem.
     mix: Option<&'a Mix>,
     progress: &'a Progress,
+    /// Held for reading while a block goes into the mix and its track's count \[13\]
+    cut: &'a RwLock<()>,
+    /// Per stem: the blocks of it that are in the mix, or that a resume found \[14\]
+    reached: &'a [AtomicU64],
+    /// `resume::Spec::stop_after_blocks`.
+    stop_after: Option<u64>,
 }
 
 impl<'a> Ctx<'a> {
-    /// The next stem to start, busiest first, with its rank in that order, \[11\]
+    /// Stop as if cancelled when the test hook says the render has gone far \[15\]
+    fn check_stop(&self) {
+        if let Some(n) = self.stop_after {
+            if self.progress.blocks.load(Ordering::Relaxed) >= n {
+                self.cancel.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// The next stem to start, busiest first, with its rank in that order, \[16\]
     fn take(&self) -> Option<(usize, &'a Stem)> {
         if self.cancel.load(Ordering::Relaxed) {
             return None;
@@ -220,7 +295,8 @@ impl<'a> Running<'a> {
             driver: Driver::open_tracks_prepared(ctx.cfg, ctx.bank.clone(), &ctx.job.midi, &stem.sel, ctx.phase.clone())?,
             out: match ctx.mix {
                 Some(_) => None,
-                None => Some(Sink::create(&stem.path, ctx.cfg, ctx.encoder, ctx.job.wav_format)?),
+                // [17]
+                None => Some(Sink::create(&resume::partial_of(&stem.path), ctx.cfg, ctx.encoder, ctx.job.wav_format)?),
             },
             block: vec![0.0f32; ctx.cfg.block_samples()],
             peak_voices: 0,
@@ -233,11 +309,16 @@ impl<'a> Running<'a> {
     fn finish(self, ctx: &Ctx, stolen: u64, cancelled: bool) -> Result<()> {
         ctx.progress.leave(self.slot);
         let bytes = match self.out {
-            Some(out) => out.finish()?,
+            Some(out) => {
+                let bytes = out.finish()?;
+                settle(&self.stem.path, cancelled)?;
+                bytes
+            }
             None => 0,
         };
         let d = &self.driver.stats;
         let done = Done {
+            track: self.stem.track,
             bytes,
             audio_secs: self.driver.seconds_rendered(),
             notes: d.notes,
@@ -257,11 +338,11 @@ impl<'a> Running<'a> {
     }
 }
 
-/// A GPU job: stems in every lane of `batch`, and a new stem into whichever \[12\]
+/// A GPU job: stems in every lane of `batch`, and a new stem into whichever \[18\]
 fn gpu_job(ctx: &Ctx, batch: &mut GpuBatch, threads: usize) -> Result<()> {
     let mut lanes: Vec<Option<Running>> = (0..batch.lanes()).map(|_| None).collect();
     let threads = threads.clamp(1, lanes.len());
-    // [13]
+    // [19]
     let mut prof = [Duration::ZERO; 4];
     let silent = AtomicU64::new(0);
     let (mut sent, mut sounding) = (0u64, 0u64);
@@ -284,7 +365,7 @@ fn gpu_job(ctx: &Ctx, batch: &mut GpuBatch, threads: usize) -> Result<()> {
             sent += 1;
             sounding += lanes.iter().flatten().count() as u64;
             lap(1, &mut t);
-            // [14]
+            // [20]
             on_threads(threads, lanes.iter_mut().flatten(), |r| {
                 r.driver.prepare_ahead().with_context(|| track(r.stem))
             })?;
@@ -317,7 +398,7 @@ fn gpu_job(ctx: &Ctx, batch: &mut GpuBatch, threads: usize) -> Result<()> {
     result
 }
 
-/// `f` on every item, on up to `threads` threads, each taking the next item \[15\]
+/// `f` on every item, on up to `threads` threads, each taking the next item \[21\]
 fn on_threads<I, F>(threads: usize, items: I, f: F) -> Result<()>
 where
     I: Iterator + Send,
@@ -346,9 +427,9 @@ where
     }
 }
 
-/// One lane's host work for a round: finish the block the last batch rendered \[16\]
+/// One lane's host work for a round: finish the block the last batch rendered \[22\]
 fn host_round<'a>(ctx: &Ctx<'a>, slot: &mut Option<Running<'a>>, lane: &mut LaneBackend, silent: &AtomicU64) -> Result<()> {
-    // [17]
+    // [23]
     if slot.is_some() {
         step_done(ctx, lane, slot)?;
     }
@@ -363,7 +444,7 @@ fn host_round<'a>(ctx: &Ctx<'a>, slot: &mut Option<Running<'a>>, lane: &mut Lane
         if lane.submitted() {
             return Ok(());
         }
-        // [18]
+        // [24]
         r.driver.prepare_ahead().with_context(|| track(r.stem))?;
         silent.fetch_add(1, Ordering::Relaxed);
         step_done(ctx, lane, slot)?;
@@ -374,13 +455,14 @@ fn track(stem: &Stem) -> String {
     format!("rendering track {}", stem.track + 1)
 }
 
-/// Finish the block the lane has in flight, write it, and end the stem if that \[19\]
+/// Finish the block the lane has in flight, write it, and end the stem if that \[25\]
 fn step_done(ctx: &Ctx, lane: &mut LaneBackend, slot: &mut Option<Running>) -> Result<()> {
     let r = slot.as_mut().expect("a lane with a block in flight has a stem");
     let more = r.driver.finish_block(lane, &mut r.block).with_context(|| track(r.stem))?;
-    emit(ctx, &mut r.out, &r.driver, &r.block).with_context(|| track(r.stem))?;
+    emit(ctx, r.stem, &mut r.out, &r.driver, &r.block).with_context(|| track(r.stem))?;
     let stats = lane.stats();
     ctx.progress.block(r.slot, &mut r.seen, r.stem, &r.driver, stats.stolen);
+    ctx.check_stop();
     r.peak_voices = r.peak_voices.max(stats.active_voices);
     let last = !more || r.driver.stats.frames >= ctx.max_frames;
     if last || ctx.cancel.load(Ordering::Relaxed) {
@@ -390,11 +472,29 @@ fn step_done(ctx: &Ctx, lane: &mut LaneBackend, slot: &mut Option<Running>) -> R
     Ok(())
 }
 
-/// Where a finished block goes: the stem's own file, or the mix at the block's \[20\]
-fn emit(ctx: &Ctx, out: &mut Option<Sink>, driver: &Driver, block: &[f32]) -> Result<()> {
+/// A stem's file once its writer is closed: renamed to its real name if the \[26\]
+fn settle(path: &Path, cancelled: bool) -> Result<()> {
+    let partial = resume::partial_of(path);
+    if cancelled {
+        let _ = std::fs::remove_file(&partial);
+        return Ok(());
+    }
+    std::fs::rename(&partial, path).with_context(|| format!("renaming {} to {}", partial.display(), path.display()))
+}
+
+/// Where a finished block goes: the stem's own file, or the mix at the block's \[27\]
+fn emit(ctx: &Ctx, stem: &Stem, out: &mut Option<Sink>, driver: &Driver, block: &[f32]) -> Result<()> {
     match out {
         Some(sink) => sink.write_block(block),
-        None => ctx.mix.expect("a stem without a file is being merged").add(driver.stats.blocks - 1, block),
+        None => {
+            let at = driver.stats.blocks - 1;
+            let _in = ctx.cut.read().unwrap();
+            if at >= stem.skip_below {
+                ctx.mix.expect("a stem without a file is being merged").add(at, block)?;
+            }
+            ctx.reached[stem.index].fetch_max(at + 1, Ordering::Relaxed);
+            Ok(())
+        }
     }
 }
 
@@ -412,13 +512,141 @@ fn cpu_job(ctx: &Ctx, slot: usize) {
     }
 }
 
+/// The soonest a stems render writes its list of finished stems again after a \[28\]
+const MANIFEST_EVERY: Duration = Duration::from_secs(10);
+
+/// Writes this render's checkpoint. Built once the render is set up, because \[29\]
+struct Saver {
+    path: PathBuf,
+    /// How often a merge saves while it runs; `None` only when it stops.
+    every: Option<Duration>,
+    argv: Vec<String>,
+    backend: String,
+    identity: resume::Identity,
+    voices_each: u32,
+}
+
+impl Saver {
+    fn header(&self, finished: Vec<resume::Finished>, in_flight: Vec<resume::InFlight>, mix_len: u64) -> resume::Header {
+        resume::Header {
+            format: resume::FORMAT,
+            kestrel: env!("CARGO_PKG_VERSION").to_string(),
+            build: resume::build_id().to_string(),
+            argv: self.argv.clone(),
+            backend: self.backend.clone(),
+            midi: self.identity.midi.clone(),
+            soundfonts: self.identity.soundfonts.clone(),
+            merge: self.identity.merge,
+            tracks: self.identity.tracks.clone(),
+            voices_each: self.voices_each,
+            block_samples: self.identity.block_samples,
+            seconds: self.identity.seconds,
+            finished,
+            in_flight,
+            mix_len,
+            single: None,
+        }
+    }
+
+    /// Write the checkpoint: the header, and the mix for a merge.
+    fn write(&self, header: resume::Header, mix: Option<&Mix>) -> Result<u64> {
+        let mut w = resume::Writer::create(&self.path, &header)?;
+        let saved = match mix {
+            Some(m) => m.save(&mut w),
+            None => Ok(()),
+        };
+        match saved {
+            Ok(()) => w.commit(),
+            Err(e) => {
+                w.abandon();
+                Err(e)
+            }
+        }
+    }
+
+    /// The checkpoint of the render as it stands, taken with the render held \[30\]
+    fn save(&self, ctx: &Ctx, mix: Option<&Mix>) -> Result<u64> {
+        let _held = ctx.cut.write().unwrap();
+        let (finished, in_flight) = {
+            let results = ctx.results.lock().unwrap();
+            let whole: Vec<&Done> = results.iter().filter(|d| !d.cancelled).collect();
+            let tracks: HashSet<usize> = whole.iter().map(|d| d.track).collect();
+            let finished = whole.iter().map(|d| resume::Finished { track: d.track, stats: d.stats() }).collect();
+            // [31]
+            let in_flight = if mix.is_some() {
+                ctx.stems
+                    .iter()
+                    .filter(|s| !tracks.contains(&s.track))
+                    .filter_map(|s| {
+                        let blocks = ctx.reached[s.index].load(Ordering::Relaxed);
+                        (blocks > 0).then_some(resume::InFlight { track: s.track, blocks })
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            (finished, in_flight)
+        };
+        self.write(self.header(finished, in_flight, mix.map_or(0, Mix::len)), mix)
+    }
+
+    fn save_or_warn(&self, ctx: &Ctx, mix: Option<&Mix>, last: bool) {
+        let t0 = Instant::now();
+        match self.save(ctx, mix) {
+            Ok(bytes) if last => log::warn!(
+                target: TARGET,
+                "progress saved to {} ({}, {:.2}s). Continue it with: kestrel --force-cli resume \"{}\"",
+                self.path.display(),
+                mib(bytes),
+                t0.elapsed().as_secs_f64(),
+                self.path.display()
+            ),
+            Ok(bytes) if mix.is_some() => log::info!(
+                target: TARGET,
+                "progress saved to {} ({}, the render held for {:.2}s)",
+                self.path.display(),
+                mib(bytes),
+                t0.elapsed().as_secs_f64()
+            ),
+            Ok(_) => {}
+            Err(e) => log::warn!(
+                target: TARGET,
+                "progress could not be saved to {}: {e:#}. The render goes on, and cannot be resumed from here",
+                self.path.display()
+            ),
+        }
+    }
+
+    /// Every track finished and the mix could not be written: keep all of them.
+    fn save_whole_or_warn(&self, finished: Vec<resume::Finished>, mix: &Mix) {
+        let header = self.header(finished, Vec::new(), mix.len());
+        match self.write(header, Some(mix)) {
+            Ok(bytes) => log::warn!(
+                target: TARGET,
+                "the merged file could not be written, but every track is saved in {} ({}). Free some space and \
+                 continue with: kestrel --force-cli resume \"{}\"",
+                self.path.display(),
+                mib(bytes),
+                self.path.display()
+            ),
+            Err(e) => log::warn!(target: TARGET, "and the tracks could not be saved either: {e:#}"),
+        }
+    }
+
+    /// The render is whole: the checkpoint has done its job.
+    fn discard(&self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut dyn Observer) -> Result<Summary> {
     let spec = job.stems.as_ref().expect("dispatched on Job::stems");
     let Plan { mut cfg, kind, encoder } = plan;
     let started = Instant::now();
 
-    // [21]
+    // [32]
     obs.phase(Phase::OpeningMidi);
+    crate::session::detect_31edo(&mut cfg, &job.midi);
     let t0 = Instant::now();
     let scan = match &spec.scanned {
         Some(scan) if scan.path == job.midi => {
@@ -448,7 +676,7 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
             list(&without)
         );
     }
-    // [22]
+    // [33]
     let min = cfg.min_velocity;
     let (keep, emptied): (Vec<usize>, Vec<usize>) =
         named.into_iter().partition(|&t| scan.tracks[t].notes_from(min) > 0);
@@ -482,6 +710,8 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
         let file = tracks::stem_file_name(t, scan.tracks.len(), name.as_deref(), &spec.ext);
         stems.push(Stem {
             track: t,
+            index: stems.len(),
+            skip_below: 0,
             sel,
             label: match (merge, &name) {
                 (false, _) => file.clone(),
@@ -494,7 +724,7 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
             span: (0, 0),
         });
     }
-    // [23]
+    // [34]
     let ends: Vec<u64> = keep
         .iter()
         .flat_map(|&t| {
@@ -507,8 +737,54 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
         let block = |frame: f64| frame.max(0.0) as u64 / cfg.block_frames as u64;
         stem.span = (block(f[0]), block(f[1]).max(block(f[0])));
     }
+    // [35]
+    let spec_resume = spec.resume.as_ref();
+    let identity = match spec_resume {
+        Some(_) => Some(resume::Identity {
+            midi: resume::Fingerprint::of(&job.midi)?,
+            soundfonts: job.soundfonts.iter().map(|p| resume::SoundfontPrint::of(p)).collect::<Result<_>>()?,
+            merge,
+            tracks: keep.clone(),
+            block_samples: cfg.block_samples(),
+            seconds: job.seconds,
+            single: false,
+        }),
+        None => None,
+    };
+    let restore = spec_resume.and_then(|r| r.restore.clone());
+    if let (Some(cp), Some(id)) = (&restore, &identity) {
+        cp.header.check(id)?;
+    }
+    // [36]
+    let mut finished_stats: Vec<resume::Finished> = Vec::new();
+    if let Some(cp) = &restore {
+        for f in &cp.header.finished {
+            let Some(stem) = stems.iter().find(|s| s.track == f.track) else { continue };
+            if !merge {
+                match std::fs::metadata(&stem.path) {
+                    Ok(m) if m.len() == f.stats.bytes => {}
+                    Ok(m) => {
+                        log::warn!(
+                            target: TARGET,
+                            "{} is {} bytes and was {} when it was finished: rendering it again",
+                            stem.path.display(),
+                            m.len(),
+                            f.stats.bytes
+                        );
+                        continue;
+                    }
+                    Err(_) => {
+                        log::warn!(target: TARGET, "{} is missing: rendering it again", stem.path.display());
+                        continue;
+                    }
+                }
+            }
+            finished_stats.push(f.clone());
+        }
+    }
+    let finished_tracks: HashSet<usize> = finished_stats.iter().map(|f| f.track).collect();
     if !merge {
-        check_space(&folder, &scan, stems.len(), &cfg, job, &spec.ext)?;
+        check_space(&folder, &scan, stems.len() - finished_tracks.len(), &cfg, job, &spec.ext)?;
     }
 
     obs.phase(Phase::LoadingSoundfont);
@@ -552,11 +828,11 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
             at_once = format!("{wanted} at once");
         }
         BackendKind::Gpu => {
-            // [24]
+            // [37]
             let mut probe = cfg.clone();
             probe.max_voices = 1;
             let shared = GpuShared::new(&probe, &bank, &phase)?;
-            // [25]
+            // [38]
             let cap = GpuBatch::max_voices_each(&cfg, &bank, shared.binding_bytes(), 1);
             if cfg.max_voices > cap && cap > 0 {
                 log::warn!(
@@ -568,34 +844,34 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
                 );
                 cfg.max_voices = cap;
             }
-            // [26]
-            let mut lanes = stems.len().min(LANES_MAX);
-            // And no more than fits in video memory beside the pool.
+            // [39]
+            let want = stems.len().min(LANES_MAX);
+            // No more than fits in video memory beside the pool.
             let per_lane = GpuBatch::lane_bytes(&cfg, &bank).max(1);
             let (vendor, device) = shared.adapter_ids();
             let fit = crate::gpu::vram::sample(vendor, device)
                 .and_then(|m| Some(m.process_budget?.saturating_sub(m.process_used?)))
-                .map(|free| (free.saturating_sub(VRAM_MARGIN) / per_lane) as usize);
-            if let Some(fit) = fit {
-                if lanes > fit {
-                    lanes = fit.max(1);
-                    log::warn!(
-                        target: TARGET,
-                        "{lanes} stems at once: that is what fits in video memory at about {} a stem",
-                        mib(per_lane)
-                    );
+                .map(|free| (free.saturating_sub(VRAM_MARGIN) / per_lane) as usize)
+                .filter(|&fit| fit < want)
+                .map(|fit| fit.max(1));
+            // [40]
+            let bind = Some(GpuBatch::lanes_that_bind(&cfg, &bank, shared.binding_bytes(), want))
+                .filter(|&bind| bind > 0 && bind < want);
+            // [41]
+            let lanes = fit.into_iter().chain(bind).min().unwrap_or(want);
+            if lanes < want {
+                let mut why = Vec::new();
+                if let Some(fit) = fit {
+                    why.push(format!("video memory has room for {fit}, at about {} a stem", mib(per_lane)));
                 }
-            }
-            // [27]
-            let bind = GpuBatch::lanes_that_bind(&cfg, &bank, shared.binding_bytes(), lanes);
-            if bind > 0 && bind < lanes {
-                lanes = bind;
-                log::warn!(
-                    target: TARGET,
-                    "{lanes} stems at once: at {} voices each, that is as many as {} binds in one buffer",
-                    cfg.max_voices,
-                    shared.adapter_name()
-                );
+                if let Some(bind) = bind {
+                    why.push(format!(
+                        "at {} voices each, {bind} is as many as {} binds in one buffer",
+                        cfg.max_voices,
+                        shared.adapter_name()
+                    ));
+                }
+                log::warn!(target: TARGET, "{lanes} stems at once, not {want}: {}", why.join("; "));
             }
             gpu_threads = wanted.min(lanes);
             backends.push(JobBackend::Gpu(Box::new(GpuBatch::new(&cfg, &bank, &shared, lanes)?)));
@@ -621,6 +897,28 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
             );
         }
     }
+    // [42]
+    let backend_id = match &setup.adapter {
+        Some(a) => format!("gpu: {a}"),
+        None => "cpu".to_string(),
+    };
+    if let Some(cp) = &restore {
+        if cp.header.backend != backend_id {
+            bail!(
+                "this checkpoint cannot be resumed: it was made on {} and this render runs on {backend_id}, \
+                 and another backend or card can write different bytes for the same render",
+                cp.header.backend
+            );
+        }
+        if cp.header.voices_each != cfg.max_voices {
+            bail!(
+                "this checkpoint cannot be resumed: its tracks ran under {} voices each and this render's limit \
+                 is {}",
+                cp.header.voices_each,
+                cfg.max_voices
+            );
+        }
+    }
     let jobs = backends.len();
     obs.setup(&setup);
     log::info!(
@@ -636,7 +934,7 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
             tracks::SetupTracks::Ignore => "ignored",
         }
     );
-    // [28]
+    // [43]
     let mut stem_cfg = cfg.clone();
     stem_cfg.max_block_candidates = tracks::candidates_each(&stem_cfg);
     // The tracks are already spread over threads; a thread each is enough.
@@ -653,23 +951,63 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
             mib((secs * cfg.sample_rate as f64) as u64 * 2 * 16),
             secs
         );
-        Some(Mix::new(cfg.block_samples()))
+        Some(match &restore {
+            // [44]
+            Some(cp) => {
+                let t0 = Instant::now();
+                let mut payload = cp.payload()?;
+                let mix = Mix::load(cfg.block_samples(), cp.header.mix_len, &mut payload)
+                    .with_context(|| format!("reading the mix in {}", cp.path.display()))?;
+                log::info!(
+                    target: TARGET,
+                    "resuming from {}: {} of {} finished, {} begun and to be rendered again without adding what \
+                     is in the mix already; the saved mix ({}) was read in {:.2}s",
+                    cp.path.display(),
+                    plural(finished_tracks.len(), "track"),
+                    stems.len(),
+                    plural(cp.header.in_flight.len(), "track"),
+                    mib(cp.payload_len()),
+                    t0.elapsed().as_secs_f64()
+                );
+                mix
+            }
+            None => Mix::new(cfg.block_samples()),
+        })
     } else {
         std::fs::create_dir_all(&folder).with_context(|| format!("creating {}", folder.display()))?;
+        if restore.is_some() {
+            log::info!(
+                target: TARGET,
+                "resuming from the stems already written: {} of {} are whole",
+                finished_tracks.len(),
+                stems.len()
+            );
+        }
         None
     };
+    if let (true, Some(cp)) = (merge, &restore) {
+        for f in &cp.header.in_flight {
+            if let Some(s) = stems.iter_mut().find(|s| s.track == f.track && !finished_tracks.contains(&s.track)) {
+                s.skip_below = f.blocks;
+            }
+        }
+    }
 
-    // [29]
-    let mut order: Vec<usize> = (0..stems.len()).collect();
+    // [45]
+    let mut order: Vec<usize> = (0..stems.len()).filter(|&i| !finished_tracks.contains(&stems[i].track)).collect();
     order.sort_by_key(|&i| (Reverse(stems[i].notes), stems[i].track));
 
     let max_frames = job.seconds.map(|s| (s * cfg.sample_rate as f64) as u64).unwrap_or(u64::MAX);
     let next = AtomicUsize::new(0);
-    let finished = AtomicUsize::new(0);
+    let finished = AtomicUsize::new(finished_tracks.len());
     let running = AtomicUsize::new(jobs);
     let cancel = AtomicBool::new(false);
     let failure: Mutex<Option<anyhow::Error>> = Mutex::new(None);
-    let results: Mutex<Vec<Done>> = Mutex::new(Vec::with_capacity(stems.len()));
+    let mut seeded: Vec<Done> = Vec::with_capacity(stems.len());
+    seeded.extend(finished_stats.iter().map(|f| Done::restored(f.track, &f.stats)));
+    let results: Mutex<Vec<Done>> = Mutex::new(seeded);
+    let hold = RwLock::new(());
+    let reached: Vec<AtomicU64> = stems.iter().map(|s| AtomicU64::new(s.skip_below)).collect();
     let slots = backends
         .iter()
         .map(|b| match b {
@@ -682,12 +1020,21 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
     let per_track = ((max_frames as f64).min(scan.duration(cfg.sample_rate) * cfg.sample_rate as f64)
         / cfg.block_frames as f64)
         .ceil() as u64;
-    // [30]
+    // [46]
     let span_total: u64 = stems
         .iter()
         .filter(|s| s.span.0 < per_track)
         .map(|s| s.span.1.min(per_track - 1) - s.span.0 + 1)
         .sum();
+    // The tracks a resume found whole count towards the progress.
+    for d in results.lock().unwrap().iter() {
+        let span = stems
+            .iter()
+            .find(|s| s.track == d.track)
+            .filter(|s| s.span.0 < per_track)
+            .map_or(0, |s| s.span.1.min(per_track - 1) - s.span.0 + 1);
+        progress.credit(d, span);
+    }
     let length_secs = (per_track * cfg.block_frames as u64) as f64 / cfg.sample_rate as f64;
     // Every note the tracks hold, unless --seconds stops them short of some.
     let cut = (max_frames as f64) < scan.duration(cfg.sample_rate) * cfg.sample_rate as f64;
@@ -753,6 +1100,20 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
         results: &results,
         mix: mix.as_ref(),
         progress: &progress,
+        cut: &hold,
+        reached: &reached,
+        stop_after: spec_resume.and_then(|r| r.stop_after_blocks),
+    };
+    let saver = match (spec_resume, identity) {
+        (Some(r), Some(id)) => Some(Saver {
+            path: r.path.clone().unwrap_or_else(|| resume::default_path(&job.out, &job.midi, merge)),
+            every: r.every,
+            argv: r.argv.clone(),
+            backend: backend_id.clone(),
+            identity: id,
+            voices_each: cfg.max_voices,
+        }),
+        _ => None,
     };
 
     obs.phase(Phase::Rendering);
@@ -773,17 +1134,60 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
                 running.fetch_sub(1, Ordering::Relaxed);
             });
         }
-        // [31]
+        // [47]
+        let mut last_save = Instant::now();
+        let mut saved_at = finished.load(Ordering::Relaxed);
         while running.load(Ordering::Relaxed) > 0 {
             std::thread::sleep(Duration::from_millis(50));
             if obs.cancelled() {
                 cancel.store(true, Ordering::Relaxed);
             }
             obs.tracks(&report());
+            if let Some(s) = &saver {
+                let now_done = finished.load(Ordering::Relaxed);
+                let due = match (merge, s.every) {
+                    (true, Some(every)) => last_save.elapsed() >= every,
+                    (false, _) => now_done != saved_at && last_save.elapsed() >= MANIFEST_EVERY,
+                    (true, None) => false,
+                };
+                if due {
+                    s.save_or_warn(&ctx, mix.as_ref(), false);
+                    last_save = Instant::now();
+                    saved_at = now_done;
+                }
+            }
         }
     });
     obs.tracks(&report());
     obs.phase(Phase::Finishing);
+    // [48]
+    let failed = failure.lock().unwrap().is_some();
+    let unfinished = failed || {
+        let r = results.lock().unwrap();
+        r.len() < stems.len() || r.iter().any(|d| d.cancelled)
+    };
+    // [49]
+    let discard = !failed && obs.cancelled() && obs.discard_progress();
+    if unfinished {
+        if let Some(s) = &saver {
+            if discard {
+                s.discard();
+                log::warn!(
+                    target: TARGET,
+                    "stopped, and its progress was not kept: no resume file was written, and none is left"
+                );
+            } else {
+                s.save_or_warn(&ctx, mix.as_ref(), true);
+            }
+        }
+        if !merge {
+            let whole: HashSet<usize> =
+                results.lock().unwrap().iter().filter(|d| !d.cancelled).map(|d| d.track).collect();
+            for s in stems.iter().filter(|s| !whole.contains(&s.track)) {
+                let _ = std::fs::remove_file(resume::partial_of(&s.path));
+            }
+        }
+    }
     if let Some(e) = failure.into_inner().unwrap() {
         return Err(e);
     }
@@ -805,17 +1209,41 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
         peak_level: done.iter().map(|d| d.peak_level).fold(0.0, f32::max),
         clipped: sum(|d| d.clipped),
         cancelled,
+        checkpoint: saver.as_ref().filter(|_| cancelled).map(|s| s.path.clone()).filter(|p| p.exists()),
+        discarded: discard && saver.is_some() && unfinished,
     };
     match mix {
-        // [32]
+        // [50]
         Some(_) if cancelled => {
-            log::warn!(target: TARGET, "stopped after {} of {} tracks; no merged file written", done.len(), stems.len());
+            log::warn!(
+                target: TARGET,
+                "stopped with {} of {} tracks finished; no merged file written",
+                done.iter().filter(|d| !d.cancelled).count(),
+                stems.len()
+            );
             summary.bytes = 0;
             summary.audio_secs = 0.0;
         }
         Some(mix) => {
             let t0 = Instant::now();
-            let w = mix.write(&cfg, &job.out, encoder.as_ref(), job.wav_format)?;
+            // [51]
+            let part = resume::partial_of(&job.out);
+            let w = match mix.write(&cfg, &part, encoder.as_ref(), job.wav_format) {
+                Ok(w) => w,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&part);
+                    if let Some(s) = &saver {
+                        let whole = done.iter().map(|d| resume::Finished { track: d.track, stats: d.stats() }).collect();
+                        s.save_whole_or_warn(whole, &mix);
+                    }
+                    return Err(e.context(format!("writing {}", job.out.display())));
+                }
+            };
+            std::fs::rename(&part, &job.out)
+                .with_context(|| format!("renaming {} to {}", part.display(), job.out.display()))?;
+            if let Some(s) = &saver {
+                s.discard();
+            }
             let wall = render_started.elapsed().as_secs_f64();
             let secs = w.frames as f64 / cfg.sample_rate as f64;
             summary.bytes = w.bytes;
@@ -837,6 +1265,9 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
             );
         }
         None => {
+            if let (false, Some(s)) = (cancelled, &saver) {
+                s.discard();
+            }
             let wall = render_started.elapsed().as_secs_f64();
             log::info!(
                 target: TARGET,
@@ -887,18 +1318,19 @@ fn render_stem(ctx: &Ctx, stem: &Stem, slot: usize) -> Result<Done> {
     let backend: &mut dyn Backend = &mut cpu;
     let mut out = match ctx.mix {
         Some(_) => None,
-        None => Some(Sink::create(&stem.path, cfg, ctx.encoder, ctx.job.wav_format)?),
+        None => Some(Sink::create(&resume::partial_of(&stem.path), cfg, ctx.encoder, ctx.job.wav_format)?),
     };
     let mut block = vec![0.0f32; cfg.block_samples()];
     let mut peak_voices = 0u64;
     let mut cancelled = false;
     let mut seen = Seen::default();
-    // [33]
+    // [52]
     loop {
         let more = driver.next_block(backend, &mut block)?;
-        emit(ctx, &mut out, &driver, &block)?;
+        emit(ctx, stem, &mut out, &driver, &block)?;
         peak_voices = peak_voices.max(backend.stats().active_voices);
         ctx.progress.block(slot, &mut seen, stem, &driver, backend.stats().stolen);
+        ctx.check_stop();
         if !more || driver.stats.frames >= ctx.max_frames {
             break;
         }
@@ -908,11 +1340,16 @@ fn render_stem(ctx: &Ctx, stem: &Stem, slot: usize) -> Result<Done> {
         }
     }
     let bytes = match out {
-        Some(out) => out.finish()?,
+        Some(out) => {
+            let bytes = out.finish()?;
+            settle(&stem.path, cancelled)?;
+            bytes
+        }
         None => 0,
     };
     let d = &driver.stats;
     Ok(Done {
+        track: stem.track,
         bytes,
         audio_secs: driver.seconds_rendered(),
         notes: d.notes,
@@ -929,7 +1366,7 @@ fn render_stem(ctx: &Ctx, stem: &Stem, slot: usize) -> Result<Done> {
     })
 }
 
-/// Say how much the stems will take and refuse to start a WAV render that \[34\]
+/// Say how much the stems will take and refuse to start a WAV render that \[53\]
 fn check_space(folder: &Path, scan: &TrackScan, stems: usize, cfg: &Config, job: &Job, ext: &str) -> Result<()> {
     let secs = tracks::render_secs(scan, cfg.sample_rate, job.seconds);
     let (need, exact) = tracks::output_bytes(stems, secs, cfg.sample_rate, ext, job.wav_format == wav::SampleFormat::Float32);

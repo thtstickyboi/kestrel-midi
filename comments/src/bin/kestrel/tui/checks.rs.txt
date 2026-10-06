@@ -14,12 +14,16 @@
 //! Kept free of terminal I/O so every one of them is a plain function a test
 //! can call.
 
-[2] src/bin/kestrel/tui/checks.rs:44
+[2] src/bin/kestrel/tui/checks.rs:30
+    /// A note key over 127: the file is written for the 31-EDO template
+    /// (`kestrel::edo31`), and plays as the wrong notes unless told so.
+
+[3] src/bin/kestrel/tui/checks.rs:48
 /// What a file that is not a MIDI most likely is, from its first bytes. Black
 /// MIDI is passed around compressed, and "not a MIDI file" is a poor answer to
 /// a `.mid.xz` somebody forgot to extract.
 
-[3] src/bin/kestrel/tui/checks.rs:75
+[4] src/bin/kestrel/tui/checks.rs:79
 /// The quick check: the header and the chunk list, never an event.
 ///
 /// Cheap enough to run on thousands of files, and it catches what actually
@@ -27,7 +31,11 @@
 /// file, a zero timing division. A file cut short still renders what is there,
 /// so it passes with a note rather than failing.
 
-[4] src/bin/kestrel/tui/checks.rs:243
+[5] src/bin/kestrel/tui/checks.rs:183
+/// What a batch says of a file written for the 31-EDO template: that it
+/// can't be rendered there, for now (`kestrel::batch::plan` refuses it too).
+
+[6] src/bin/kestrel/tui/checks.rs:274
     /// A General MIDI bank, as opposed to an instrument.
     ///
     /// GM defines 128 melodic programs and a drum kit. A set covering most of
@@ -35,7 +43,7 @@
     /// is what the smaller GS/GM ROM dumps look like. A piano library defines
     /// one program, or a handful for its variants, and no kit.
 
-[5] src/bin/kestrel/tui/checks.rs:254
+[7] src/bin/kestrel/tui/checks.rs:285
 /// Which soundfont goes underneath.
 ///
 /// The later layer replaces the earlier wherever both define a program, so a
@@ -43,7 +51,7 @@
 /// it -- the other way round the bank's own piano would bury the one that was
 /// picked for it. Otherwise the picking order stands.
 
-[6] src/bin/kestrel/tui/checks.rs:316
+[8] src/bin/kestrel/tui/checks.rs:347
 /// Read a typed voice count.
 ///
 /// Pressing Enter and typing the word both mean the default, because the
@@ -51,23 +59,23 @@
 /// separators are accepted in the forms people write them, and `k` and `M`
 /// suffixes, so `700,000`, `700_000` and `700k` are the same answer.
 
-[7] src/bin/kestrel/tui/checks.rs:363
+[9] src/bin/kestrel/tui/checks.rs:394
 /// Local time as it goes into a file name.
 ///
 /// Asked for as `mm-dd-yyyy | hh:mm:ss`, 24-hour. Windows forbids both `|` and
 /// `:` in file names, so the bar is dropped and dots stand in for the colons.
 
-[8] src/bin/kestrel/tui/checks.rs:371
+[10] src/bin/kestrel/tui/checks.rs:402
 /// Where a render of `midi` into `dir` goes: the MIDI's name with the
 /// container's extension, and never over an existing file. A clash gets the
 /// time in brackets, and a clash within the same second gets a count on top.
 
-[9] src/bin/kestrel/tui/checks.rs:395
+[11] src/bin/kestrel/tui/checks.rs:426
 /// Split a typed line into arguments: whitespace separates, and single or
 /// double quotes group. Backslashes are literal, because they are Windows path
 /// separators far more often than escapes.
 
-[10] src/bin/kestrel/tui/checks.rs:444
+[12] src/bin/kestrel/tui/checks.rs:475
 /// Flags no loader reads: they choose the device, the voice pool, the
 /// limiter, the output encoding, or diagnostics. A bank built before any of
 /// them was typed is still the bank they would build.
@@ -76,15 +84,15 @@
 /// mode of a missing entry is a few seconds, and a flag added later can never
 /// make a guided render differ from the same command on the command line.
 
-[11] src/bin/kestrel/tui/checks.rs:452
+[13] src/bin/kestrel/tui/checks.rs:483
     // Analytic phase is prepared per render from the loaded bank, not by the
     // loader, so none of its flags needs the soundfont loaded again.
 
-[12] src/bin/kestrel/tui/checks.rs:492
+[14] src/bin/kestrel/tui/checks.rs:531
     // A gain on the output since 1.2.1. It used to be baked into every
     // voice's gain, which made a loaded bank depend on it.
 
-[13] src/bin/kestrel/tui/checks.rs:497
+[15] src/bin/kestrel/tui/checks.rs:536
 /// Check typed flags against what the earlier steps already chose.
 ///
 /// Anything clap itself would reject is left for clap, which says why better
@@ -92,17 +100,22 @@
 /// step -- a second MIDI, soundfont or output -- plus `--adapter`, which only
 /// exists here.
 
-[14] src/bin/kestrel/tui/checks.rs:537
+[16] src/bin/kestrel/tui/checks.rs:576
         // The environment check numbers its adapters, and a number typed after
         // --gpu-backend is someone reaching for one of them (reported
         // 2026-09-20: `--gpu-backend 5`, then `--gpu-backend 3`). Say which
         // flag takes the number.
 
-[15] src/bin/kestrel/tui/checks.rs:659
+[17] src/bin/kestrel/tui/checks.rs:698
     /// Every character the timestamp puts in a name has to be legal on
     /// Windows, which is why it is not literally `mm-dd-yyyy | hh:mm:ss`.
 
-[16] src/bin/kestrel/tui/checks.rs:770
+[18] src/bin/kestrel/tui/checks.rs:809
+    /// Several files picked together are a batch, which does not render a file
+    /// written for the 31-EDO template yet: that one is reported as a file that
+    /// can't be rendered, with the way out, and the rest are as they were.
+
+[19] src/bin/kestrel/tui/checks.rs:834
     /// A per-track render's steps choose the tracks, the output and the
     /// format, so typing them is refused there; typed into a normal render
     /// they would turn it into a per-track one, so they are refused there too,

@@ -22,6 +22,8 @@ pub struct MidiInfo {
     pub division: Division,
     /// Things that do not stop a render but are worth saying.
     pub notes: Vec<String>,
+    /// A note key over 127: the file is written for the 31-EDO template \[2\]
+    pub extended_keys: bool,
 }
 
 #[derive(Debug)]
@@ -30,13 +32,14 @@ pub enum Verdict {
     Invalid { path: PathBuf, reason: String },
 }
 
+#[cfg(test)]
 impl Verdict {
     pub fn is_valid(&self) -> bool {
         matches!(self, Verdict::Valid(_))
     }
 }
 
-/// What a file that is not a MIDI most likely is, from its first bytes. Black \[2\]
+/// What a file that is not a MIDI most likely is, from its first bytes. Black \[3\]
 fn archive_kind(head: &[u8]) -> Option<&'static str> {
     const MAGIC: &[(&[u8], &str)] = &[
         (&[0xFD, b'7', b'z', b'X', b'Z', 0x00], "xz"),
@@ -65,7 +68,7 @@ fn read_head(path: &Path, buf: &mut [u8]) -> std::io::Result<usize> {
     Ok(got)
 }
 
-/// The quick check: the header and the chunk list, never an event. \[3\]
+/// The quick check: the header and the chunk list, never an event. \[4\]
 pub fn check_midi(path: &Path) -> Verdict {
     let invalid = |reason: String| Verdict::Invalid {
         path: path.to_path_buf(),
@@ -144,6 +147,14 @@ pub fn check_midi(path: &Path) -> Verdict {
     if h.format == 2 {
         notes.push("format 2: its independent sequences will all play at once".into());
     }
+    let extended_keys = kestrel::midi::uses_extended_keys(path).unwrap_or(false);
+    if extended_keys {
+        notes.push(
+            "note keys over 127: written for the 31-EDO template, and played as it \
+             (--31edo) when rendered on its own"
+                .into(),
+        );
+    }
 
     Verdict::Valid(MidiInfo {
         path: path.to_path_buf(),
@@ -152,7 +163,25 @@ pub fn check_midi(path: &Path) -> Verdict {
         tracks: h.tracks.len(),
         division: h.division,
         notes,
+        extended_keys,
     })
+}
+
+/// What a batch says of a file written for the 31-EDO template: that it \[5\]
+pub const BATCH_31EDO: &str = "written for the 31-EDO template, which a batch can't render yet: \
+                               pick it on its own";
+
+/// A selection of several files, where a 31-EDO file is one that can't be rendered.
+pub fn refuse_31edo_in_batch(verdicts: Vec<Verdict>) -> Vec<Verdict> {
+    verdicts
+        .into_iter()
+        .map(|v| match v {
+            Verdict::Valid(info) if info.extended_keys => {
+                Verdict::Invalid { path: info.path, reason: BATCH_31EDO.into() }
+            }
+            v => v,
+        })
+        .collect()
 }
 
 /// `check_midi` over a selection, on a few threads, in the order given.
@@ -228,13 +257,13 @@ impl FontProfile {
         }
     }
 
-    /// A General MIDI bank, as opposed to an instrument. \[4\]
+    /// A General MIDI bank, as opposed to an instrument. \[6\]
     pub fn is_general_midi(&self) -> bool {
         self.melodic_programs >= 96 || (self.melodic_programs >= 64 && self.drum_kits > 0)
     }
 }
 
-/// Which soundfont goes underneath. \[5\]
+/// Which soundfont goes underneath. \[7\]
 pub fn layer_order(profiles: &[FontProfile]) -> Vec<usize> {
     match profiles {
         [a, b] if !a.is_general_midi() && b.is_general_midi() => vec![1, 0],
@@ -291,7 +320,7 @@ pub enum VoiceAnswer {
     Invalid,
 }
 
-/// Read a typed voice count. \[6\]
+/// Read a typed voice count. \[8\]
 pub fn parse_voices(input: &str, device_max: Option<u32>) -> VoiceAnswer {
     let t = input.trim();
     if t.is_empty() || t.eq_ignore_ascii_case("enter") {
@@ -333,12 +362,12 @@ pub fn parse_voices(input: &str, device_max: Option<u32>) -> VoiceAnswer {
 
 // ---- Output ---------------------------------------------------------------
 
-/// Local time as it goes into a file name. \[7\]
+/// Local time as it goes into a file name. \[9\]
 pub fn timestamp() -> String {
     chrono::Local::now().format("%m-%d-%Y %H.%M.%S").to_string()
 }
 
-/// Where a render of `midi` into `dir` goes: the MIDI's name with the \[8\]
+/// Where a render of `midi` into `dir` goes: the MIDI's name with the \[10\]
 pub fn output_path(dir: &Path, midi: &Path, ext: &str, stamp: &str) -> PathBuf {
     let stem = midi
         .file_stem()
@@ -360,7 +389,7 @@ pub fn output_path(dir: &Path, midi: &Path, ext: &str, stamp: &str) -> PathBuf {
 
 // ---- Typed flags ----------------------------------------------------------
 
-/// Split a typed line into arguments: whitespace separates, and single or \[9\]
+/// Split a typed line into arguments: whitespace separates, and single or \[11\]
 pub fn split_args(line: &str) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     let mut cur = String::new();
@@ -407,9 +436,9 @@ pub struct Extra {
     pub reload: bool,
 }
 
-/// Flags no loader reads: they choose the device, the voice pool, the \[10\]
+/// Flags no loader reads: they choose the device, the voice pool, the \[12\]
 pub(crate) const LOAD_NEUTRAL: &[&str] = &[
-    // [11]
+    // [13]
     "--phase-mode",
     "--phase-strength",
     "--phase-seed",
@@ -423,9 +452,13 @@ pub(crate) const LOAD_NEUTRAL: &[&str] = &[
     "--backend",
     "--block-csv",
     "--ceiling-db",
+    // How often a render saves its progress; the loader never sees it.
+    "--checkpoint-every",
     // The output stage's, applied to the mix, which the loader never sees.
     "--dc-blocker",
     "--dc-blocker-hz",
+    // Read as the MIDI is opened and as notes are built, never by the loader.
+    "--31edo",
     "--ffmpeg",
     "--format",
     "--gpu-adapter",
@@ -440,19 +473,23 @@ pub(crate) const LOAD_NEUTRAL: &[&str] = &[
     "--min-velocity",
     "--nan-guard",
     "--no-limiter",
+    // Whether a render keeps checkpoints; the loader never sees it.
+    "--no-resume",
     "--no-sort",
     "--no-true-peak",
     "--profile",
     "--seconds",
     "--steal",
     "--steal-percent",
+    // Where a block's GPU work is cut into submissions; no output bit moves.
+    "--submit-voices",
     "--track-jobs",
     "--unchecked-shaders",
-    // [12]
+    // [14]
     "--volume",
 ];
 
-/// Check typed flags against what the earlier steps already chose. \[13\]
+/// Check typed flags against what the earlier steps already chose. \[15\]
 pub fn extra_flags(tokens: Vec<String>, adapters: usize, per_track: bool) -> Result<Extra, String> {
     let mut out = Extra::default();
     let mut it = tokens.into_iter();
@@ -487,7 +524,7 @@ pub fn extra_flags(tokens: Vec<String>, adapters: usize, per_track: bool) -> Res
         if name == "--force-cli" {
             continue;
         }
-        // [14]
+        // [16]
         if name == "--gpu-backend" {
             let value = match tok.split_once('=') {
                 Some((_, v)) => Some(v.to_string()),
@@ -606,7 +643,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Every character the timestamp puts in a name has to be legal on \[15\]
+    /// Every character the timestamp puts in a name has to be legal on \[17\]
     #[test]
     fn the_timestamp_is_a_legal_windows_file_name() {
         let stamp = timestamp();
@@ -716,7 +753,30 @@ mod tests {
         extra_flags(split_args(line).unwrap(), 3, false)
     }
 
-    /// A per-track render's steps choose the tracks, the output and the \[16\]
+    /// Several files picked together are a batch, which does not render a file \[18\]
+    #[test]
+    fn a_31_edo_file_among_several_is_one_that_cannot_be_rendered() {
+        let info = |name: &str, extended_keys: bool| MidiInfo {
+            path: PathBuf::from(name),
+            size: 1,
+            format: 1,
+            tracks: 1,
+            division: Division::Ppq(480),
+            notes: Vec::new(),
+            extended_keys,
+        };
+        let out = refuse_31edo_in_batch(vec![
+            Verdict::Valid(info("a.mid", false)),
+            Verdict::Valid(info("wide.mid", true)),
+            Verdict::Invalid { path: PathBuf::from("bad.mid"), reason: "not a MIDI file".into() },
+        ]);
+        assert!(matches!(&out[0], Verdict::Valid(i) if i.path == Path::new("a.mid")));
+        assert!(matches!(&out[1], Verdict::Invalid { path, reason }
+            if path == Path::new("wide.mid") && reason.contains("31-EDO") && reason.contains("on its own")));
+        assert!(matches!(&out[2], Verdict::Invalid { reason, .. } if reason == "not a MIDI file"));
+    }
+
+    /// A per-track render's steps choose the tracks, the output and the \[19\]
     #[test]
     fn per_track_flags_go_where_their_steps_are() {
         let per = |line: &str| extra_flags(split_args(line).unwrap(), 3, true);

@@ -208,9 +208,11 @@ pub struct Stems {
     pub merge: bool,
     /// The file's scan, when the caller has made one already -- the guided \[21\]
     pub scanned: Option<Arc<TrackScan>>,
+    /// Checkpoints: where, how often, and what to continue from; see \[22\]
+    pub resume: Option<crate::resume::Spec>,
 }
 
-/// Default and ceiling for `Stems::jobs`, decided with the user 2026-09-23: \[22\]
+/// Default and ceiling for `Stems::jobs`, decided with the user 2026-09-23: \[23\]
 pub fn default_jobs() -> usize {
     8.min(max_jobs())
 }
@@ -222,13 +224,13 @@ pub fn max_jobs() -> usize {
         .max(1)
 }
 
-/// Seconds each track of a per-track render runs: to where the file ends and \[23\]
+/// Seconds each track of a per-track render runs: to where the file ends and \[24\]
 pub fn render_secs(scan: &TrackScan, rate: u32, seconds: Option<f64>) -> f64 {
     let secs = scan.duration(rate) + 1.0;
     seconds.map_or(secs, |s| secs.min(s))
 }
 
-/// Bytes a per-track render writes as `files` files of `secs` each in the \[24\]
+/// Bytes a per-track render writes as `files` files of `secs` each in the \[25\]
 pub fn output_bytes(files: usize, secs: f64, rate: u32, ext: &str, float32: bool) -> (u64, bool) {
     let rate = rate as f64;
     let (per_sec, exact) = match ext {
@@ -242,22 +244,22 @@ pub fn output_bytes(files: usize, secs: f64, rate: u32, ext: &str, float32: bool
     ((files as f64 * (per_sec * secs + 4096.0)) as u64, exact)
 }
 
-/// The per-block candidate cap each track of a per-track render gets, from \[25\]
+/// The per-block candidate cap each track of a per-track render gets, from \[26\]
 pub fn candidates_each(cfg: &crate::config::Config) -> u32 {
     let floor = 1u64 << 16;
     let ceiling = (cfg.max_block_candidates as u64 / 256).max(floor);
     (cfg.pool_slots() as u64 * 64).clamp(floor, ceiling) as u32
 }
 
-/// Each stem's share of a voice total, split evenly, as decided with the user \[26\]
+/// Each stem's share of a voice total, split evenly, as decided with the user \[27\]
 pub fn voices_each(total: u32, stems: usize) -> u32 {
     (total / stems.max(1) as u32).max(1)
 }
 
-/// The guided renderer's default voice total for a per-track render, set by \[27\]
+/// The guided renderer's default voice total for a per-track render, set by \[28\]
 pub const GUIDED_VOICES: u32 = 60_000_000;
 
-/// The most voices a per-track render may be given in all, set by the user \[28\]
+/// The most voices a per-track render may be given in all, set by the user \[29\]
 pub const MAX_TOTAL_VOICES: u32 = 2_000_000_000;
 
 /// `cfg` as a per-track render lays out its voices for `bank`.
@@ -267,28 +269,28 @@ fn laid_out(cfg: &crate::config::Config, bank: &crate::bank::Bank, voices: u32) 
     cfg
 }
 
-/// The most voices one track holds on an adapter that binds `binding_bytes` \[29\]
+/// The most voices one track holds on an adapter that binds `binding_bytes` \[30\]
 pub fn max_voices_alone(cfg: &crate::config::Config, bank: &crate::bank::Bank, binding_bytes: u64) -> u32 {
     crate::gpu::GpuBatch::max_voices_each(&laid_out(cfg, bank, 1), bank, binding_bytes, 1)
 }
 
-/// The most voices a per-track render of `tracks` tracks can be given with as \[30\]
+/// The most voices a per-track render of `tracks` tracks can be given with as \[31\]
 pub fn max_voices_at_once(cfg: &crate::config::Config, bank: &crate::bank::Bank, binding_bytes: u64, tracks: usize) -> u32 {
     use crate::gpu::GpuBatch;
     let tracks = tracks.max(1);
-    // [31]
+    // [32]
     let lanes = GpuBatch::lanes_that_bind(&laid_out(cfg, bank, 1), bank, binding_bytes, tracks.min(crate::gpu::LANES_MAX)).max(1);
     let each = GpuBatch::max_voices_each(&laid_out(cfg, bank, 1), bank, binding_bytes, lanes);
     (each as u64 * tracks as u64).min(MAX_TOTAL_VOICES as u64) as u32
 }
 
-/// How many of `tracks` tracks share the device at a time when they are given \[32\]
+/// How many of `tracks` tracks share the device at a time when they are given \[33\]
 pub fn tracks_at_once(cfg: &crate::config::Config, bank: &crate::bank::Bank, binding_bytes: u64, tracks: usize, total: u32) -> usize {
     let lanes = tracks.clamp(1, crate::gpu::LANES_MAX);
     crate::gpu::GpuBatch::lanes_that_bind(&laid_out(cfg, bank, voices_each(total, tracks)), bank, binding_bytes, lanes)
 }
 
-/// The file a stem is written to, inside the folder: the track number padded \[33\]
+/// The file a stem is written to, inside the folder: the track number padded \[34\]
 pub fn stem_file_name(index: usize, track_count: usize, name: Option<&str>, ext: &str) -> String {
     let width = track_count.max(1).to_string().len();
     let mut clean: String = name
@@ -319,17 +321,17 @@ impl SetupTracks {
 }
 
 impl TrackScan {
-    /// Tick of the file's last event on any track, tempo changes aside; see \[34\]
+    /// Tick of the file's last event on any track, tempo changes aside; see \[35\]
     pub fn end_tick(&self) -> u64 {
         self.tracks.iter().map(|t| t.end_tick).max().unwrap_or(0)
     }
 
-    /// What a render of `track` alone reads: that track, the setup tracks \[35\]
+    /// What a render of `track` alone reads: that track, the setup tracks \[36\]
     pub fn selection(&self, track: usize, setup: SetupTracks) -> Result<crate::midi::TrackSelection> {
         Ok(self.selections(&[track], setup)?.remove(0))
     }
 
-    /// `selection` for each of `tracks`. The setup tracks and the end are the \[36\]
+    /// `selection` for each of `tracks`. The setup tracks and the end are the \[37\]
     pub fn selections(&self, tracks: &[usize], setup: SetupTracks) -> Result<Vec<crate::midi::TrackSelection>> {
         let setups: Vec<usize> = match setup {
             SetupTracks::Apply => self.of_kind(TrackKind::Setup).collect(),
@@ -372,7 +374,7 @@ impl TrackScan {
         self.tracks.iter().map(TrackInfo::notes).sum()
     }
 
-    /// The track with the most note-ons, the first of them on a tie. `None` \[37\]
+    /// The track with the most note-ons, the first of them on a tie. `None` \[38\]
     pub fn busiest(&self) -> Option<usize> {
         let (i, t) = self
             .tracks
@@ -391,7 +393,7 @@ impl TrackScan {
             .map(|(i, _)| i)
     }
 
-    /// The output frame each of `ticks` falls on at `rate`, by the same clock \[38\]
+    /// The output frame each of `ticks` falls on at `rate`, by the same clock \[39\]
     pub fn frames_at(&self, ticks: &[u64], rate: u32) -> Vec<f64> {
         let mut order: Vec<usize> = (0..ticks.len()).collect();
         order.sort_by_key(|&i| ticks[i]);
@@ -399,7 +401,7 @@ impl TrackScan {
         let mut tempo = self.tempo.iter().peekable();
         let mut out = vec![0.0; ticks.len()];
         for i in order {
-            // [39]
+            // [40]
             while let Some(&&(t, us)) = tempo.peek() {
                 if t > ticks[i] {
                     break;
@@ -412,7 +414,7 @@ impl TrackScan {
         out
     }
 
-    /// Seconds from the start to the file's last event at `rate`. The render \[40\]
+    /// Seconds from the start to the file's last event at `rate`. The render \[41\]
     pub fn duration(&self, rate: u32) -> f64 {
         self.frames_at(&[self.end_tick()], rate)[0] / rate as f64
     }
@@ -423,13 +425,13 @@ impl TrackScan {
 pub struct ScanProgress {
     /// Track bytes in the file, set as the scan starts.
     pub bytes_total: AtomicU64,
-    /// Track bytes decoded so far. Reaches `bytes_total` exactly when the scan \[41\]
+    /// Track bytes decoded so far. Reaches `bytes_total` exactly when the scan \[42\]
     pub bytes_read: AtomicU64,
     /// Set to stop the scan, which then returns an error saying so.
     pub cancel: AtomicBool,
 }
 
-/// Threads a scan of `tracks` tracks runs on when asked for `jobs`: one per \[42\]
+/// Threads a scan of `tracks` tracks runs on when asked for `jobs`: one per \[43\]
 pub fn jobs_for(jobs: usize, tracks: usize) -> usize {
     match jobs {
         0 => std::thread::available_parallelism().map_or(4, |n| n.get()),
@@ -445,7 +447,7 @@ pub fn scan(path: impl AsRef<Path>, jobs: usize, progress: Option<&ScanProgress>
     if h.tracks.is_empty() {
         bail!("{}: no MTrk chunks", path.display());
     }
-    // [43]
+    // [44]
     if h.trailing_bytes > 0 {
         log::warn!("{}: {} bytes after the last chunk are not chunks; ignored", path.display(), h.trailing_bytes);
     }
@@ -458,7 +460,7 @@ pub fn scan(path: impl AsRef<Path>, jobs: usize, progress: Option<&ScanProgress>
         .bytes_total
         .store(h.tracks.iter().map(|&(_, len)| len).sum(), Ordering::Relaxed);
 
-    // [44]
+    // [45]
     let mut order: Vec<usize> = (0..h.tracks.len()).collect();
     order.sort_by_key(|&i| Reverse(h.tracks[i].1));
     let jobs = jobs_for(jobs, order.len());
@@ -502,7 +504,7 @@ pub fn scan(path: impl AsRef<Path>, jobs: usize, progress: Option<&ScanProgress>
         tempo.extend(changes);
         tracks.push(info);
     }
-    // [45]
+    // [46]
     tempo.sort_by_key(|&(tick, _)| tick);
 
     Ok(TrackScan {
@@ -557,6 +559,8 @@ fn scan_track(path: &Path, offset: u64, len: u64, progress: &ScanProgress) -> Re
             | Event::Program { .. }
             | Event::PitchBend { .. }
             | Event::DrumPart { .. }
+            | Event::Tune { .. }
+            | Event::KeyTune { .. }
             | Event::ResetParts => t.controls += 1,
             Event::Tempo(us) => tempo.push((tick, us)),
             Event::Other => {}
@@ -571,7 +575,7 @@ fn scan_track(path: &Path, offset: u64, len: u64, progress: &ScanProgress) -> Re
             }
         }
     }
-    // [46]
+    // [47]
     progress.bytes_read.fetch_add(len - reported, Ordering::Relaxed);
     t.name = r.name.take();
     t.tempos = tempo.len() as u64;
@@ -600,7 +604,7 @@ mod tests {
         (tick, m)
     }
 
-    /// Five tracks of every kind, with tempo changes on two of them -- one on \[47\]
+    /// Five tracks of every kind, with tempo changes on two of them -- one on \[48\]
     fn five_tracks(path: &Path) {
         let mut w = MidiWriter::new(480);
         // 1: a conductor track. Name, tempo, nothing a channel hears.
@@ -610,7 +614,7 @@ mod tests {
             tempo(960, 250_000),
             tempo(5000, 2_000_000),
         ]);
-        // [48]
+        // [49]
         w.raw_track(vec![
             name(0, b"Piano"),
             (0, vec![0xB0, 7, 100]),
@@ -647,7 +651,7 @@ mod tests {
     #[test]
     fn a_track_gets_candidates_by_its_pool() {
         let at = |v: u32| candidates_each(&crate::config::Config { max_voices: v, ..Default::default() });
-        // [49]
+        // [50]
         assert_eq!(at(1082), 86_528);
         assert_eq!(at(18), 1 << 16);
         assert_eq!(at(1 << 20), (1 << 27) / 256);
@@ -655,7 +659,7 @@ mod tests {
         assert_eq!(candidates_each(&small), 1 << 16);
     }
 
-    /// UTF-8 when it is UTF-8, Shift-JIS when it is not, and the old lossy \[50\]
+    /// UTF-8 when it is UTF-8, Shift-JIS when it is not, and the old lossy \[51\]
     #[test]
     fn a_name_is_utf8_or_shift_jis() {
         assert_eq!(decode_name(b"Piano"), "Piano");
@@ -715,7 +719,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// The scan's tempo map and note count are what the merged stream plays, \[51\]
+    /// The scan's tempo map and note count are what the merged stream plays, \[52\]
     #[test]
     fn a_scan_agrees_with_the_merged_stream() {
         let path = temp("agree.mid");
@@ -745,7 +749,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// Forty tracks of assorted lengths, scanned on one thread and on eight, \[52\]
+    /// Forty tracks of assorted lengths, scanned on one thread and on eight, \[53\]
     #[test]
     fn the_scan_is_the_same_on_any_number_of_threads() {
         let path = temp("forty.mid");
@@ -832,7 +836,7 @@ mod tests {
         assert_eq!(voices_each(3, 10), 1);
     }
 
-    /// A name longer than the reader keeps is cut, and the events after it \[53\]
+    /// A name longer than the reader keeps is cut, and the events after it \[54\]
     #[test]
     fn a_long_name_is_cut_and_the_track_still_reads() {
         let path = temp("longname.mid");

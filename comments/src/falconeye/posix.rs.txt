@@ -34,67 +34,120 @@
 /// The kernel log's lines that bear on a render with process id `pid`: its
 /// own segfault or trap line, the out-of-memory killer taking it, and every
 /// GPU driver error.
+///
+/// **A GPU error that is not this render's has its process's name blanked**
+/// (`without_other_programs`): the kernel names the process the error came from,
+/// and the report promises it does not contain the names of other programs.
 
-[3] src/falconeye/posix.rs:57
+[3] src/falconeye/posix.rs:73
+/// `line` with the name of every process in it that is not Kestrel blanked.
+///
+/// The GPU drivers log the process an error came from, and the machine report
+/// quotes every GPU error in the last 30 days, not only Kestrel's: a reset that
+/// Kestrel did not cause is still worth seeing in time. But the report says it does
+/// not contain the names of other programs, and a line from a Linux user's machine
+/// (2026-10-04) read `NVRM: Xid ... 69, pid=57910, name=other-program, ...`. The
+/// shapes the drivers use, all of them handled:
+///
+/// - NVIDIA: `pid=57910, name=other-program, Class Error: ...`
+/// - amdgpu: `Process information: process otherprog pid 12 thread otherprog:cs0 pid 13`
+/// - i915: `GPU HANG: ecode 9:1:85dffffb, in otherprog [12]` and `otherprog[12] context reset`
+/// - nouveau: `fifo: channel 3 [otherprog[12]] killed!`
+///
+/// A line in a shape not on that list is quoted as it is; the list is what the
+/// drivers log today, and a new shape is one more rule here.
+
+[4] src/falconeye/posix.rs:98
+/// Every word that follows `prefix` -- up to a space or one of `stops` -- and is
+/// followed by `then`, replaced unless it is Kestrel's name.
+
+[5] src/falconeye/posix.rs:115
+/// A process id in square brackets, `[12]`, takes the name before it with it:
+/// `otherprog[12]`, `[otherprog[12]]`, or `in otherprog [12]`. A bracket of anything but
+/// digits -- `[drm]`, `[7f3a1a000000+2400000]`, a timestamp -- is not one.
+
+[6] src/falconeye/posix.rs:153
 /// A GPU driver's error in the kernel log: NVIDIA's Xid, or amdgpu, i915,
 /// xe or nouveau with a timeout, reset, fault or hang. Those drivers log a
 /// good deal at every boot that is not trouble, so the name alone is not
 /// enough.
 
-[4] src/falconeye/posix.rs:70
+[7] src/falconeye/posix.rs:166
 /// How the kernel log says process `pid` died, if it says: the OOM killer,
 /// or a segfault or trap, with the module it happened in.
 
-[5] src/falconeye/posix.rs:94
+[8] src/falconeye/posix.rs:190
 /// systemd-coredump's record of a crash, from `coredumpctl info <pid>`: the
 /// signal, and the lines worth quoting. Everything that names the machine or
 /// the user -- the hostname, the boot and machine ids, the command line -- is
 /// left out rather than scrubbed.
 
-[6] src/falconeye/posix.rs:125
+[9] src/falconeye/posix.rs:221
 /// Whether the kernel hands core dumps to systemd, so `coredumpctl` will
 /// have this one.
 
-[7] src/falconeye/posix.rs:141
+[10] src/falconeye/posix.rs:237
 /// The first `model name` in `/proc/cpuinfo`, or on ARM the `Hardware` or
 /// `Model` line.
 
-[8] src/falconeye/posix.rs:180
+[11] src/falconeye/posix.rs:276
 /// An NVIDIA card's total memory from `nvidia-smi
 /// --query-gpu=pci.device_id,memory.total --format=csv,noheader,nounits`,
 /// whose id puts the device above the vendor: `0x2D5910DE`.
 
-[9] src/falconeye/posix.rs:195
+[12] src/falconeye/posix.rs:291
 /// A crash report Apple wrote (`.ips`, macOS 12 on): a line of JSON about
 /// the report, then the report as JSON. The process id it is about, what
 /// killed it, and the crashed thread's first frames, with the images they
 /// are in. `None` for anything that does not read as one.
 
-[10] src/falconeye/posix.rs:263
+[13] src/falconeye/posix.rs:359
 /// The GPU's lines in `system_profiler SPDisplaysDataType`. Displays' serial
 /// numbers are in the same output and are left out.
 
-[11] src/falconeye/posix.rs:276
+[14] src/falconeye/posix.rs:372
 /// Where the power comes from, and the battery's charge, from `pmset -g
 /// batt`, without the battery's id.
 
-[12] src/falconeye/posix.rs:300
+[15] src/falconeye/posix.rs:396
 /// How render `pid` died, when the system wrote it down, and the records to
 /// quote in the report: `(what, records)`. `what` finishes "The render ...".
 
-[13] src/falconeye/posix.rs:308
+[16] src/falconeye/posix.rs:404
         // systemd writes the record once the dump is taken, which for a
         // process holding gigabytes takes a while.
 
-[14] src/falconeye/posix.rs:349
+[17] src/falconeye/posix.rs:445
 /// The kernel log from `window` ago: `journalctl -k`, or `dmesg` where there
 /// is no journal. Either can be closed to a user who is not in the right
 /// group, and then says so.
 
-[15] src/falconeye/posix.rs:388
+[18] src/falconeye/posix.rs:484
 /// The newest crash report about process `pid`, written in the last
 /// `window`.
 
-[16] src/falconeye/posix.rs:431
+[19] src/falconeye/posix.rs:527
+/// What the machine report quotes of the kernel log: every GPU driver error, with
+/// the names of programs other than Kestrel blanked, and the out-of-memory
+/// killer's lines for Kestrel. There is no render's pid to match, so none of it is
+/// taken for Kestrel's by number.
+
+[20] src/falconeye/posix.rs:539
 /// The GPU drivers' errors and Kestrel's crashes over the last `days`, for
 /// the machine report.
+
+[21] src/falconeye/posix.rs:713
+    /// The line in a Linux user's report (2026-10-04), exactly, with the machine's
+    /// name already replaced as the report does.
+
+[22] src/falconeye/posix.rs:717
+    /// The machine report says it contains no other program's name, and it quoted
+    /// one: every GPU driver error is quoted, whoever's, with the name in it.
+
+[23] src/falconeye/posix.rs:735
+        // What is useful of the lines is still there: that an error happened, when,
+        // on which device, and Kestrel's own.
+
+[24] src/falconeye/posix.rs:739
+        // amdgpu names the process on a line of its own, which the report does not
+        // quote today; if it ever does, the name goes the same way.

@@ -51,7 +51,17 @@ pub trait Backend {
     /// Step over one block without rendering it, in place of `set_gates` \[9\]
     fn skip_block(&mut self) -> Result<()>;
 
-    /// Render one block, start to finish. \[10\]
+    /// Write what the backend carries from one block to the next -- the live \[10\]
+    fn save_state(&mut self, _w: &mut dyn std::io::Write) -> Result<()> {
+        anyhow::bail!("the {} backend cannot save a render's state", self.name())
+    }
+
+    /// The other half: take back what `save_state` wrote, from a backend that \[11\]
+    fn load_state(&mut self, _r: &mut dyn std::io::Read) -> Result<()> {
+        anyhow::bail!("the {} backend cannot load a render's state", self.name())
+    }
+
+    /// Render one block, start to finish. \[12\]
     fn render(&mut self, out: &mut [f32]) -> Result<()> {
         self.submit()?;
         self.finish(out)
@@ -61,12 +71,12 @@ pub trait Backend {
 
     fn name(&self) -> &'static str;
 
-    /// Per-pass timings from the last block, for `--profile`. Empty when the \[11\]
+    /// Per-pass timings from the last block, for `--profile`. Empty when the \[13\]
     fn timings(&self) -> Vec<(&'static str, f64)> {
         Vec::new()
     }
 
-    /// Lose the device on purpose, for testing what a render does when the \[12\]
+    /// Lose the device on purpose, for testing what a render does when the \[14\]
     #[cfg(feature = "dev")]
     fn lose_device(&mut self) {}
 }

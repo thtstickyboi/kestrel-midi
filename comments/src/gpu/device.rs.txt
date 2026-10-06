@@ -38,54 +38,117 @@
 /// On DX12 the shaders are compiled by DXC, linked into the executable, not by
 /// wgpu's default FXC. See `dx12_compiler`.
 
-[5] src/gpu/device.rs:110
+[5] src/gpu/device.rs:91
+    // What the device is about to be asked for, and the memory it has to live in,
+    // in the log before it is asked: a device that cannot be opened ends the
+    // render before anything else is written, and these are what the report of one
+    // is read for. (An integrated GPU was lost 71 ms after the line above, with
+    // nothing else in its log to say why, 2026-10-05.)
+
+[6] src/gpu/device.rs:118
+        // The device-lost callback is set once a device exists, so a device lost
+        // while it is being opened never reaches it: this error is all there is,
+        // and on its own it read "Parent device is lost".
+
+[7] src/gpu/device.rs:140
+/// A size limit, in MiB: an adapter that has none says a number no memory could
+/// reach (NVIDIA's Vulkan says 2^52 bytes, 4 PiB, for the whole buffer), which is not
+/// worth printing. Past 1 TiB is no limit.
+
+[8] src/gpu/device.rs:164
+/// What DXGI says about the adapter's memory: the dedicated amount, and the budget
+/// Windows gives this process and what it has used of it. An integrated GPU has
+/// little dedicated memory and lives in the system's, so the budget is the figure.
+
+[9] src/gpu/device.rs:188
+/// The other ways this machine offers to open a GPU, which a failure names: every
+/// adapter wgpu finds that is not a processor and is not the one that failed.
+/// The same card through another backend counts, since the driver paths differ.
+
+[10] src/gpu/device.rs:228
 /// The adapter a render with `cfg` runs on, chosen as `create` chooses it,
 /// without opening a device: for `gpu::auto_pool_budget`, which has to size
 /// the pool for the adapter the render will get before the soundfont loads.
 
-[6] src/gpu/device.rs:164
+[11] src/gpu/device.rs:282
     // A device error that arrives asynchronously would otherwise show up as
     // silently wrong audio.
 
-[7] src/gpu/device.rs:171
+[12] src/gpu/device.rs:289
     // wgpu drops a lost device's error on the floor unless this is set (27:
     // `ErrorType::DeviceLost => return, // will be surfaced via callback`),
     // and it surfaces later as a poll or a map failing with no cause named:
     // `WrongSubmissionIndex`, `BufferAsyncError`. Kept so `lost` can name it.
 
-[8] src/gpu/device.rs:190
+[13] src/gpu/device.rs:297
+            // The advice goes in the log line, not only in `lost`'s error:
+            // NVIDIA's Vulkan driver can end the process right after this
+            // callback, before any poll or map has failed to build that error
+            // (a mid-range card, 2026-10-03), and the log is what is left.
+
+[14] src/gpu/device.rs:316
 /// The error for a poll or a map that failed, which is how a lost device
 /// shows itself: `detail` is wgpu's own error, and the callback's reason is
 /// added when it came.
 
-[9] src/gpu/device.rs:219
+[15] src/gpu/device.rs:346
 /// Compute-only bind group layout. `read_only[i]` says whether binding i is a
 /// read-only storage buffer; binding 0 is always the uniform block.
 
-[10] src/gpu/device.rs:232
+[16] src/gpu/device.rs:359
 /// `bind_layout`'s entries: binding 0 the uniforms, and a storage buffer at
 /// each binding after it, read-only as `read_only` says.
 
-[11] src/gpu/device.rs:291
+[17] src/gpu/device.rs:418
 /// List every adapter wgpu can reach, for working out which device a render
 /// will land on.
 
-[12] src/gpu/device.rs:310
+[18] src/gpu/device.rs:437
         // The number people actually want off this listing. `gpu-info` used to
         // print the binding size and leave the division to the reader.
 
-[13] src/gpu/device.rs:336
+[19] src/gpu/device.rs:447
+        // That is the binding's limit. The card's memory is the other, and where this
+        // system gives a figure for it, a render with no soundfont to count yet is held
+        // to about what its voice buffers could use of it.
+
+[20] src/gpu/device.rs:475
     /// The most of one buffer the adapter will bind to a shader, which is
     /// what caps the voice pool.
 
-[14] src/gpu/device.rs:339
+[21] src/gpu/device.rs:478
     /// The largest `--max-voices` that binding takes at the configured
     /// `--steal-percent`: the same figure `gpu-info` prints.
 
-[15] src/gpu/device.rs:351
+[22] src/gpu/device.rs:484
+    /// The memory a render can plan on, where it can be read: the card's own for a
+    /// discrete GPU (DXGI on Windows; sysfs or `nvidia-smi` on Linux), and what
+    /// Windows lets a process use for an integrated one, which shares system memory.
+    /// `None` where there is no figure -- an integrated GPU off Windows, and every
+    /// Mac, whose memory is unified and which wgpu does not report -- and then the
+    /// voice limit is the binding's alone. See [`memory_for`].
+
+[23] src/gpu/device.rs:493
+/// The memory a render can plan on for this adapter, for [`AdapterSummary::memory_bytes`].
+/// Read once per adapter and kept: it does not change on a machine, and on Linux
+/// NVIDIA's figure is a run of `nvidia-smi`.
+
+[24] src/gpu/device.rs:509
+        // Its dedicated memory is a carve-out of a few hundred MiB and the rest is
+        // system memory it shares; what a process may use of that is the OS's figure.
+
+[25] src/gpu/device.rs:529
 /// Every adapter wgpu can reach, best first, and the index of the one
 /// `create` would open for `cfg` -- `None` when nothing is eligible.
 ///
 /// Uses `create`'s ranking and filters, so the adapter a listing marks as the
 /// default is the adapter a render lands on. An unknown `--gpu-backend` is an
 /// error here as it is there.
+
+[26] src/gpu/device.rs:603
+    /// A software adapter has no memory of its own to plan on, and an adapter that has a
+    /// figure has a real one, the same on every ask (it is read once and kept).
+
+[27] src/gpu/device.rs:632
+        // What NVIDIA's Vulkan reports for the whole buffer, measured 2026-10-05, and the
+        // largest number there is.

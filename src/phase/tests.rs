@@ -692,6 +692,7 @@ fn sessions_prepare_preloaded_banks_and_cancel_before_creating_output() {
         block_csv: None,
         track: None,
         stems: None,
+        checkpoint: None,
         backend: crate::config::BackendKind::Cpu,
         cfg,
     };

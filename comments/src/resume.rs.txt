@@ -1,0 +1,178 @@
+# Comments extracted from src/resume.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/resume.rs:5
+//! Resuming a per-track render: the checkpoint file, `.krsm`, and what makes
+//! one safe to trust.
+//!
+//! **The requirement, from the development notes:** a resumed
+//! render writes the same bytes as an uninterrupted one. That is the
+//! determinism rule applied to a stop, and without it a resumed file could not
+//! be checked. So a checkpoint is refused, with the reason, rather than
+//! guessed at, whenever anything it was made under has changed: the build, the
+//! MIDI, a soundfont or one of its sample files, the tracks, the backend and
+//! the card, the voice limit.
+//!
+//! **What a per-track render saves.** No GPU state at all. Each track renders
+//! alone and the same bytes whatever lane or thread ran it (`stems`), so a
+//! track is either finished -- its file exists, or its blocks are in the mix --
+//! or it starts again from its first block. For a merge the mix is an exact
+//! integer sum (`mix`), so the order tracks were added in cannot matter.
+//!
+//! **The one subtlety, which the design note missed.** A track adds its blocks
+//! to the mix as it goes, so the running mix already holds part of every track
+//! that was in flight. Starting those tracks again from the beginning would add
+//! those blocks a second time. So a checkpoint also records, for each
+//! unfinished track, how many blocks it had put in the mix, and a resumed track
+//! renders from its start but leaves out the blocks the mix already has. They
+//! are the same blocks either way, so the sum is exact. The counts and the mix
+//! are taken at one instant (`stems` holds the render still for it).
+//!
+//! **The file** is `KRSMCHK` and a version byte, the header as JSON with its
+//! length in front, then the payload (the mix, for a merge; nothing for
+//! stems), and last a 64-bit hash of every byte before it. It is written to a
+//! temporary name, synced and renamed, so a checkpoint that was cut off is
+//! never taken for a whole one; the hash is for the case where the rename was
+//! not enough.
+
+[2] src/resume.rs:46
+/// Version of the header's layout and the payload's. A file with another is
+/// refused, not read.
+
+[3] src/resume.rs:52
+/// The default insurance interval for a per-track render, in minutes: how
+/// often a running merge saves its progress against a crash or a power cut.
+/// A save holds the render still for as long as the mix takes to write (about
+/// 92 MB a minute of audio, so a second or two for a long file), which at
+/// this interval is a fraction of a percent.
+
+[4] src/resume.rs:64
+/// A 64-bit hash that takes eight bytes at a time, for telling a file that was
+/// cut off or changed from one that was not. Not cryptographic, and not meant
+/// to be: nothing here is secret, and a collision would need two files that
+/// differ and agree to 64 bits by accident. The same answer however the bytes
+/// are split across `update` calls.
+
+[5] src/resume.rs:139
+/// The build that is running: the version, and a hash of the executable.
+///
+/// **Exact, by the project's rule.** The engine changes between builds, and a
+/// track rendered by one is not guaranteed to be the bytes another would write,
+/// so a checkpoint made by one build is refused by another, a rebuild of the
+/// same source included: an executable is not byte-for-byte the same twice. The
+/// exe is hashed once, about 30 ms. (A friendlier match, by version, is the
+/// user's to decide; see the TODO.)
+
+[6] src/resume.rs:158
+/// How much of each end of a file is hashed: enough to see a re-export, and
+/// cheap for a MIDI of 180 GB.
+
+[7] src/resume.rs:162
+/// A file as it was, close enough to know whether it is the same file.
+///
+/// Size and the hashes of its first and last mebibyte decide; the modified
+/// time is kept for the message and not compared, because copying a file to
+/// another drive changes it and nothing in it.
+
+[8] src/resume.rs:255
+/// What a track had come to when its file was finished or its blocks were all
+/// in the mix: the numbers the run's summary adds up.
+
+[9] src/resume.rs:290
+    /// The WAV being written, itself: its first `bytes` of audio data are the
+    /// render so far, and a resume cuts the file back to them and goes on.
+
+[10] src/resume.rs:293
+    /// The float samples an encoder is being fed, kept in a file of their own,
+    /// because an encoded stream cannot be cut and continued: a resume feeds
+    /// a new encoder the first `bytes` of them and goes on.
+
+[11] src/resume.rs:304
+    /// Bytes of audio, counted from the start of the data: after the 44-byte
+    /// header of a WAV, from the start of a PCM file.
+
+[12] src/resume.rs:307
+    /// Hash of the last mebibyte of those bytes, to tell that the file is the
+    /// one the checkpoint was made beside and not another of the same name.
+
+[13] src/resume.rs:334
+    /// The file is there, is as long as the checkpoint says at least, and ends
+    /// the way the checkpoint says its audio did.
+
+[14] src/resume.rs:360
+    /// The most voices that were alive after any block, which only the render
+    /// that saw them can say.
+
+[15] src/resume.rs:371
+    /// The command as it was typed, which a resume parses again through the same
+    /// definition, as the guided renderer and the API do.
+
+[16] src/resume.rs:374
+    /// `cpu`, or `gpu: <adapter>`: DX12 and Vulkan write different bytes for the
+    /// same render, and so may two cards.
+
+[17] src/resume.rs:390
+    /// Set for a render of one file or one track, which saves the render itself
+    /// where a per-track render saves tracks.
+
+[18] src/resume.rs:396
+/// What a resume is checked against, worked out from the render that is about to
+/// run.
+
+[19] src/resume.rs:410
+    /// Every way this checkpoint does not fit the render about to run, said in
+    /// words, or `Ok` if it fits. All of them at once, so a user changing three
+    /// things is told about all three.
+
+[20] src/resume.rs:468
+/// What a per-track render is told about checkpoints: where, how often, the
+/// command it was started with, and what to pick up. `None` on the render means
+/// no checkpoints at all, which is what library callers and the tests get.
+
+[21] src/resume.rs:473
+    /// The `.krsm` to write, and to delete when the render is whole. `None`
+    /// puts it beside the output: `<file>.krsm` for a merge, `stems.krsm` in
+    /// the stems' folder.
+
+[22] src/resume.rs:477
+    /// How often a running merge saves its progress; `None` only on a stop
+    /// or a failure. (Stems record each finished stem a few seconds after it
+    /// is, whatever this says.)
+
+[23] src/resume.rs:485
+    /// For tests and for trying a resume by hand: stop as if cancelled once this
+    /// many blocks have been rendered in all, so a render stops at a known place.
+
+[24] src/resume.rs:519
+/// Where a per-track render's checkpoint is by default: `<file>.krsm` beside a
+/// merged file, `stems.krsm` in the folder a render to stems makes, which is
+/// named for the MIDI and goes inside `out`. The one place that says so, for
+/// the renderer that writes it and for every front end that looks for it.
+
+[25] src/resume.rs:534
+/// `song.wav` -> `song.partial.wav`: the name a file has while it is being
+/// written, with the extension last so an encoder still picks its container
+/// from it. A file that is cut off therefore never has the name of a finished
+/// one.
+
+[26] src/resume.rs:621
+/// A checkpoint that has been read and checked: whole, and a format this build
+/// reads. Whether it fits the render that wants it is `Header::check`.
+
+[27] src/resume.rs:685
+    /// Where the payload starts in the file, for the front end that tells how
+    /// big a checkpoint is.
+
+[28] src/resume.rs:853
+        // A sample file replaced by one of another size is a different soundfont,
+        // though the .sfz is untouched.
+
+[29] src/resume.rs:879
+        // A change in the middle is not seen, which is the price of reading
+        // two mebibytes of a 180 GB file; a change in either end, or in the
+        // length, is.

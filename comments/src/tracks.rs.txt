@@ -122,24 +122,29 @@
     /// renderer has, at its tracks step -- so a file of 55,000 tracks is not
     /// read twice. Used only if it is of `Job::midi`; `None` scans.
 
-[22] src/tracks.rs:266
+[22] src/tracks.rs:264
+    /// Checkpoints: where, how often, and what to continue from; see
+    /// `crate::resume`. `None` writes none, which is what a caller that has not
+    /// asked for them gets.
+
+[23] src/tracks.rs:270
 /// Default and ceiling for `Stems::jobs`, decided with the user 2026-09-23:
 /// eight at once unless asked, and never more than the cores less two, so the
 /// machine keeps something for itself. Fourteen on the sixteen-thread machine
 /// this was decided on.
 
-[23] src/tracks.rs:281
+[24] src/tracks.rs:285
 /// Seconds each track of a per-track render runs: to where the file ends and
 /// a second of tail, or to `seconds` when that comes first.
 
-[24] src/tracks.rs:288
+[25] src/tracks.rs:292
 /// Bytes a per-track render writes as `files` files of `secs` each in the
 /// container `ext`, and whether that is their size or only a bound on it. A
 /// WAV's size is known to within its release tail; the encoded formats are
 /// bounded by their presets' rates, and silence costs them almost nothing --
 /// ffmpeg writes 24-bit FLAC, and a silent minute of it is a few kilobytes.
 
-[25] src/tracks.rs:306
+[26] src/tracks.rs:310
 /// The per-block candidate cap each track of a per-track render gets, from
 /// its own config once its voices are settled: 64 candidates a pool slot,
 /// at least 2^16 and at most a 256th of `max_block_candidates`.
@@ -156,28 +161,28 @@
 /// `--track` and `--tracks` both use it, so a stem is still exactly its track
 /// rendered alone at the same voices.
 
-[26] src/tracks.rs:327
+[27] src/tracks.rs:331
 /// Each stem's share of a voice total, split evenly, as decided with the user
 /// 2026-09-22 (a split by note count was "too complex"). At least one voice.
 
-[27] src/tracks.rs:333
+[28] src/tracks.rs:337
 /// The guided renderer's default voice total for a per-track render, set by
 /// the user 2026-09-24. A normal render's default, 1,048,576, shared between
 /// thousands of tracks is a few hundred voices each; this is what rendered the
 /// whole of the largest file tested.
 
-[28] src/tracks.rs:339
+[29] src/tracks.rs:343
 /// The most voices a per-track render may be given in all, set by the user
 /// 2026-09-24: "it's 2B when users enter a higher number manually and if the
 /// -1 computation exceeds 2B". A larger total, typed or given to `--tracks`,
 /// is held to this, and so is the guided renderer's `-1`.
 
-[29] src/tracks.rs:352
+[30] src/tracks.rs:356
 /// The most voices one track holds on an adapter that binds `binding_bytes`
 /// of one buffer, alone on the device. A per-track render holds any track's
 /// share to this, with a warning.
 
-[30] src/tracks.rs:359
+[31] src/tracks.rs:363
 /// The most voices a per-track render of `tracks` tracks can be given with as
 /// many of them on the device at once as a batch holds (up to 256), and no
 /// more than `MAX_TOTAL_VOICES`: the guided renderer's device max, and the
@@ -187,16 +192,16 @@
 /// Held down by the one-binding limit only. Video memory can hold fewer at
 /// once again, which the render also does rather than refuse.
 
-[31] src/tracks.rs:370
+[32] src/tracks.rs:374
     // A soundfont whose params table is too big to copy once a lane holds
     // fewer lanes at any voice count.
 
-[32] src/tracks.rs:377
+[33] src/tracks.rs:381
 /// How many of `tracks` tracks share the device at a time when they are given
 /// `total` voices in all, as far as the one-binding limit decides; 0 when not
 /// even one track's share fits. The stems runner decides the same way.
 
-[33] src/tracks.rs:385
+[34] src/tracks.rs:389
 /// The file a stem is written to, inside the folder: the track number padded
 /// to as many digits as the file's track count needs, then the track's name
 /// when it has one, `003 Piano.flac`, so the folder sorts in track order.
@@ -206,91 +211,91 @@
 /// stems could collide), and it is cut at 80 characters. The number alone is
 /// unique, so nothing done to the name can make two stems share a file.
 
-[34] src/tracks.rs:423
+[35] src/tracks.rs:427
     /// Tick of the file's last event on any track, tempo changes aside; see
     /// `TrackInfo::end_tick`.
 
-[35] src/tracks.rs:429
+[36] src/tracks.rs:433
     /// What a render of `track` alone reads: that track, the setup tracks
     /// when they apply, and the whole file's tempo map. Refused for a track
     /// that is not there or has no notes, which would render nothing.
 
-[36] src/tracks.rs:436
+[37] src/tracks.rs:440
     /// `selection` for each of `tracks`. The setup tracks and the end are the
     /// same for every one, and working them out again for each made setting
     /// up a per-track render quadratic in the track count: about three minutes
     /// before the largest file tested began to render (2026-09-23).
 
-[37] src/tracks.rs:482
+[38] src/tracks.rs:486
     /// The track with the most note-ons, the first of them on a tie. `None`
     /// when no track has any.
 
-[38] src/tracks.rs:502
+[39] src/tracks.rs:506
     /// The output frame each of `ticks` falls on at `rate`, by the same clock
     /// and the same tempo map a normal render of the whole file uses.
     ///
     /// One pass over the tempo map for the lot, so converting every track's
     /// first and last note costs a sort, not a replay per tick.
 
-[39] src/tracks.rs:514
+[40] src/tracks.rs:518
             // A change on the event's own tick is applied first. It makes no
             // difference to that event's frame either way: the clock's base
             // frame is where the old tempo put that tick.
 
-[40] src/tracks.rs:529
+[41] src/tracks.rs:533
     /// Seconds from the start to the file's last event at `rate`. The render
     /// runs on past it by the release tail.
 
-[41] src/tracks.rs:541
+[42] src/tracks.rs:545
     /// Track bytes decoded so far. Reaches `bytes_total` exactly when the scan
     /// finishes.
 
-[42] src/tracks.rs:548
+[43] src/tracks.rs:552
 /// Threads a scan of `tracks` tracks runs on when asked for `jobs`: one per
 /// core for 0, and never more than there are tracks.
 
-[43] src/tracks.rs:565
+[44] src/tracks.rs:569
     // What `MidiStream::open` says about a whole file, said here once for a
     // per-track render, whose tracks open the file through this header.
 
-[44] src/tracks.rs:579
+[45] src/tracks.rs:583
     // Largest first, so the long tracks start at once and the short ones fill
     // in around them. A file's time is bounded below by its largest track
     // whatever the order; this keeps it from being bounded by a large track
     // that happened to come last.
 
-[45] src/tracks.rs:626
+[46] src/tracks.rs:630
     // Concatenated in track order, so a stable sort by tick leaves each tick's
     // changes by track and then by position: the merged stream's order.
 
-[46] src/tracks.rs:696
+[47] src/tracks.rs:702
     // An ended track counts as read in full, bytes after its end-of-track
     // included, as `MidiStream::bytes_read` has it.
 
-[47] src/tracks.rs:726
+[48] src/tracks.rs:732
     /// Five tracks of every kind, with tempo changes on two of them -- one on
     /// the same tick as the other track's, and one on a note track.
 
-[48] src/tracks.rs:737
+[49] src/tracks.rs:743
         // 2: notes on two channels, a controller, and a tempo change of its
         // own on track 1's tick 960 and on 3000, where track 1 has none.
 
-[49] src/tracks.rs:775
+[50] src/tracks.rs:781
         // 1,082 voices a track: 1,352 slots with the steal
         // headroom, so 86,528.
 
-[50] src/tracks.rs:784
+[51] src/tracks.rs:790
     /// UTF-8 when it is UTF-8, Shift-JIS when it is not, and the old lossy
     /// reading only for bytes that are neither.
 
-[51] src/tracks.rs:845
+[52] src/tracks.rs:851
     /// The scan's tempo map and note count are what the merged stream plays,
     /// and its clock puts every event on the frame a normal render's does.
 
-[52] src/tracks.rs:876
+[53] src/tracks.rs:882
     /// Forty tracks of assorted lengths, scanned on one thread and on eight,
     /// come out identical, and progress lands on the total exactly.
 
-[53] src/tracks.rs:964
+[54] src/tracks.rs:970
     /// A name longer than the reader keeps is cut, and the events after it
     /// still decode.

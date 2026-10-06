@@ -186,6 +186,10 @@ impl Observer for Logged<'_> {
     fn cancelled(&self) -> bool {
         self.inner.cancelled()
     }
+
+    fn discard_progress(&self) -> bool {
+        self.inner.discard_progress()
+    }
 }
 
 /// Fail on purpose partway through a render, to see what each kind of failure \[5\]
@@ -213,5 +217,32 @@ pub(crate) fn crash_test(block: u64, backend: &mut dyn Backend) {
             std::thread::sleep(Duration::from_secs(1));
         },
         other => log::warn!(target: TARGET, "crash test: no such kind {other:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The render log wraps the observer of every guided and API render. A wrapper \[7\]
+    #[test]
+    fn the_logging_wrapper_passes_on_what_kind_of_stop_it_is() {
+        struct Stops {
+            discard: bool,
+        }
+        impl Observer for Stops {
+            fn cancelled(&self) -> bool {
+                true
+            }
+            fn discard_progress(&self) -> bool {
+                self.discard
+            }
+        }
+        for discard in [true, false] {
+            let mut inner = Stops { discard };
+            let logged = Logged::new(&mut inner);
+            assert!(logged.cancelled());
+            assert_eq!(logged.discard_progress(), discard);
+        }
     }
 }

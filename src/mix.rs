@@ -8,6 +8,7 @@ use crate::config::Config;
 use crate::limiter::OutputStage;
 use crate::session::Sink;
 use anyhow::{anyhow, bail, Result};
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock};
@@ -102,16 +103,71 @@ impl Mix {
         Ok(())
     }
 
-    /// Write the mix to `path` through the output stage `cfg` describes: \[9\]
+    /// Blocks the mix runs for, silent ones included.
+    pub(crate) fn len(&self) -> u64 {
+        self.len.load(Ordering::Relaxed)
+    }
+
+    /// Write every block that holds sound -- its number, then its samples, each \[9\]
+    pub(crate) fn save(&self, w: &mut impl Write) -> Result<()> {
+        let blocks = self.blocks.read().unwrap();
+        let held = blocks.iter().filter(|b| !b.lock().unwrap().is_empty()).count();
+        w.write_all(&(held as u64).to_le_bytes())?;
+        let mut buf = Vec::with_capacity(8 + self.block_samples * 16);
+        for (i, block) in blocks.iter().enumerate() {
+            let acc = block.lock().unwrap();
+            if acc.is_empty() {
+                continue;
+            }
+            buf.clear();
+            buf.extend_from_slice(&(i as u64).to_le_bytes());
+            for x in acc.iter() {
+                buf.extend_from_slice(&x.to_le_bytes());
+            }
+            w.write_all(&buf)?;
+        }
+        Ok(())
+    }
+
+    /// The mix `save` wrote, running for `len` blocks. Refused if a block is \[10\]
+    pub(crate) fn load(block_samples: usize, len: u64, r: &mut impl Read) -> Result<Mix> {
+        let mix = Mix::new(block_samples);
+        let mut word = [0u8; 8];
+        r.read_exact(&mut word)?;
+        let held = u64::from_le_bytes(word);
+        let mut raw = vec![0u8; block_samples * 16];
+        {
+            let mut blocks = mix.blocks.write().unwrap();
+            for _ in 0..held {
+                r.read_exact(&mut word)?;
+                let at = u64::from_le_bytes(word);
+                if at >= len {
+                    bail!("the saved mix has a block at {at}, past its length of {len}");
+                }
+                r.read_exact(&mut raw)?;
+                let want = (at as usize + 1).next_multiple_of(GROW);
+                while blocks.len() < want {
+                    blocks.push(Mutex::new(Vec::new()));
+                }
+                let acc = blocks[at as usize].get_mut().unwrap();
+                acc.clear();
+                acc.extend(raw.chunks_exact(16).map(|c| i128::from_le_bytes(c.try_into().expect("sixteen bytes"))));
+            }
+        }
+        mix.len.store(len, Ordering::Relaxed);
+        Ok(mix)
+    }
+
+    /// Write the mix to `path` through the output stage `cfg` describes: \[11\]
     pub(crate) fn write(
-        self,
+        &self,
         cfg: &Config,
         path: &Path,
         encoder: Option<&(crate::ffmpeg::Ffmpeg, &'static crate::ffmpeg::Preset)>,
         wav_format: crate::wav::SampleFormat,
     ) -> Result<Written> {
         let len = self.len.load(Ordering::Relaxed);
-        let blocks = self.blocks.into_inner().unwrap();
+        let blocks = self.blocks.read().unwrap();
         let held = blocks.iter().map(|b| b.lock().unwrap().len() as u64 * 16).sum();
         let mut out = Sink::create(path, cfg, encoder, wav_format)?;
         let mut stage = OutputStage::new(cfg);
@@ -140,7 +196,7 @@ impl Mix {
 mod tests {
     use super::*;
 
-    /// Every f32 in the range the mix promises comes back as itself: all of \[10\]
+    /// Every f32 in the range the mix promises comes back as itself: all of \[12\]
     #[test]
     fn a_sample_goes_through_the_mix_unchanged() {
         for exp in (127 - 73)..=(127 + 29) {
@@ -163,7 +219,62 @@ mod tests {
         assert!(to_fixed(2.0f32.powi(30) - 64.0).is_ok());
     }
 
-    /// The same blocks added in any order make the same mix, which float \[11\]
+    fn contents(mix: &Mix) -> (u64, Vec<Vec<i128>>) {
+        let blocks = mix.blocks.read().unwrap();
+        (mix.len(), blocks.iter().map(|b| b.lock().unwrap().clone()).filter(|b| !b.is_empty()).collect())
+    }
+
+    /// A mix saved and loaded is the same mix, and one that has had more added \[13\]
+    #[test]
+    fn a_saved_mix_loads_as_itself_and_goes_on_adding_exactly() {
+        let n = 16;
+        let tone = |k: f32| (0..n).map(|i| (i as f32 + k) * 0.0137 - 0.1).collect::<Vec<f32>>();
+        let adds: Vec<(u64, Vec<f32>)> = vec![
+            (0, tone(1.0)),
+            (2, tone(2.0)),
+            (2, tone(3.0)),
+            (300, tone(4.0)),
+            (301, vec![0.0; n]),
+            (7, tone(5.0)),
+            (300, tone(6.0)),
+        ];
+        let all = Mix::new(n);
+        for (b, s) in &adds {
+            all.add(*b, s).unwrap();
+        }
+        // Stop after four adds, save, load, and add the rest to the loaded one.
+        let early = Mix::new(n);
+        for (b, s) in &adds[..4] {
+            early.add(*b, s).unwrap();
+        }
+        let mut bytes = Vec::new();
+        early.save(&mut bytes).unwrap();
+        let back = Mix::load(n, early.len(), &mut bytes.as_slice()).unwrap();
+        assert_eq!(contents(&back), contents(&early), "what was saved is what came back");
+        for (b, s) in &adds[4..] {
+            back.add(*b, s).unwrap();
+        }
+        assert_eq!(contents(&back), contents(&all));
+        // The silent block at the end still counts towards the length.
+        assert_eq!(back.len(), 302);
+        // Only blocks that hold sound were written: 8 bytes for the count, and 3 of them.
+        assert_eq!(bytes.len(), 8 + 3 * (8 + n * 16));
+    }
+
+    #[test]
+    fn a_saved_mix_that_does_not_fit_is_refused() {
+        let n = 4;
+        let m = Mix::new(n);
+        m.add(5, &[0.5; 4]).unwrap();
+        let mut bytes = Vec::new();
+        m.save(&mut bytes).unwrap();
+        // A length shorter than a block it holds, and data that stops early.
+        assert!(Mix::load(n, 5, &mut bytes.as_slice()).is_err());
+        assert!(Mix::load(n, 6, &mut &bytes[..bytes.len() - 1]).is_err());
+        assert!(Mix::load(n, 6, &mut bytes.as_slice()).is_ok());
+    }
+
+    /// The same blocks added in any order make the same mix, which float \[14\]
     #[test]
     fn the_order_blocks_arrive_in_does_not_matter() {
         let n = 8;

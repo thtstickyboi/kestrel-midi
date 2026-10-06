@@ -147,97 +147,107 @@ pub struct Config {
     pub workgroup_size: u32,
     /// Upper bound on workgroups dispatched by the render pass. Voices beyond \[18\]
     pub max_render_workgroups: u32,
-    /// Upper bound on the grid taken by every *per-voice* pass: spawn, steal \[19\]
+    /// The most voices one submission to the device renders, to start from. A \[19\]
+    pub submit_voices: u32,
+    /// Upper bound on the grid taken by every *per-voice* pass: spawn, steal \[20\]
     pub max_pool_workgroups: u32,
 
-    // [20]
+    // [21]
     pub max_voices: u32,
-    /// Voices per (channel, key) note-on. SoundFont layers spawn one voice \[21\]
+    /// Voices per (channel, key) note-on. SoundFont layers spawn one voice \[22\]
     pub max_layers: u32,
     pub steal_rule: StealRule,
     /// Which note-ons survive when a block oversubscribes the pool.
     pub admit_rule: AdmitRule,
-    /// Note-ons quieter than this are not rendered at all. Each is skipped on \[22\]
+    /// Note-ons quieter than this are not rendered at all. Each is skipped on \[23\]
     pub min_velocity: u8,
-    /// Hold notes to BASSMIDI's 4 ms envelope grid: a note-off takes effect at \[23\]
+    /// Hold notes to BASSMIDI's 4 ms envelope grid: a note-off takes effect at \[24\]
     pub note_grid: bool,
-    /// Admission candidates one block may hold before they are thinned. \[24\]
+    /// Play the file as the 31-EDO template writes it: note keys read as \[25\]
+    pub edo31: bool,
+    /// A tuning that gives every key a pitch of its own: see `tuning`. `None` is \[26\]
+    pub tuning: Option<std::sync::Arc<crate::tuning::Tuning>>,
+    /// Apply MIDI Tuning Standard single-note tuning changes and bulk dumps, which \[27\]
+    pub mts_notes: bool,
+    /// Admission candidates one block may hold before they are thinned. \[28\]
     pub max_block_candidates: u32,
-    /// Threads that build a block's admitted voices, `Driver::materialise`. \[25\]
+    /// Threads that build a block's admitted voices, `Driver::materialise`. \[29\]
     pub materialise_threads: usize,
-    /// Ceiling on how much of the pool one block may steal, in percent. \[26\]
+    /// Ceiling on how much of the pool one block may steal, in percent. \[30\]
     pub max_steal_percent: u32,
-    /// Frames a stolen voice fades over instead of being cut. \[27\]
+    /// Frames a stolen voice fades over instead of being cut. \[31\]
     pub steal_fade_frames: u32,
-    /// Re-sort the voice pool by (region, envelope stage, phase) during \[28\]
+    /// Re-sort the voice pool by (region, envelope stage, phase) during \[32\]
     pub sort_voices: bool,
-    /// Skip the device for a block in which no voice is alive and none is \[29\]
+    /// Skip the device for a block in which no voice is alive and none is \[33\]
     pub skip_silence: bool,
 
     // ---- dsp -------------------------------------------------------------
     pub interpolation: Interpolation,
     pub decay_curve: EnvelopeCurve,
     pub release_curve: EnvelopeCurve,
-    /// Envelope level below which a releasing voice is considered dead. \[30\]
+    /// Envelope level below which a releasing voice is considered dead. \[34\]
     pub env_floor: f32,
-    /// Enable the per-voice low-pass filter. SoundFonts that leave the cutoff \[31\]
+    /// Enable the per-voice low-pass filter. SoundFonts that leave the cutoff \[35\]
     pub filter_enabled: bool,
-    /// `--volume` as a factor: 1 leaves the output as it is. \[32\]
+    /// `--volume` as a factor: 1 leaves the output as it is. \[36\]
     pub master_volume: f32,
-    /// High-pass the mix ahead of the limiter, removing the sub-audio \[33\]
+    /// High-pass the mix ahead of the limiter, removing the sub-audio \[37\]
     pub dc_blocker: bool,
     /// The DC blocker's corner, in Hz: a second-order Butterworth high-pass.
     pub dc_blocker_hz: f64,
-    /// How many copies of the params table the sound controllers CC71-CC75 may \[34\]
+    /// How many copies of the params table the sound controllers CC71-CC75 may \[38\]
     pub max_param_variants: u32,
     /// Apply the soft limiter to the mixed output.
     pub limiter: bool,
-    /// Which limiter runs. `Brickwall` is the default: a lookahead true-peak \[35\]
+    /// Which limiter runs. `Brickwall` is the default: a lookahead true-peak \[39\]
     pub limiter_mode: LimiterMode,
     /// Brickwall ceiling in dBFS. 0.0 is flat full scale.
     pub limiter_ceiling_db: f64,
     /// Brickwall lookahead in milliseconds. This is also the render latency.
     pub limiter_lookahead_ms: f64,
-    /// Brickwall release in milliseconds. Short keeps the material after a \[36\]
+    /// Brickwall release in milliseconds. Short keeps the material after a \[40\]
     pub limiter_release_ms: f64,
-    /// Time constant of the brickwall's sustained stage, in milliseconds. \[37\]
+    /// Time constant of the brickwall's sustained stage, in milliseconds. \[41\]
     pub limiter_sustain_ms: f64,
-    /// Detect inter-sample peaks by 4x oversampling rather than looking at the \[38\]
+    /// Detect inter-sample peaks by 4x oversampling rather than looking at the \[42\]
     pub limiter_true_peak: bool,
     /// Limiter attack/release in seconds.
     pub limiter_attack: f32,
     pub limiter_release: f32,
 
-    // [39]
+    // [43]
     pub resample_pool: bool,
-    /// Soft ceiling on sample-pool bytes on the device. When the pool does not \[40\]
+    /// Soft ceiling on sample-pool bytes on the device. When the pool does not \[44\]
     pub sample_pool_budget: u64,
-    /// The most bytes of the sample pool one device buffer holds; 0, the \[41\]
+    /// The most bytes of the sample pool one device buffer holds; 0, the \[45\]
     pub pool_part_bytes: u64,
 
-    // [42]
+    // [46]
     pub clamp_output: bool,
 
-    /// Ramp channel gain across a gate tile instead of stepping it. \[43\]
+    /// Ramp channel gain across a gate tile instead of stepping it. \[47\]
     pub gain_ramp: bool,
 
-    /// Ramp biquad coefficients across a gate tile instead of switching them. \[44\]
+    /// Ramp biquad coefficients across a gate tile instead of switching them. \[48\]
     pub filter_ramp: bool,
 
-    /// Evaluate SF2 vibrato and tremolo LFOs. \[45\]
+    /// Evaluate SF2 vibrato and tremolo LFOs. \[49\]
     pub lfo_enabled: bool,
 
-    /// Evaluate the SF2 modulation envelope and its pitch and filter \[46\]
+    /// Evaluate the SF2 modulation envelope and its pitch and filter \[50\]
     pub mod_env_enabled: bool,
 
-    /// Use Kahan compensation for the per-thread partial sums in the reduce \[47\]
+    /// Use Kahan compensation for the per-thread partial sums in the reduce \[51\]
     pub kahan_reduce: bool,
+    /// The most render workgroups a block may have for the reduce pass to give \[52\]
+    pub reduce_thin: u32,
     /// Check every output block for NaN/Inf. Always on in debug builds.
     pub nan_guard: bool,
-    /// Compile the shaders without naga's automatic bounds clamps and loop \[48\]
+    /// Compile the shaders without naga's automatic bounds clamps and loop \[53\]
     pub unchecked_shaders: bool,
 
-    // [49]
+    // [54]
     pub profile: bool,
     /// Force a specific wgpu backend, e.g. "vulkan" or "dx12".
     pub gpu_backend: Option<String>,
@@ -253,12 +263,13 @@ impl Default for Config {
             channels: 2,
 
             block_frames: 4096,
-            // [50]
+            // [55]
             reduce_tile: 4,
             gate_frames: 32,
             workgroup_size: 256,
-            // [51]
+            // [56]
             max_render_workgroups: 2048,
+            submit_voices: 4_194_304,
             max_pool_workgroups: u32::MAX,
 
             max_voices: 1 << 20,
@@ -267,6 +278,9 @@ impl Default for Config {
             admit_rule: AdmitRule::Loudest,
             min_velocity: 0,
             note_grid: false,
+            edo31: false,
+            tuning: None,
+            mts_notes: false,
             max_block_candidates: 1 << 27,
             materialise_threads: 4,
             max_steal_percent: 25,
@@ -281,7 +295,7 @@ impl Default for Config {
             filter_enabled: true,
             master_volume: 1.0,
             dc_blocker: false,
-            // [52]
+            // [57]
             dc_blocker_hz: 15.0,
             max_param_variants: 32,
             limiter: true,
@@ -295,7 +309,7 @@ impl Default for Config {
             limiter_release: 0.1,
 
             resample_pool: true,
-            // [53]
+            // [58]
             sample_pool_budget: 2 << 30,
             pool_part_bytes: 0,
 
@@ -306,6 +320,7 @@ impl Default for Config {
             mod_env_enabled: true,
 
             kahan_reduce: false,
+            reduce_thin: 64,
             nan_guard: cfg!(debug_assertions),
             unchecked_shaders: false,
 
@@ -319,6 +334,12 @@ impl Default for Config {
 impl Config {
     pub fn validate(&self) -> Result<()> {
         self.phase.validate()?;
+        if self.edo31 && self.tuning.is_some() {
+            bail!(
+                "--31edo plays a file written for the 31-EDO template, which sets its own tuning, and \
+                 a tuning laid over every key (`Config::tuning`) would move it again; use one of them"
+            );
+        }
         if self.channels != 2 {
             bail!("only stereo output is implemented (channels = {})", self.channels);
         }
@@ -356,7 +377,7 @@ impl Config {
                 self.block_frames
             );
         }
-        // [54]
+        // [59]
         let shared_bytes = self.workgroup_size as u64 * (self.reduce_tile as u64 * 2 + 1) * 4;
         if shared_bytes > 49152 {
             bail!(
@@ -367,7 +388,7 @@ impl Config {
                 shared_bytes
             );
         }
-        // [55]
+        // [60]
         if self.workgroup_size < self.reduce_tile * 2 {
             bail!(
                 "workgroup_size {} must be at least twice reduce_tile {}",
@@ -381,10 +402,13 @@ impl Config {
                 self.limiter_ceiling_db
             );
         }
+        if self.submit_voices == 0 {
+            bail!("submit_voices must be at least 1");
+        }
         if !(0.0..=2.0).contains(&self.master_volume) {
             bail!("master_volume {} must be in 0..=2", self.master_volume);
         }
-        // [56]
+        // [61]
         if !(1.0..=200.0).contains(&self.dc_blocker_hz) || self.dc_blocker_hz >= self.sample_rate as f64 / 10.0 {
             bail!("dc_blocker_hz {} must be in 1..=200 and under a tenth of the rate", self.dc_blocker_hz);
         }
@@ -422,7 +446,7 @@ impl Config {
                 self.max_steal_percent
             );
         }
-        // [57]
+        // [62]
         if self.max_layers > 255 {
             bail!("max_layers {} must be at most 255", self.max_layers);
         }
@@ -440,22 +464,22 @@ impl Config {
         10f64.powf(self.limiter_ceiling_db / 20.0)
     }
 
-    /// Frames in which a steal may be scheduled. The fade has to finish inside \[58\]
+    /// Frames in which a steal may be scheduled. The fade has to finish inside \[63\]
     pub fn steal_span(&self) -> u32 {
         self.block_frames.saturating_sub(self.steal_fade_frames).max(1)
     }
 
-    /// Frames in one step of the envelope grid: 4 ms, 192 frames at 48 kHz. \[59\]
+    /// Frames in one step of the envelope grid: 4 ms, 192 frames at 48 kHz. \[64\]
     pub fn env_step_frames(&self) -> u32 {
         (self.sample_rate / 250).clamp(1, crate::voice::GRID_MASK)
     }
 
-    /// Voice slots to allocate. A stolen voice keeps sounding until its own \[60\]
+    /// Voice slots to allocate. A stolen voice keeps sounding until its own \[65\]
     pub fn pool_slots(&self) -> u32 {
         self.max_voices.saturating_add(self.max_steal())
     }
 
-    /// The most voices one block may steal. Integer arithmetic, and both \[61\]
+    /// The most voices one block may steal. Integer arithmetic, and both \[66\]
     pub fn max_steal(&self) -> u32 {
         let n = self.max_voices as u64 * self.max_steal_percent as u64 / 100;
         (n as u32).max(1)

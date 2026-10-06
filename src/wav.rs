@@ -115,6 +115,67 @@ impl WavWriter {
         self.data_bytes / (self.channels as u64 * self.format.bytes() as u64)
     }
 
+    /// Bytes of audio written so far, which is also where the next block goes.
+    pub fn data_bytes(&self) -> u64 {
+        self.data_bytes
+    }
+
+    /// Everything written is on the disk, not in a buffer or the system's \[3\]
+    pub fn sync(&mut self) -> Result<()> {
+        self.out.flush()?;
+        self.out.get_ref().sync_data()?;
+        Ok(())
+    }
+
+    /// Go on with a WAV that this writer (or its predecessor) left, from \[4\]
+    pub fn resume(
+        path: impl AsRef<Path>,
+        sample_rate: u32,
+        channels: u16,
+        format: SampleFormat,
+        data_bytes: u64,
+    ) -> Result<Self> {
+        let path = path.as_ref();
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        let len = file.metadata()?.len();
+        let header_len = 44u64;
+        if len < header_len + data_bytes {
+            bail!(
+                "{} is {len} bytes, which is less than the {} the checkpoint was made at",
+                path.display(),
+                header_len + data_bytes
+            );
+        }
+        let mut hdr = [0u8; 44];
+        file.read_exact(&mut hdr)
+            .with_context(|| format!("{}: too short for a WAV header", path.display()))?;
+        let block_align = channels as u32 * format.bytes();
+        let fits = &hdr[0..4] == b"RIFF"
+            && &hdr[8..16] == b"WAVEfmt "
+            && u16::from_le_bytes([hdr[20], hdr[21]]) == format.tag()
+            && u16::from_le_bytes([hdr[22], hdr[23]]) == channels
+            && u32::from_le_bytes(hdr[24..28].try_into().expect("four bytes")) == sample_rate
+            && u16::from_le_bytes([hdr[32], hdr[33]]) as u32 == block_align
+            && u16::from_le_bytes([hdr[34], hdr[35]]) == format.bits()
+            && &hdr[36..40] == b"data";
+        if !fits {
+            bail!("{} is not the WAV this render writes: its header is different", path.display());
+        }
+        file.set_len(header_len + data_bytes)?;
+        file.seek(SeekFrom::Start(header_len + data_bytes))?;
+        Ok(WavWriter {
+            out: BufWriter::with_capacity(1 << 20, file),
+            format,
+            channels,
+            data_bytes,
+            finished: false,
+        })
+    }
+
     pub fn finish(mut self) -> Result<u64> {
         self.finish_inner()?;
         Ok(self.data_bytes)
@@ -129,7 +190,7 @@ impl WavWriter {
 
         let riff_size = 36u64 + self.data_bytes;
         if riff_size > u32::MAX as u64 {
-            // [3]
+            // [5]
             log::error!(
                 "output exceeds 4 GiB ({} bytes); RIFF size fields saturated, \
                  use --format pcm16 or split the render",
@@ -154,13 +215,13 @@ impl Drop for WavWriter {
     }
 }
 
-// [4]
+// [6]
 
 #[derive(Debug, Clone)]
 pub struct WavData {
     pub sample_rate: u32,
     pub channels: u16,
-    /// Deinterleaved to mono by taking the first channel if `channels > 1`. \[5\]
+    /// Deinterleaved to mono by taking the first channel if `channels > 1`. \[7\]
     pub interleaved: Vec<f32>,
     /// From the `smpl` chunk, if present: (start, end) in frames.
     pub loop_points: Option<(u32, u32)>,
@@ -210,13 +271,13 @@ fn rd_tag(r: &mut impl Read) -> Result<[u8; 4]> {
     Ok(b)
 }
 
-/// Read a sample file, dispatching on its contents rather than on its name. \[6\]
+/// Read a sample file, dispatching on its contents rather than on its name. \[8\]
 pub fn read(path: impl AsRef<Path>) -> Result<WavData> {
     let path = path.as_ref();
     let mut magic = [0u8; 4];
     {
         let mut f = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-        // [7]
+        // [9]
         let _ = f.read_exact(&mut magic);
     }
     match &magic {
@@ -226,7 +287,7 @@ pub fn read(path: impl AsRef<Path>) -> Result<WavData> {
     }
 }
 
-/// FLAC, whatever the file is called. \[8\]
+/// FLAC, whatever the file is called. \[10\]
 fn read_flac(path: &Path) -> Result<WavData> {
     let mut reader = claxon::FlacReader::open(path)
         .with_context(|| format!("opening {}", path.display()))?;
@@ -262,7 +323,7 @@ fn read_flac(path: &Path) -> Result<WavData> {
         buffer = block.into_buffer();
     }
 
-    // [9]
+    // [11]
     let tag = |name: &str| -> Option<u32> { reader.get_tag(name).next()?.trim().parse().ok() };
     let loop_points = match (tag("LOOPSTART"), tag("LOOPLENGTH")) {
         (Some(start), Some(len)) => Some((start, start.saturating_add(len))),
@@ -320,7 +381,7 @@ fn read_riff(path: &Path) -> Result<WavData> {
                 let _block_align = rd_u16(&mut r)?;
                 bits = rd_u16(&mut r)?;
                 if tag == 0xFFFE && size >= 40 {
-                    // [10]
+                    // [12]
                     let _cb = rd_u16(&mut r)?;
                     let _valid_bits = rd_u16(&mut r)?;
                     let _mask = rd_u32(&mut r)?;
@@ -342,8 +403,9 @@ fn read_riff(path: &Path) -> Result<WavData> {
                 let mut buf = vec![0u8; padded as usize];
                 r.read_exact(&mut buf)?;
                 if buf.len() >= 36 {
-                    let midi_note = u32::from_le_bytes(buf[20..24].try_into().unwrap());
-                    let pitch_frac = u32::from_le_bytes(buf[24..28].try_into().unwrap());
+                    // [13]
+                    let midi_note = u32::from_le_bytes(buf[12..16].try_into().unwrap());
+                    let pitch_frac = u32::from_le_bytes(buf[16..20].try_into().unwrap());
                     let num_loops = u32::from_le_bytes(buf[28..32].try_into().unwrap());
                     if midi_note < 128 {
                         root_key = Some(midi_note as u8);
@@ -418,7 +480,7 @@ fn decode_samples(data: &[u8], tag: u16, bits: u16) -> Result<Vec<f32>> {
 mod tests {
     use super::*;
 
-    // [11]
+    // [14]
 
     fn crc8(d: &[u8]) -> u8 {
         let mut c = 0u8;
@@ -442,7 +504,7 @@ mod tests {
         c
     }
 
-    /// Block size the fixtures use. Deliberately smaller than any test's data, \[12\]
+    /// Block size the fixtures use. Deliberately smaller than any test's data, \[15\]
     const FIXTURE_BLOCK: usize = 32;
 
     /// One FLAC stream: STREAMINFO plus VERBATIM frames of `FIXTURE_BLOCK`.
@@ -468,7 +530,7 @@ mod tests {
 
         for (f, start) in (0..n).step_by(FIXTURE_BLOCK).enumerate() {
             let len = FIXTURE_BLOCK.min(n - start);
-            // [13]
+            // [16]
             let mut frame = vec![0xFF, 0xF8, 0x70, (((nch - 1) as u8) << 4) | 0x08];
             assert!(f < 128, "the fixture writes single-byte frame numbers");
             frame.push(f as u8); // UTF-8 coded frame number
@@ -495,7 +557,7 @@ mod tests {
         p
     }
 
-    /// The reported failure: FLAC samples under a library's own extension. \[14\]
+    /// The reported failure: FLAC samples under a library's own extension. \[17\]
     #[test]
     fn flac_is_read_whatever_the_extension_is() {
         let data: Vec<i16> = (0..64).map(|i| (i * 512 - 16384) as i16).collect();
@@ -509,7 +571,7 @@ mod tests {
         std::fs::remove_file(&p).ok();
     }
 
-    /// The transpose from claxon's planar blocks, which is this crate's own \[15\]
+    /// The transpose from claxon's planar blocks, which is this crate's own \[18\]
     #[test]
     fn flac_stereo_interleaves_in_channel_order() {
         let l: Vec<i16> = (0..48).map(|i| (i * 100) as i16).collect();
@@ -526,12 +588,45 @@ mod tests {
         std::fs::remove_file(&p).ok();
     }
 
-    /// A file that is neither is still reported against RIFF, so there is one \[16\]
+    /// A file that is neither is still reported against RIFF, so there is one \[19\]
     #[test]
     fn unknown_magic_still_reports_as_riff() {
         let p = fixture("junk.wav", b"NOPE\x00\x00\x00\x00");
         let e = read(&p).unwrap_err().to_string();
         assert!(e.contains("not a RIFF file"), "{e}");
+        std::fs::remove_file(&p).ok();
+    }
+
+    /// A `smpl` chunk is read where the format puts its fields: the unity note \[20\]
+    #[test]
+    fn a_smpl_chunk_is_read_where_the_format_puts_its_fields() {
+        let dir = std::env::temp_dir().join("kestrel_wav_smpl");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("s.wav");
+        let mut w = WavWriter::create(&p, 44100, 1, SampleFormat::Pcm16).unwrap();
+        w.write_block(&(0..400).map(|i| (i as f32 / 20.0).sin() * 0.5).collect::<Vec<f32>>()).unwrap();
+        w.finish().unwrap();
+
+        let mut body = Vec::new();
+        for word in [0u32, 0, 22_675, 72, 0x8000_0000, 7, 9, 1, 0] {
+            // [21]
+            body.extend_from_slice(&word.to_le_bytes());
+        }
+        for word in [0u32, 0, 10, 200, 0, 0] {
+            body.extend_from_slice(&word.to_le_bytes()); // id, type, start, end, fraction, plays
+        }
+        let mut bytes = std::fs::read(&p).unwrap();
+        bytes.extend_from_slice(b"smpl");
+        bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&body);
+        let riff = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&riff.to_le_bytes());
+        std::fs::write(&p, &bytes).unwrap();
+
+        let r = read(&p).unwrap();
+        assert_eq!(r.root_key, Some(72));
+        assert!((r.fine_tune_cents - 50.0).abs() < 1e-3, "{}", r.fine_tune_cents);
+        assert_eq!(r.loop_points, Some((10, 200)));
         std::fs::remove_file(&p).ok();
     }
 }

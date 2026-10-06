@@ -11,6 +11,8 @@ use crate::limiter::OutputStage;
 use crate::midi::{Event, MidiStream, TempoClock, TrackSelection, CHANNELS};
 use crate::fixed::bend_factor;
 use crate::porta::{self, Glide};
+use crate::snap::{Dec, Enc};
+use crate::{edo31, mts};
 use crate::voice::{ChannelTable, GateTable, SpawnCmd};
 use anyhow::{bail, Context, Result};
 
@@ -169,7 +171,73 @@ pub struct DriverStats {
     pub last_take_energy: u64,
 }
 
-/// Pack a note-on into one word: everything `build_layer` and `SpawnCmd` will \[18\]
+impl DriverStats {
+    /// The counters a render adds up as it goes. The microsecond timings, which \[18\]
+    fn save(&self, e: &mut Enc) {
+        let DriverStats {
+            us_total: _,
+            us_drain: _,
+            us_admit: _,
+            us_spawn: _,
+            us_render: _,
+            param_variants,
+            variant_fallbacks,
+            variant_states,
+            variant_rebuilds,
+            frames,
+            blocks,
+            silent_blocks,
+            events,
+            dropped,
+            notes,
+            notes_skipped,
+            voices_spawned,
+            peak,
+            clipped,
+            last_live: _,
+            last_want: _,
+            last_take: _,
+            last_stolen: _,
+            last_wait_us: _,
+            last_want_energy: _,
+            last_take_energy: _,
+        } = self;
+        e.u32(*param_variants);
+        e.u64(*variant_fallbacks);
+        e.u32(*variant_states);
+        e.u64(*variant_rebuilds);
+        e.u64(*frames);
+        e.u64(*blocks);
+        e.u64(*silent_blocks);
+        e.u64(*events);
+        e.u64(*dropped);
+        e.u64(*notes);
+        e.u64(*notes_skipped);
+        e.u64(*voices_spawned);
+        e.f32(*peak);
+        e.u64(*clipped);
+    }
+
+    fn load(&mut self, d: &mut Dec) -> Result<()> {
+        self.param_variants = d.u32()?;
+        self.variant_fallbacks = d.u64()?;
+        self.variant_states = d.u32()?;
+        self.variant_rebuilds = d.u64()?;
+        self.frames = d.u64()?;
+        self.blocks = d.u64()?;
+        self.silent_blocks = d.u64()?;
+        self.events = d.u64()?;
+        self.dropped = d.u64()?;
+        self.notes = d.u64()?;
+        self.notes_skipped = d.u64()?;
+        self.voices_spawned = d.u64()?;
+        self.peak = d.f32()?;
+        self.clipped = d.u64()?;
+        Ok(())
+    }
+}
+
+/// Pack a note-on into one word: everything `build_layer` and `SpawnCmd` will \[19\]
 #[inline]
 fn note_pack(ch: u8, key: u8, vel: u8, variant: u32, rel: u32, row_bias: u32, glide: u16) -> u64 {
     debug_assert!(variant < 64 && rel < 65536 && row_bias < 2);
@@ -195,7 +263,24 @@ fn note_unpack(w: u64) -> (u8, u8, u8, u32, u32, u32, u16) {
     )
 }
 
-/// A note-on's portamento in 16 bits: the interval it glides across, as the \[19\]
+/// How a note-on is tuned: what `Driver::tune_note` made of its key.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct NoteTune {
+    /// The key whose sample and parameters the voice is built from.
+    key: u8,
+    /// Cents from that key's pitch, from the key tuning and the channel's \[20\]
+    cents: f32,
+}
+
+/// One MIDI Tuning Standard tuning program: every key's offset from 12-tone, in \[21\]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MtsTable {
+    bank: u8,
+    program: u8,
+    offsets: Box<[i32; 128]>,
+}
+
+/// A note-on's portamento in 16 bits: the interval it glides across, as the \[22\]
 #[inline]
 fn glide_pack(semitones: i32, cc5: u8) -> u16 {
     (semitones as i8 as u8 as u16) | ((cc5 as u16 & 0x7F) << 8)
@@ -209,15 +294,15 @@ fn glide_unpack(g: u16) -> (i32, u8) {
 /// `Driver::porta_last` for a channel that has not played a note.
 const NO_KEY: u8 = 0xFF;
 
-/// One layer a block might admit, before anything has been built for it. \[20\]
+/// One layer a block might admit, before anything has been built for it. \[23\]
 #[derive(Clone, Copy)]
 struct Cand {
     key: u64,
-    /// Index into `notes`, or `DEFERRED` for a voice built in an earlier block \[21\]
+    /// Index into `notes`, or `DEFERRED` for a voice built in an earlier block \[24\]
     note: u32,
-    /// The region to build, so materialising never has to preview again. For a \[22\]
+    /// The region to build, so materialising never has to preview again. For a \[25\]
     region: u32,
-    /// Note id, as an offset from `block_first_id`. Unused when `DEFERRED`, \[23\]
+    /// Note id, as an offset from `block_first_id`. Unused when `DEFERRED`, \[26\]
     id_off: u64,
 }
 
@@ -229,7 +314,7 @@ pub(crate) const MATERIALISE_MIN: usize = 8192;
 /// Candidates a `materialise` thread takes at a time.
 const MATERIALISE_CHUNK: usize = 2048;
 
-/// Everything building an admitted candidate reads, and nothing it writes, so \[24\]
+/// Everything building an admitted candidate reads, and nothing it writes, so \[27\]
 struct Builder<'a> {
     bank: &'a Bank,
     cfg: &'a Config,
@@ -239,13 +324,15 @@ struct Builder<'a> {
     notes: &'a [u64],
     note_ordinal: &'a [u32],
     note_ticks: &'a [u64],
+    /// Each note's key to build on and its tuning in cents, once anything has been \[28\]
+    note_tune: &'a [NoteTune],
     deferred_now: &'a [SpawnCmd],
     first_id: u64,
     block_start: u64,
 }
 
 impl Builder<'_> {
-    /// The command for one candidate. `memo` holds the last note's analytic \[25\]
+    /// The command for one candidate. `memo` holds the last note's analytic \[29\]
     #[inline]
     fn build(&self, c: &Cand, memo: &mut Option<(u32, crate::phase::Angle)>) -> Option<SpawnCmd> {
         if c.note == DEFERRED {
@@ -253,12 +340,15 @@ impl Builder<'_> {
         }
         let (ch, key, vel, variant, rel, row_bias, glide) = note_unpack(self.notes[c.note as usize]);
         let ordinal = self.note_ordinal[c.note as usize];
-        let Some(v) = self.bank.build_layer(c.region, key, vel, self.cfg) else {
-            // [26]
+        // [30]
+        let NoteTune { key: built_on, cents: tune } =
+            self.note_tune.get(c.note as usize).copied().unwrap_or(NoteTune { key, cents: 0.0 });
+        let Some(v) = self.bank.build_layer(c.region, built_on, vel, self.cfg, tune) else {
+            // [31]
             debug_assert!(false, "preview named a layer build_layer will not build");
             return None;
         };
-        // [27]
+        // [32]
         let start_rel = if v.delay_frames == 0 {
             rel
         } else {
@@ -302,7 +392,7 @@ impl Builder<'_> {
     }
 }
 
-/// For `Config::min_velocity`: which of each (channel, key)'s unanswered \[28\]
+/// For `Config::min_velocity`: which of each (channel, key)'s unanswered \[33\]
 struct QuietPairs {
     runs: Vec<std::collections::VecDeque<(bool, u64)>>,
 }
@@ -310,6 +400,44 @@ struct QuietPairs {
 impl QuietPairs {
     fn new() -> Self {
         Self { runs: (0..CHANNELS * 128).map(|_| Default::default()).collect() }
+    }
+
+    /// For a snapshot: the keys that have something unanswered, and their runs. \[34\]
+    fn save(&self, e: &mut Enc) {
+        let busy: Vec<usize> = (0..self.runs.len()).filter(|&i| !self.runs[i].is_empty()).collect();
+        e.len_of(self.runs.len());
+        e.len_of(busy.len());
+        for i in busy {
+            e.u32(i as u32);
+            e.len_of(self.runs[i].len());
+            for &(skipped, n) in &self.runs[i] {
+                e.bool(skipped);
+                e.u64(n);
+            }
+        }
+    }
+
+    fn load(&mut self, d: &mut Dec) -> Result<()> {
+        let keys = d.u64()? as usize;
+        if keys != self.runs.len() {
+            bail!("the saved note pairing has {keys} keys and this render has {}", self.runs.len());
+        }
+        for q in &mut self.runs {
+            q.clear();
+        }
+        let busy = d.len_of(12)?;
+        for _ in 0..busy {
+            let i = d.u32()? as usize;
+            let n = d.len_of(9)?;
+            let Some(q) = self.runs.get_mut(i) else {
+                bail!("the saved note pairing names key {i}, which there is not");
+            };
+            for _ in 0..n {
+                let (skipped, count) = (d.bool()?, d.u64()?);
+                q.push_back((skipped, count));
+            }
+        }
+        Ok(())
     }
 
     fn push(&mut self, slot: usize, skipped: bool) {
@@ -320,7 +448,7 @@ impl QuietPairs {
         }
     }
 
-    /// Whether the note-on a note-off answers was skipped. A note-off with \[29\]
+    /// Whether the note-on a note-off answers was skipped. A note-off with \[35\]
     fn pop(&mut self, slot: usize) -> bool {
         let q = &mut self.runs[slot];
         let Some((skipped, n)) = q.front_mut() else {
@@ -335,7 +463,7 @@ impl QuietPairs {
     }
 }
 
-/// Which channels are drum parts before a file says anything. Channel 10 -- \[30\]
+/// Which channels are drum parts before a file says anything. Channel 10 -- \[36\]
 const DEFAULT_DRUM_MAP: [u8; CHANNELS] = {
     let mut m = [0u8; CHANNELS];
     let mut c = 9;
@@ -352,7 +480,7 @@ fn rank_key(gain_l: f32, gain_r: f32, index: u64) -> u64 {
     (crate::voice::rank_gain_q(gain_l, gain_r) << 48) | crate::voice::mix48(index)
 }
 
-/// A block `submit_block` has handed to the backend and `finish_block` has \[31\]
+/// A block `submit_block` has handed to the backend and `finish_block` has \[37\]
 #[derive(Debug, Clone, Copy)]
 struct InFlight {
     t_block: std::time::Instant,
@@ -364,6 +492,18 @@ struct InFlight {
 pub struct Driver {
     phase_bank: Arc<crate::phase::PhaseBank>,
     note_ticks: Vec<u64>,
+    /// Scale/octave tuning, `mts`: per channel, how far each pitch class is \[38\]
+    tune: [i32; CHANNELS * 12],
+    /// Whether anything has been tuned: a channel's scale/octave tuning, a key \[39\]
+    tuned: bool,
+    /// This block's tuned note-ons, one per entry of `notes` once `tuned`, and empty \[40\]
+    note_tune: Vec<NoteTune>,
+    /// The tuning of every key that the configuration gives (`Config::tuning`, which \[41\]
+    key_static: Option<Arc<crate::tuning::Tuning>>,
+    /// MIDI Tuning Standard tuning programs a file has set (`Config::mts_notes`): each a \[42\]
+    mts_tables: Vec<MtsTable>,
+    /// Each channel's selected tuning program, `bank << 7 | program`, RPN 3 and 4. \[43\]
+    tuning_sel: [u16; CHANNELS],
     cfg: Config,
     bank: Arc<Bank>,
     stream: MidiStream,
@@ -374,20 +514,20 @@ pub struct Driver {
 
     bank_msb: [u8; CHANNELS],
     bank_lsb: [u8; CHANNELS],
-    /// Last program change per channel, kept because the drum-part SysEx can \[32\]
+    /// Last program change per channel, kept because the drum-part SysEx can \[44\]
     program: [u8; CHANNELS],
-    /// GS part type: 0 melodic, 1 or 2 for the two drum maps. Channel 10 is \[33\]
+    /// GS part type: 0 melodic, 1 or 2 for the two drum maps. Channel 10 is \[45\]
     drum_map: [u8; CHANNELS],
     preset: [u32; CHANNELS],
     /// Raw pitch bend, -8192..8191 relative to centre.
     bend_val: [i16; CHANNELS],
     /// Bend range in semitones, RPN 0. Two is the GM default.
     bend_range: [f64; CHANNELS],
-    /// Channel coarse tuning, RPN 2, in semitones. The wire value is an MSB \[34\]
+    /// Channel coarse tuning, RPN 2, in semitones. The wire value is an MSB \[46\]
     coarse_tune: [f64; CHANNELS],
-    /// Channel fine tuning, RPN 1, in cents. A 14-bit value centred on 8192 \[35\]
+    /// Channel fine tuning, RPN 1, in cents. A 14-bit value centred on 8192 \[47\]
     fine_tune: [f64; CHANNELS],
-    /// The raw 14-bit value behind it, kept so an MSB and an LSB written at \[36\]
+    /// The raw 14-bit value behind it, kept so an MSB and an LSB written at \[48\]
     fine_tune_raw: [u16; CHANNELS],
     /// Currently selected RPN, from CC101 (MSB) and CC100 (LSB).
     rpn_sel: [u16; CHANNELS],
@@ -395,86 +535,88 @@ pub struct Driver {
     cc_volume: [u8; CHANNELS],
     cc_expression: [u8; CHANNELS],
     cc_pan: [u8; CHANNELS],
-    /// CC71 resonance, CC72 release, CC73 attack, CC74 brightness, CC75 decay. \[37\]
+    /// CC71 resonance, CC72 release, CC73 attack, CC74 brightness, CC75 decay. \[49\]
     cc_sound: [[u8; 5]; CHANNELS],
-    /// CC1 modulation depth, CC76 vibrato rate, CC77 vibrato depth, CC92 \[38\]
+    /// CC1 modulation depth, CC76 vibrato rate, CC77 vibrato depth, CC92 \[50\]
     cc_mod: [u8; CHANNELS],
     cc_vib_rate: [u8; CHANNELS],
     cc_vib_depth: [u8; CHANNELS],
     cc_tremolo: [u8; CHANNELS],
     cc_soft: [u8; CHANNELS],
-    /// Fine halves for the four controllers that have one worth reading. A \[39\]
+    /// Fine halves for the four controllers that have one worth reading. A \[51\]
     lsb_mod: [u8; CHANNELS],
     lsb_volume: [u8; CHANNELS],
     lsb_pan: [u8; CHANNELS],
     lsb_expression: [u8; CHANNELS],
-    /// LFO phase per channel, in cycles, carried across blocks so vibrato does \[40\]
+    /// LFO phase per channel, in cycles, carried across blocks so vibrato does \[52\]
     lfo_phase: [f64; CHANNELS],
-    /// Portamento: CC65, CC5, a pending CC84 (zero for none), and the key of \[41\]
+    /// Portamento: CC65, CC5, a pending CC84 (zero for none), and the key of \[53\]
     porta_on: [bool; CHANNELS],
     porta_time: [u8; CHANNELS],
     porta_note: [u8; CHANNELS],
     porta_last: [u8; CHANNELS],
     glide: Glide,
-    /// Frame by which every glide handed to the backend has landed. A backend \[42\]
+    /// Frame by which every glide handed to the backend has landed. A backend \[54\]
     glide_until: u64,
     /// Quantised sound-controller states, indexed by variant number.
     variants: Vec<[u8; 5]>,
+    /// The controller values each variant's table was built from, which are not \[55\]
+    variant_ccs: Vec<[u8; 5]>,
     /// Every quantised state the file has asked for, for diagnostics.
     seen_states: Vec<[u8; 5]>,
     /// Which variant each channel is currently on.
     cur_variant: [u32; CHANNELS],
-    /// Bitmask of variants any channel has pointed at during this block. A \[43\]
+    /// Bitmask of variants any channel has pointed at during this block. A \[56\]
     variant_used: u64,
     /// Monotonic tick per variant, for choosing the stalest one to reuse.
     variant_seen: Vec<u64>,
     variant_clock: u64,
     /// Variants asked for this block but not yet built and uploaded.
     pending_variants: Vec<(u32, ParamMod)>,
-    /// Set when a voice queued this block was born under a non-zero variant. \[44\]
+    /// Set when a voice queued this block was born under a non-zero variant. \[57\]
     spawn_variants: bool,
 
     next_note_id: u64,
     block_index: u64,
     /// Event pulled from the stream that belongs to a later block.
     pending: Option<(u64, Event)>,
-    /// For a per-track stream, the frame the whole file's last event falls \[45\]
+    /// For a per-track stream, the frame the whole file's last event falls \[58\]
     hold_frame: Option<u64>,
-    /// Between `submit_block` and `finish_block`: what the second needs of \[46\]
+    /// Between `submit_block` and `finish_block`: what the second needs of \[59\]
     in_flight: Option<InFlight>,
     stream_done: bool,
     end_sent: bool,
-    /// Whether block 0's tables have been built. Every later block is prepared \[47\]
+    /// Whether block 0's tables have been built. Every later block is prepared \[60\]
     primed: bool,
     tail_blocks_left: u64,
 
-    /// This block's admitted voices are the first `spawn_len`; see \[48\]
+    /// This block's admitted voices are the first `spawn_len`; see \[61\]
     spawn_buf: Vec<SpawnCmd>,
     spawn_len: usize,
-    /// This block's note-ons, one packed entry each, plus their ordinals. \[49\]
+    /// This block's note-ons, one packed entry each, plus their ordinals. \[62\]
     notes: Vec<u64>,
     note_ordinal: Vec<u32>,
-    /// `Some` when `Config::min_velocity` skips anything: which note-offs \[50\]
+    /// `Some` when `Config::min_velocity` skips anything: which note-offs \[63\]
     quiet: Option<QuietPairs>,
-    /// One entry per admissible layer this block, up to `cand_cap`. See `Cand` \[51\]
+    /// One entry per admissible layer this block, up to `cand_cap`. See `Cand` \[64\]
     cands: Vec<Cand>,
-    /// Candidates offered this block, counting the ones `cand_stride` skipped: \[52\]
+    /// Candidates offered this block, counting the ones `cand_stride` skipped: \[65\]
     cand_seen: u64,
-    /// Note-ons offered this block, counting the ones `cand_stride` skipped, \[53\]
+    /// Note-ons offered this block, counting the ones `cand_stride` skipped, \[66\]
     unit_seen: u64,
-    /// Offer only units whose number is a multiple of this. One until the \[54\]
+    /// Offer only units whose number is a multiple of this. One until the \[67\]
     cand_stride: u64,
-    /// `Config::max_block_candidates`, never below twice the pool, so thinning \[55\]
+    /// `Config::max_block_candidates`, never below twice the pool, so thinning \[68\]
     cand_cap: usize,
-    /// This block's share of the deferred queue, already built. Kept apart from \[56\]
+    /// This block's share of the deferred queue, already built. Kept apart from \[69\]
     deferred_now: Vec<SpawnCmd>,
     /// Scratch for `Bank::preview_note_on`.
     preview_buf: Vec<PreviewLayer>,
-    /// Note id of this block's first candidate. Ids are handed out in \[57\]
+    /// Note id of this block's first candidate. Ids are handed out in \[70\]
     block_first_id: u64,
-    /// Voices whose SF2 delay pushes their start past this block, with the \[58\]
+    /// Voices whose SF2 delay pushes their start past this block, with the \[71\]
     deferred: Vec<(u64, SpawnCmd, u16)>,
-    /// Fill `DriverStats::last_want_energy` and `last_take_energy`; see \[59\]
+    /// Fill `DriverStats::last_want_energy` and `last_take_energy`; see \[72\]
     block_energy: bool,
 
     pub stats: DriverStats,
@@ -489,10 +631,10 @@ impl Driver {
     pub(crate) fn open_prepared(cfg: &Config, bank: Arc<Bank>, midi: impl AsRef<Path>,
         phase_bank: Arc<crate::phase::PhaseBank>) -> Result<Self> {
         cfg.validate()?;
-        Self::from_stream(cfg, bank, MidiStream::open(midi)?, phase_bank)
+        Self::from_stream(cfg, bank, MidiStream::open_keys(midi, cfg.edo31)?, phase_bank)
     }
 
-    /// Render the tracks `sel` names, alone: the per-track path. See \[60\]
+    /// Render the tracks `sel` names, alone: the per-track path. See \[73\]
     pub fn open_tracks(cfg: &Config, bank: Arc<Bank>, midi: impl AsRef<Path>, sel: &TrackSelection) -> Result<Self> {
         let phase = crate::phase::PhaseBank::prepare(&bank, &cfg.phase)?;
         Self::open_tracks_prepared(cfg, bank, midi, sel, phase)
@@ -501,7 +643,7 @@ impl Driver {
     pub(crate) fn open_tracks_prepared(cfg: &Config, bank: Arc<Bank>, midi: impl AsRef<Path>,
         sel: &TrackSelection, phase_bank: Arc<crate::phase::PhaseBank>) -> Result<Self> {
         cfg.validate()?;
-        Self::from_stream(cfg, bank, MidiStream::open_tracks(midi, sel)?, phase_bank)
+        Self::from_stream(cfg, bank, MidiStream::open_tracks_keys(midi, sel, cfg.edo31)?, phase_bank)
     }
 
     fn from_stream(cfg: &Config, bank: Arc<Bank>, stream: MidiStream,
@@ -514,6 +656,13 @@ impl Driver {
             in_flight: None,
             phase_bank,
             note_ticks: Vec::new(),
+            tune: [0; CHANNELS * 12],
+            // A tuning from the configuration is on from the first note.
+            tuned: cfg.tuning.is_some(),
+            note_tune: Vec::new(),
+            key_static: cfg.tuning.clone(),
+            mts_tables: Vec::new(),
+            tuning_sel: [0; CHANNELS],
             cfg: cfg.clone(),
             bank,
             stream,
@@ -553,6 +702,7 @@ impl Driver {
             glide: Glide::new(cfg),
             glide_until: 0,
             variants: vec![[64 >> SOUND_CC_SHIFT; 5]],
+            variant_ccs: vec![[64; 5]],
             seen_states: vec![[64 >> SOUND_CC_SHIFT; 5]],
             cur_variant: [0; CHANNELS],
             variant_used: 1,
@@ -588,26 +738,110 @@ impl Driver {
         for ch in 0..CHANNELS {
             d.refresh_preset(ch, 0);
         }
+        if cfg.edo31 {
+            d.tune_lanes();
+        }
         Ok(d)
+    }
+
+    /// Set the scale/octave tuning of a channel's pitch class, in \[74\]
+    fn set_tune(&mut self, ch: u8, pc: u8, units: i32) {
+        self.tune[ch as usize * 12 + pc as usize % 12] = units;
+        if units != 0 {
+            self.start_tuning();
+        }
+    }
+
+    /// Something is tuned from here on. Every note this block has recorded so far \[75\]
+    #[cold]
+    #[inline(never)]
+    fn start_tuning(&mut self) {
+        if !self.tuned {
+            self.tuned = true;
+            let notes = &self.notes;
+            self.note_tune.clear();
+            self.note_tune.extend(notes.iter().map(|&w| NoteTune { key: note_unpack(w).1, cents: 0.0 }));
+        }
+    }
+
+    /// How a note-on is tuned: the key to build it on and the cents from there, and \[76\]
+    #[inline(never)]
+    fn tune_note(&self, ch: u8, key: u8) -> (NoteTune, bool) {
+        let scale = mts::cents(self.tune[ch as usize * 12 + key as usize % 12]);
+        if self.drum_map[ch as usize] != 0 {
+            return (NoteTune { key, cents: scale }, false);
+        }
+        let silent = self.key_static.as_ref().is_some_and(|t| t.is_silent(key));
+        let sel = self.tuning_sel[ch as usize];
+        let offset = match self.mts_tables.iter().find(|t| (t.bank, t.program) == ((sel >> 7) as u8, (sel & 0x7F) as u8)) {
+            Some(t) => t.offsets[key as usize],
+            None => self.key_static.as_ref().map_or(0, |t| t.offsets[key as usize]),
+        };
+        if offset == 0 {
+            return (NoteTune { key, cents: scale }, silent);
+        }
+        let (nearest, cents) = crate::tuning::lookup(key, offset);
+        (NoteTune { key: nearest, cents: cents + scale }, silent)
+    }
+
+    /// One key of a tuning program set by a message (`Event::KeyTune`): the table \[77\]
+    #[cold]
+    #[inline(never)]
+    fn set_key_tune(&mut self, bank: u8, program: u8, key: u8, units: i32) {
+        if !self.cfg.mts_notes {
+            // [78]
+            static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                log::warn!(
+                    "this file retunes keys with MIDI Tuning Standard single-note or bulk messages, \
+                     which BASSMIDI ignores and this render does too"
+                );
+            }
+            return;
+        }
+        let at = match self.mts_tables.iter().position(|t| (t.bank, t.program) == (bank, program)) {
+            Some(i) => i,
+            None => {
+                let base = self.key_static.as_ref().map_or([0; 128], |t| t.offsets);
+                self.mts_tables.push(MtsTable { bank, program, offsets: Box::new(base) });
+                self.mts_tables.len() - 1
+            }
+        };
+        self.mts_tables[at].offsets[key as usize & 0x7F] = units;
+        self.start_tuning();
+    }
+
+    /// Put the three lane tunings of the 31-EDO template on the lane \[79\]
+    fn tune_lanes(&mut self) {
+        for msg in crate::edo31::TUNING {
+            let m = mts::parse(&msg).expect("the built-in tuning is a scale/octave message");
+            for port in 0..crate::midi::PORTS {
+                for c in (0..16u8).filter(|&c| m.channels >> c & 1 != 0) {
+                    for (pc, &u) in m.units.iter().enumerate() {
+                        self.set_tune(port * 16 + c, pc as u8, u);
+                    }
+                }
+            }
+        }
     }
 
     pub fn track_count(&self) -> u16 {
         self.stream.track_count
     }
 
-    /// Track data decoded so far and the file's total, in bytes. See \[61\]
+    /// Track data decoded so far and the file's total, in bytes. See \[80\]
     pub fn input_bytes(&self) -> (u64, u64) {
         (self.stream.bytes_read(), self.stream.bytes_total())
     }
 
-    /// Measure each block's queued and admitted energy into \[62\]
+    /// Measure each block's queued and admitted energy into \[81\]
     pub fn measure_block_energy(&mut self, on: bool) {
         self.block_energy = on;
     }
 
     fn refresh_preset(&mut self, ch: usize, program: u8) {
         self.program[ch] = program;
-        // [63]
+        // [82]
         let bank_num = if self.drum_map[ch] != 0 {
             128u16
         } else {
@@ -619,7 +853,7 @@ impl Driver {
             .unwrap_or(0);
     }
 
-    /// Render one block. Returns false once the file and its tail are done. \[64\]
+    /// Render one block. Returns false once the file and its tail are done. \[83\]
     fn prepare_block(&mut self) -> Result<()> {
         let prof = self.cfg.profile;
         let t_block = std::time::Instant::now();
@@ -629,7 +863,7 @@ impl Driver {
 
         self.gates.begin_block();
         self.chan.begin_block();
-        // [65]
+        // [84]
         self.variant_used = 1;
         for v in self.cur_variant {
             self.variant_used |= 1u64 << v;
@@ -637,6 +871,7 @@ impl Driver {
         self.spawn_len = 0;
         self.notes.clear();
         self.note_ticks.clear();
+        self.note_tune.clear();
         self.note_ordinal.clear();
         self.cands.clear();
         self.cand_seen = 0;
@@ -646,7 +881,7 @@ impl Driver {
         self.block_first_id = self.next_note_id;
         self.spawn_variants = false;
 
-        // [66]
+        // [85]
         let mut i = 0;
         while i < self.deferred.len() {
             if self.deferred[i].0 < block_end {
@@ -663,7 +898,7 @@ impl Driver {
                 if self.cands.len() >= self.cand_cap {
                     self.thin_cands();
                 }
-                // [67]
+                // [86]
                 let index = self.next_cand_index();
                 if self.offer_unit() {
                     self.cands.push(Cand {
@@ -696,7 +931,7 @@ impl Driver {
             };
 
             if let Event::Tempo(us) = ev {
-                // [68]
+                // [87]
                 self.clock.set_tempo(tick, us);
                 self.stats.events += 1;
                 continue;
@@ -720,9 +955,9 @@ impl Driver {
 
         // Once the file runs out, release everything so looping voices stop.
         if self.stream_done && !self.end_sent {
-            // [69]
+            // [88]
             for ch in 0..self.gates.channels() {
-                // [70]
+                // [89]
                 self.gates.all_sound_off(ch as u8, 0);
             }
             self.end_sent = true;
@@ -745,7 +980,7 @@ impl Driver {
         self.finish_block(backend, out)
     }
 
-    /// The first of `next_block`'s three steps, split out so that a batch can \[71\]
+    /// The first of `next_block`'s three steps, split out so that a batch can \[90\]
     pub fn submit_block(&mut self, backend: &mut dyn Backend) -> Result<()> {
         if self.in_flight.is_some() {
             bail!("submit_block while a block is still in flight");
@@ -754,7 +989,7 @@ impl Driver {
         let t_block = std::time::Instant::now();
         let block_frames = self.cfg.block_frames as u64;
 
-        // [72]
+        // [91]
         if !self.primed {
             self.prepare_block()?;
             self.primed = true;
@@ -771,7 +1006,7 @@ impl Driver {
         self.apply_modulation();
         self.chan.refresh_active();
         let live = backend.stats().active_voices as u32;
-        // [73]
+        // [92]
         let silent = self.cfg.skip_silence && live == 0 && self.cand_seen == 0;
         if !silent {
             backend.set_gates(&self.gates.off_meta, &self.gates.off_runs)?;
@@ -779,14 +1014,14 @@ impl Driver {
                 &self.chan.rows,
                 self.chan.bend_active(),
                 self.chan.gain_active(),
-                // [74]
+                // [93]
                 self.chan.variant_active() || self.spawn_variants,
                 self.chan.cut_active(),
             )?;
         }
-        // [75]
+        // [94]
         let t_admit = std::time::Instant::now();
-        // [76]
+        // [95]
         let want = self.cands.len();
         let take = self.cfg.admit_take(live, want as u32) as usize;
         self.stats.dropped += self.cand_seen - take as u64;
@@ -797,7 +1032,7 @@ impl Driver {
 
         if take < want && take > 0 {
             match self.cfg.admit_rule {
-                // [77]
+                // [96]
                 AdmitRule::Even => {
                     for i in 0..take {
                         self.cands[i] = self.cands[crate::voice::spawn_pick(i, want, take)];
@@ -806,13 +1041,13 @@ impl Driver {
                 AdmitRule::Loudest => self.rank_candidates(want, take),
             }
         }
-        // [78]
+        // [97]
         if self.block_energy {
             self.stats.last_want_energy = self.cands.iter().map(|c| (c.key >> 48) & 0x7FFF).sum();
             self.stats.last_take_energy =
                 self.cands[..take.min(self.cands.len())].iter().map(|c| (c.key >> 48) & 0x7FFF).sum();
         }
-        // [79]
+        // [98]
         let block_start = (self.block_index - 1) * block_frames;
         self.materialise(take, block_start);
         if prof {
@@ -831,13 +1066,13 @@ impl Driver {
             self.stats.us_spawn += t_spawn.elapsed().as_micros() as u64;
         }
         self.stats.last_stolen = backend.stats().stolen - stolen_before;
-        // [80]
+        // [99]
         self.stats.voices_spawned += self.cand_seen;
         if !silent {
             backend.submit()?;
         }
 
-        // [81]
+        // [100]
         self.in_flight = Some(InFlight {
             t_block,
             silent,
@@ -847,12 +1082,12 @@ impl Driver {
         Ok(())
     }
 
-    /// The second of `next_block`'s three steps: build the next block's \[82\]
+    /// The second of `next_block`'s three steps: build the next block's \[101\]
     pub fn prepare_ahead(&mut self) -> Result<()> {
         self.prepare_block()
     }
 
-    /// The last of `next_block`'s three steps: take the block back from the \[83\]
+    /// The last of `next_block`'s three steps: take the block back from the \[102\]
     pub fn finish_block(&mut self, backend: &mut dyn Backend, out: &mut [f32]) -> Result<bool> {
         if out.len() != self.cfg.block_samples() {
             bail!(
@@ -933,7 +1168,7 @@ impl Driver {
             loop_end: v.loop_end,
             flags: v.flags,
             params: v.params,
-            // [84]
+            // [103]
             variant,
             region: v.region,
             gate_slot,
@@ -943,14 +1178,14 @@ impl Driver {
             note_id_hi: (id >> 32) as u32,
             gain_l: v.gain_l,
             gain_r: v.gain_r,
-            // [85]
+            // [104]
             row_bias,
             // Filled in by the caller when analytic phase is on.
             rotation: crate::phase::Coefficients::default(),
         }
     }
 
-    /// Move the `take` best candidates to the front, ranked *within* time \[86\]
+    /// Move the `take` best candidates to the front, ranked *within* time \[105\]
     fn rank_candidates(&mut self, want: usize, take: usize) {
         let cands = &mut self.cands;
         let strata = take.min(ADMIT_STRATA);
@@ -970,9 +1205,9 @@ impl Driver {
             if q < n {
                 seg.select_nth_unstable_by_key(q, key);
             }
-            // [87]
+            // [106]
 
-            // [88]
+            // [107]
             for j in 0..q {
                 cands.swap(olo + j, lo + j);
             }
@@ -980,7 +1215,7 @@ impl Driver {
     }
 
 
-    /// Number the next admission candidate. Every layer that reaches \[89\]
+    /// Number the next admission candidate. Every layer that reaches \[108\]
     #[inline]
     fn next_cand_index(&mut self) -> u64 {
         let index = self.cand_seen;
@@ -988,7 +1223,7 @@ impl Driver {
         index
     }
 
-    /// Number the next unit -- a note-on, or one deferred voice -- and say \[90\]
+    /// Number the next unit -- a note-on, or one deferred voice -- and say \[109\]
     #[inline]
     fn offer_unit(&mut self) -> bool {
         let unit = self.unit_seen;
@@ -996,7 +1231,7 @@ impl Driver {
         unit & (self.cand_stride - 1) == 0
     }
 
-    /// Halve this block's candidates once the list reaches `cand_cap`: keep \[91\]
+    /// Halve this block's candidates once the list reaches `cand_cap`: keep \[110\]
     fn thin_cands(&mut self) {
         let mut kept = 0;
         let mut notes = 0;
@@ -1005,7 +1240,7 @@ impl Driver {
         let mut r = 0;
         while r < len {
             let first = self.cands[r];
-            // [92]
+            // [111]
             let mut end = r + 1;
             if first.note != DEFERRED {
                 while end < len && self.cands[end].note == first.note {
@@ -1013,13 +1248,16 @@ impl Driver {
                 }
             }
             if unit.is_multiple_of(2) {
-                // [93]
+                // [112]
                 if first.note != DEFERRED {
                     let n = first.note as usize;
                     self.notes[notes] = self.notes[n];
                     self.note_ordinal[notes] = self.note_ordinal[n];
                     if self.cfg.phase.active() {
                         self.note_ticks[notes] = self.note_ticks[n];
+                    }
+                    if self.tuned {
+                        self.note_tune[notes] = self.note_tune[n];
                     }
                     notes += 1;
                 }
@@ -1039,10 +1277,11 @@ impl Driver {
         self.notes.truncate(notes);
         self.note_ordinal.truncate(notes);
         self.note_ticks.truncate(notes);
+        self.note_tune.truncate(notes);
         self.cand_stride *= 2;
     }
 
-    /// Build the voices for the first `take` candidates, appending them to \[94\]
+    /// Build the voices for the first `take` candidates, appending them to \[113\]
     fn materialise(&mut self, take: usize, block_start: u64) {
         let cands = std::mem::take(&mut self.cands);
         let admitted = &cands[..take.min(cands.len())];
@@ -1054,18 +1293,19 @@ impl Driver {
             notes: &self.notes,
             note_ordinal: &self.note_ordinal,
             note_ticks: &self.note_ticks,
+            note_tune: &self.note_tune,
             deferred_now: &self.deferred_now,
             first_id: self.block_first_id,
             block_start,
         };
         let n = admitted.len();
         let base = self.spawn_len;
-        // [95]
+        // [114]
         if self.spawn_buf.len() < base + n {
             self.spawn_buf.resize(base + n, SpawnCmd::default());
         }
         let out = &mut self.spawn_buf[base..base + n];
-        // [96]
+        // [115]
         let fill = |out: &mut [SpawnCmd], cs: &[Cand]| -> (usize, u64) {
             let mut memo = None;
             let (mut k, mut until) = (0, 0);
@@ -1082,7 +1322,7 @@ impl Driver {
         let (built, glide_until) = if threads == 1 {
             fill(out, admitted)
         } else {
-            // [97]
+            // [116]
             let mut done = {
                 let pieces = std::sync::Mutex::new(
                     out.chunks_mut(MATERIALISE_CHUNK).zip(admitted.chunks(MATERIALISE_CHUNK)).enumerate(),
@@ -1107,7 +1347,7 @@ impl Driver {
                 })
             };
             done.sort_unstable_by_key(|d| d.0);
-            // [98]
+            // [117]
             let (mut end, mut until) = (0, 0);
             for (i, k, u) in done {
                 let from = i * MATERIALISE_CHUNK;
@@ -1124,7 +1364,7 @@ impl Driver {
         self.cands = cands;
     }
 
-    /// Grow the published tables to cover channel `ch`, a port at a time. The \[99\]
+    /// Grow the published tables to cover channel `ch`, a port at a time. The \[118\]
     #[inline]
     fn cover(&mut self, ch: u8) {
         let ch = ch as usize;
@@ -1135,8 +1375,45 @@ impl Driver {
         }
     }
 
-    /// `tick` is the event's own MIDI tick, before it rounds to a frame: the \[100\]
+    /// `tick` is the event's own MIDI tick, before it rounds to a frame: the \[119\]
     fn handle_event(&mut self, ev: Event, tick: u64, rel: u32, block_start: u64) {
+        if !self.cfg.edo31 {
+            return self.handle_one(ev, tick, rel, block_start);
+        }
+        let on = |ch| match edo31::triplet(ch) {
+            Some(t) => t.map(Some),
+            None => [Some(ch), None, None],
+        };
+        match ev {
+            Event::NoteOn { ch, key, vel } => {
+                let (ch, key) = edo31::map_note(ch, key);
+                self.handle_one(Event::NoteOn { ch, key, vel }, tick, rel, block_start);
+            }
+            Event::NoteOff { ch, key } => {
+                let (ch, key) = edo31::map_note(ch, key);
+                self.handle_one(Event::NoteOff { ch, key }, tick, rel, block_start);
+            }
+            Event::Cc { ch, num, val } => {
+                for ch in on(ch).into_iter().flatten() {
+                    self.handle_one(Event::Cc { ch, num, val }, tick, rel, block_start);
+                }
+            }
+            Event::Program { ch, val } => {
+                for ch in on(ch).into_iter().flatten() {
+                    self.handle_one(Event::Program { ch, val }, tick, rel, block_start);
+                }
+            }
+            Event::PitchBend { ch, val } => {
+                for ch in on(ch).into_iter().flatten() {
+                    self.handle_one(Event::PitchBend { ch, val }, tick, rel, block_start);
+                }
+            }
+            // Not channel messages, or not the template's to move.
+            _ => self.handle_one(ev, tick, rel, block_start),
+        }
+    }
+
+    fn handle_one(&mut self, ev: Event, tick: u64, rel: u32, block_start: u64) {
         match ev {
             Event::NoteOn { ch, .. }
             | Event::NoteOff { ch, .. }
@@ -1146,7 +1423,7 @@ impl Driver {
         }
         match ev {
             Event::NoteOn { ch, key, vel } => {
-                // [101]
+                // [120]
                 if let Some(q) = &mut self.quiet {
                     let skip = vel < self.cfg.min_velocity;
                     q.push(GateTable::slot(ch, key), skip);
@@ -1158,8 +1435,13 @@ impl Driver {
                 let ordinal = self.gates.note_on(ch, key, rel);
                 self.stats.notes += 1;
                 let variant = self.cur_variant[ch as usize];
+                let (nt, silent) = if self.tuned {
+                    self.tune_note(ch, key)
+                } else {
+                    (NoteTune { key, cents: 0.0 }, false)
+                };
 
-                // [102]
+                // [121]
                 let c = ch as usize;
                 let from = if self.porta_note[c] != 0 {
                     self.porta_note[c]
@@ -1176,42 +1458,44 @@ impl Driver {
                     glide_pack(from as i32 - key as i32, self.porta_time[c])
                 };
 
-                // [103]
+                // [122]
                 let mut prev = std::mem::take(&mut self.preview_buf);
                 prev.clear();
-                // [104]
-                self.bank.preview_note_on(
-                    self.preset[ch as usize],
-                    key,
-                    vel,
-                    self.next_note_id,
-                    self.cfg.max_layers as usize,
-                    &mut prev,
-                );
+                // [123]
+                if !silent {
+                    self.bank.preview_note_on(
+                        self.preset[ch as usize],
+                        nt.key,
+                        vel,
+                        self.next_note_id,
+                        self.cfg.max_layers as usize,
+                        &mut prev,
+                    );
+                }
 
-                // [105]
+                // [124]
                 if self.cands.len() + prev.len() > self.cand_cap {
                     self.thin_cands();
                 }
                 let note = self.notes.len() as u32;
                 let mut recorded = false;
-                // [106]
+                // [125]
                 let mut kept = None;
                 // Every layer of one note-on shares one angle, parked or not.
                 let mut deferred_angle = None;
                 for p in prev.iter() {
-                    // [107]
+                    // [126]
                     let id = self.next_note_id;
                     self.next_note_id += 1;
 
                     if p.delay_frames != 0 {
                         let start = block_start + rel as u64 + p.delay_frames as u64;
                         if start >= block_start + self.cfg.block_frames as u64 {
-                            // [108]
+                            // [127]
                             if let Some(v) =
-                                self.bank.build_layer(p.region, key, vel, &self.cfg)
+                                self.bank.build_layer(p.region, nt.key, vel, &self.cfg, nt.cents)
                             {
-                                // [109]
+                                // [128]
                                 let mut cmd = Self::make_cmd(
                                     &v,
                                     variant,
@@ -1232,7 +1516,7 @@ impl Driver {
                         }
                     }
 
-                    // [110]
+                    // [129]
                     if variant != 0 {
                         self.variant_used |= 1u64 << variant;
                         self.spawn_variants = true;
@@ -1255,6 +1539,9 @@ impl Driver {
                         self.note_ordinal.push(ordinal);
                         if self.cfg.phase.active() {
                             self.note_ticks.push(tick);
+                        }
+                        if self.tuned {
+                            self.note_tune.push(nt);
                         }
                         recorded = true;
                     }
@@ -1297,7 +1584,7 @@ impl Driver {
                         self.refresh_gain(c, rel);
                     }
                     32 => self.bank_lsb[c] = val,
-                    // [111]
+                    // [130]
                     6 if self.rpn_sel[c] == 0 => {
                         self.bend_range[c] = val as f64;
                         self.refresh_bend(c, rel);
@@ -1306,7 +1593,7 @@ impl Driver {
                         self.bend_range[c] = self.bend_range[c].trunc() + val as f64 / 100.0;
                         self.refresh_bend(c, rel);
                     }
-                    // [112]
+                    // [131]
                     6 if self.rpn_sel[c] == 1 => {
                         self.fine_tune_raw[c] = (self.fine_tune_raw[c] & 0x7F) | ((val as u16) << 7);
                         self.fine_tune[c] = (self.fine_tune_raw[c] as f64 - 8192.0) / 8192.0 * 100.0;
@@ -1317,10 +1604,17 @@ impl Driver {
                         self.fine_tune[c] = (self.fine_tune_raw[c] as f64 - 8192.0) / 8192.0 * 100.0;
                         self.refresh_bend(c, rel);
                     }
-                    // [113]
+                    // [132]
                     6 if self.rpn_sel[c] == 2 => {
                         self.coarse_tune[c] = val as f64 - 64.0;
                         self.refresh_bend(c, rel);
+                    }
+                    // [133]
+                    6 if self.rpn_sel[c] == 3 && self.cfg.mts_notes => {
+                        self.tuning_sel[c] = (self.tuning_sel[c] & 0x3F80) | val as u16;
+                    }
+                    6 if self.rpn_sel[c] == 4 && self.cfg.mts_notes => {
+                        self.tuning_sel[c] = (self.tuning_sel[c] & 0x7F) | ((val as u16) << 7);
                     }
                     96 if self.rpn_sel[c] == 0 => {
                         self.bend_range[c] = (self.bend_range[c] + 1.0).min(127.0);
@@ -1354,7 +1648,7 @@ impl Driver {
                         self.lsb_expression[c] = 0;
                         self.refresh_gain(c, rel);
                     }
-                    // [114]
+                    // [134]
                     5 => self.porta_time[c] = val,
                     65 => self.porta_on[c] = val >= 64,
                     84 => self.porta_note[c] = val,
@@ -1373,12 +1667,12 @@ impl Driver {
                     77 => self.cc_vib_depth[c] = val,
                     92 => self.cc_tremolo[c] = val,
                     120 => {
-                        // [115]
+                        // [135]
                         self.gates.all_sound_off(ch, rel);
                         self.chan.set_sound_off(ch, rel, self.next_note_id);
                     }
                     121 => self.reset_controllers(ch, rel),
-                    // [116]
+                    // [136]
                     123..=127 => self.gates.all_notes_off(ch, rel),
                     _ => {}
                 }
@@ -1401,7 +1695,17 @@ impl Driver {
                         self.refresh_preset(c, self.program[c]);
                     }
                 }
+                // [137]
+                self.tune.fill(0);
+                if self.cfg.edo31 {
+                    self.tune_lanes();
+                }
+                // [138]
+                self.mts_tables.clear();
+                self.tuning_sel.fill(0);
             }
+            Event::Tune { ch, pc, units } => self.set_tune(ch, pc, units),
+            Event::KeyTune { bank, prog, key, units } => self.set_key_tune(bank, prog, key, units),
             Event::PitchBend { ch, val } => {
                 self.bend_val[ch as usize] = val;
                 self.refresh_bend(ch as usize, rel);
@@ -1410,7 +1714,7 @@ impl Driver {
         }
     }
 
-    /// Take one of CC71-CC75 and move the channel onto whichever copy of the \[117\]
+    /// Take one of CC71-CC75 and move the channel onto whichever copy of the \[139\]
     fn set_sound_cc(&mut self, ch: u8, which: usize, val: u8, rel: u32) {
         let c = ch as usize;
         if self.cc_sound[c][which] == val {
@@ -1437,7 +1741,7 @@ impl Driver {
                 self.build_variant_at(i, c);
                 i
             }
-            // [118]
+            // [140]
             None => {
                 let victim = (1..self.variants.len())
                     .filter(|i| self.variant_used & (1u64 << i) == 0)
@@ -1477,8 +1781,12 @@ impl Driver {
         self.chan.set_variant(ch, idx, rel);
     }
 
-    /// Queue the build of variant `i` from channel `c`'s current controllers. \[119\]
+    /// Queue the build of variant `i` from channel `c`'s current controllers. \[141\]
     fn build_variant_at(&mut self, i: u32, c: usize) {
+        if self.variant_ccs.len() <= i as usize {
+            self.variant_ccs.resize(i as usize + 1, [64; 5]);
+        }
+        self.variant_ccs[i as usize] = self.cc_sound[c];
         let m = ParamMod::from_controllers(
             self.cc_sound[c][0],
             self.cc_sound[c][1],
@@ -1491,7 +1799,7 @@ impl Driver {
         self.pending_variants.push((i, m));
     }
 
-    /// CC121, Reset All Controllers. \[120\]
+    /// CC121, Reset All Controllers. \[142\]
     fn reset_controllers(&mut self, ch: u8, rel: u32) {
         let c = ch as usize;
         self.porta_on[c] = false;
@@ -1508,11 +1816,11 @@ impl Driver {
         self.gates.reset_controllers(ch, rel);
     }
 
-    /// Lay the vibrato and tremolo LFOs over the controller rows. \[121\]
+    /// Lay the vibrato and tremolo LFOs over the controller rows. \[143\]
     fn apply_modulation(&mut self) {
         let tiles = self.chan.tiles;
         let tile_seconds = self.cfg.gate_frames as f64 / self.cfg.sample_rate as f64;
-        // [122]
+        // [144]
         for c in 0..CHANNELS {
             let vib = (self.cc_mod[c] as f64 * 128.0 + self.lsb_mod[c] as f64) / 16383.0
                 * (self.cc_vib_depth[c] as f64 / 64.0)
@@ -1520,7 +1828,7 @@ impl Driver {
             let trem = self.cc_tremolo[c] as f64 / 127.0 * 0.25;
             let rate = 5.0 * (2.0f64).powf((self.cc_vib_rate[c] as f64 - 64.0) / 32.0);
             if vib <= 0.0 && trem <= 0.0 {
-                // [123]
+                // [145]
                 self.lfo_phase[c] =
                     (self.lfo_phase[c] + rate * tile_seconds * tiles as f64).fract();
                 continue;
@@ -1542,18 +1850,18 @@ impl Driver {
         }
     }
 
-    /// Freeze this channel's bend into the factor the backends multiply by. \[124\]
+    /// Freeze this channel's bend into the factor the backends multiply by. \[146\]
     fn refresh_bend(&mut self, c: usize, rel: u32) {
-        // [125]
+        // [147]
         let semitones = (self.bend_val[c] as f64 / 8192.0) * self.bend_range[c]
             + self.coarse_tune[c]
             + self.fine_tune[c] / 100.0;
         self.chan.set_bend(c as u8, bend_factor(semitones), rel);
     }
 
-    /// Fold CC7, CC11 and CC10 into the pair of gains a voice multiplies by. \[126\]
+    /// Fold CC7, CC11 and CC10 into the pair of gains a voice multiplies by. \[148\]
     fn refresh_gain(&mut self, c: usize, rel: u32) {
-        // [127]
+        // [149]
         let fine = |msb: u8, lsb: u8| {
             if lsb == 0 {
                 msb as f32 / 127.0
@@ -1561,15 +1869,15 @@ impl Driver {
                 (msb as f32 * 128.0 + lsb as f32) / 16383.0
             }
         };
-        // [128]
+        // [150]
         let v = fine(self.cc_volume[c], self.lsb_volume[c])
             / (crate::bank::POWER_ON_VOLUME as f32 / 127.0);
         let e = fine(self.cc_expression[c], self.lsb_expression[c]);
-        // [129]
+        // [151]
         let soft = 1.0 - 0.5 * (self.cc_soft[c] as f32 / 127.0);
         let amp = (v * v) * (e * e) * soft;
         let theta = fine(self.cc_pan[c], self.lsb_pan[c]) * std::f32::consts::FRAC_PI_2;
-        // [130]
+        // [152]
         let (l, r) = if self.cc_pan[c] == 64 && self.lsb_pan[c] == 0 {
             (1.0, 1.0)
         } else {
@@ -1582,7 +1890,343 @@ impl Driver {
         self.stats.frames as f64 / self.cfg.sample_rate as f64
     }
 
-    /// The largest magnitude written to the output so far, after `--volume` \[131\]
+    // ---- stopping and going on ----------------------------------------------
+
+    /// Like `next_block`, with one difference: after the block is submitted, \[153\]
+    pub fn next_block_or_hold(
+        &mut self,
+        backend: &mut dyn Backend,
+        out: &mut [f32],
+        hold: impl FnOnce() -> bool,
+    ) -> Result<(bool, bool)> {
+        if out.len() != self.cfg.block_samples() {
+            bail!("output block is {} samples, expected {}", out.len(), self.cfg.block_samples());
+        }
+        self.submit_block(backend)?;
+        let held = hold();
+        if held {
+            // The next call to `submit_block` prepares it, as a fresh driver's does.
+            self.primed = false;
+        } else {
+            self.prepare_ahead()?;
+        }
+        let more = self.finish_block(backend, out)?;
+        Ok((more, held))
+    }
+
+    /// Whether the driver is at a block boundary: no block on the device and \[154\]
+    pub fn at_boundary(&self) -> bool {
+        self.in_flight.is_none() && !self.primed
+    }
+
+    /// Everything this render has come to that is not rebuilt from the \[155\]
+    pub fn save_state(&self, e: &mut Enc) -> Result<()> {
+        if !self.at_boundary() {
+            bail!("a render can be saved only between blocks, with none prepared");
+        }
+        let Driver {
+            // Rebuilt from the configuration and the soundfont.
+            phase_bank: _,
+            cfg: _,
+            bank: _,
+            key_static: _,
+            glide: _,
+            cand_cap: _,
+            hold_frame: _,
+            block_energy: _,
+            // [156]
+            note_ticks: _,
+            note_tune: _,
+            variant_used: _,
+            pending_variants: _,
+            spawn_variants: _,
+            in_flight: _,
+            primed: _,
+            spawn_buf: _,
+            spawn_len: _,
+            notes: _,
+            note_ordinal: _,
+            cands: _,
+            cand_seen: _,
+            unit_seen: _,
+            cand_stride: _,
+            deferred_now: _,
+            preview_buf: _,
+            block_first_id: _,
+            // Saved.
+            stream,
+            clock,
+            gates,
+            chan,
+            output,
+            bank_msb,
+            bank_lsb,
+            program,
+            drum_map,
+            preset,
+            bend_val,
+            bend_range,
+            coarse_tune,
+            fine_tune,
+            fine_tune_raw,
+            tune,
+            tuned,
+            mts_tables,
+            tuning_sel,
+            rpn_sel,
+            cc_volume,
+            cc_expression,
+            cc_pan,
+            cc_sound,
+            cc_mod,
+            cc_vib_rate,
+            cc_vib_depth,
+            cc_tremolo,
+            cc_soft,
+            lsb_mod,
+            lsb_volume,
+            lsb_pan,
+            lsb_expression,
+            lfo_phase,
+            porta_on,
+            porta_time,
+            porta_note,
+            porta_last,
+            glide_until,
+            variants,
+            variant_ccs,
+            seen_states,
+            cur_variant,
+            variant_seen,
+            variant_clock,
+            next_note_id,
+            block_index,
+            pending,
+            stream_done,
+            end_sent,
+            tail_blocks_left,
+            quiet,
+            deferred,
+            stats,
+        } = self;
+        stream.save_state(e);
+        clock.save_state(e);
+        gates.save_state(e);
+        chan.save_state(e);
+        output.save_state(e);
+
+        e.u8s(bank_msb);
+        e.u8s(bank_lsb);
+        e.u8s(program);
+        e.u8s(drum_map);
+        e.u32s(preset);
+        e.i16s(bend_val);
+        e.f64s(bend_range);
+        e.f64s(coarse_tune);
+        e.f64s(fine_tune);
+        e.u16s(fine_tune_raw);
+        e.i32s(tune);
+        e.bool(*tuned);
+        // The tuning programs a file has set, and the one each channel plays on.
+        e.len_of(mts_tables.len());
+        for t in mts_tables {
+            e.u8(t.bank);
+            e.u8(t.program);
+            e.i32s(&t.offsets[..]);
+        }
+        e.u16s(tuning_sel);
+        e.u16s(rpn_sel);
+        e.u8s(cc_volume);
+        e.u8s(cc_expression);
+        e.u8s(cc_pan);
+        for per in cc_sound {
+            e.raw(per);
+        }
+        e.u8s(cc_mod);
+        e.u8s(cc_vib_rate);
+        e.u8s(cc_vib_depth);
+        e.u8s(cc_tremolo);
+        e.u8s(cc_soft);
+        e.u8s(lsb_mod);
+        e.u8s(lsb_volume);
+        e.u8s(lsb_pan);
+        e.u8s(lsb_expression);
+        e.f64s(lfo_phase);
+        e.bools(porta_on);
+        e.u8s(porta_time);
+        e.u8s(porta_note);
+        e.u8s(porta_last);
+        e.u64(*glide_until);
+
+        e.len_of(variants.len());
+        for v in variants {
+            e.raw(v);
+        }
+        e.len_of(variant_ccs.len());
+        for v in variant_ccs {
+            e.raw(v);
+        }
+        e.len_of(seen_states.len());
+        for v in seen_states {
+            e.raw(v);
+        }
+        e.u32s(cur_variant);
+        e.u64s(variant_seen);
+        e.u64(*variant_clock);
+
+        e.u64(*next_note_id);
+        e.u64(*block_index);
+        match pending {
+            Some((tick, ev)) => {
+                e.bool(true);
+                e.u64(*tick);
+                ev.save(e);
+            }
+            None => e.bool(false),
+        }
+        e.bool(*stream_done);
+        e.bool(*end_sent);
+        e.u64(*tail_blocks_left);
+
+        match quiet {
+            Some(q) => {
+                e.bool(true);
+                q.save(e);
+            }
+            None => e.bool(false),
+        }
+        e.len_of(deferred.len());
+        for (frame, cmd, glide) in deferred {
+            e.u64(*frame);
+            e.pod(std::slice::from_ref(cmd));
+            e.u16(*glide);
+        }
+        stats.save(e);
+        Ok(())
+    }
+
+    /// Go on from a saved state: the other half of `save_state`, into a driver \[157\]
+    pub fn load_state(&mut self, d: &mut Dec) -> Result<()> {
+        if !self.at_boundary() || self.block_index != 0 {
+            bail!("a saved state can be loaded only into a render that has not begun");
+        }
+        self.stream.load_state(d).context("the MIDI stream")?;
+        self.clock.load_state(d).context("the tempo clock")?;
+        self.gates.load_state(d).context("the gate table")?;
+        self.chan.load_state(d).context("the channel table")?;
+        self.output.load_state(d).context("the output stage")?;
+
+        d.fill_u8s(&mut self.bank_msb, "channels")?;
+        d.fill_u8s(&mut self.bank_lsb, "channels")?;
+        d.fill_u8s(&mut self.program, "channels")?;
+        d.fill_u8s(&mut self.drum_map, "channels")?;
+        d.fill_u32s(&mut self.preset, "channels")?;
+        d.fill_i16s(&mut self.bend_val, "channels")?;
+        d.fill_f64s(&mut self.bend_range, "channels")?;
+        d.fill_f64s(&mut self.coarse_tune, "channels")?;
+        d.fill_f64s(&mut self.fine_tune, "channels")?;
+        d.fill_u16s(&mut self.fine_tune_raw, "channels")?;
+        d.fill_i32s(&mut self.tune, "scale/octave tunings")?;
+        self.tuned = d.bool()?;
+        let tables = d.len_of(2 + 4 * 128)?;
+        self.mts_tables.clear();
+        for _ in 0..tables {
+            let (bank, program) = (d.u8()?, d.u8()?);
+            let mut offsets = Box::new([0i32; 128]);
+            d.fill_i32s(&mut offsets[..], "tuning program offsets")?;
+            self.mts_tables.push(MtsTable { bank, program, offsets });
+        }
+        d.fill_u16s(&mut self.tuning_sel, "channels")?;
+        d.fill_u16s(&mut self.rpn_sel, "channels")?;
+        d.fill_u8s(&mut self.cc_volume, "channels")?;
+        d.fill_u8s(&mut self.cc_expression, "channels")?;
+        d.fill_u8s(&mut self.cc_pan, "channels")?;
+        for per in &mut self.cc_sound {
+            per.copy_from_slice(d.raw(5)?);
+        }
+        d.fill_u8s(&mut self.cc_mod, "channels")?;
+        d.fill_u8s(&mut self.cc_vib_rate, "channels")?;
+        d.fill_u8s(&mut self.cc_vib_depth, "channels")?;
+        d.fill_u8s(&mut self.cc_tremolo, "channels")?;
+        d.fill_u8s(&mut self.cc_soft, "channels")?;
+        d.fill_u8s(&mut self.lsb_mod, "channels")?;
+        d.fill_u8s(&mut self.lsb_volume, "channels")?;
+        d.fill_u8s(&mut self.lsb_pan, "channels")?;
+        d.fill_u8s(&mut self.lsb_expression, "channels")?;
+        d.fill_f64s(&mut self.lfo_phase, "channels")?;
+        d.fill_bools(&mut self.porta_on, "channels")?;
+        d.fill_u8s(&mut self.porta_time, "channels")?;
+        d.fill_u8s(&mut self.porta_note, "channels")?;
+        d.fill_u8s(&mut self.porta_last, "channels")?;
+        self.glide_until = d.u64()?;
+
+        let five = |d: &mut Dec| -> Result<Vec<[u8; 5]>> {
+            let n = d.len_of(5)?;
+            (0..n).map(|_| Ok(d.raw(5)?.try_into().expect("five bytes"))).collect()
+        };
+        self.variants = five(d)?;
+        self.variant_ccs = five(d)?;
+        self.seen_states = five(d)?;
+        if self.variants.is_empty()
+            || self.variant_ccs.len() != self.variants.len()
+            || self.variants.len() > 64
+            || self.seen_states.is_empty()
+        {
+            bail!("the saved sound-controller variants are not consistent");
+        }
+        d.fill_u32s(&mut self.cur_variant, "channels")?;
+        if self.cur_variant.iter().any(|&v| v as usize >= self.variants.len()) {
+            bail!("a saved channel names a sound-controller variant there is not");
+        }
+        self.variant_seen = d.u64s()?;
+        if self.variant_seen.len() != self.variants.len() {
+            bail!("the saved sound-controller variants are not consistent");
+        }
+        self.variant_clock = d.u64()?;
+
+        self.next_note_id = d.u64()?;
+        self.block_index = d.u64()?;
+        self.pending = if d.bool()? {
+            let tick = d.u64()?;
+            Some((tick, Event::load(d)?))
+        } else {
+            None
+        };
+        self.stream_done = d.bool()?;
+        self.end_sent = d.bool()?;
+        self.tail_blocks_left = d.u64()?;
+
+        match (&mut self.quiet, d.bool()?) {
+            (Some(q), true) => q.load(d)?,
+            (None, false) => {}
+            _ => bail!("the saved state and this render disagree about --min-velocity"),
+        }
+        let n = d.len_of(8 + std::mem::size_of::<SpawnCmd>() + 2)?;
+        self.deferred = Vec::with_capacity(n);
+        for _ in 0..n {
+            let frame = d.u64()?;
+            let cmd = d.pod::<SpawnCmd>()?;
+            let [cmd] = <[SpawnCmd; 1]>::try_from(cmd).map_err(|_| anyhow::anyhow!("a saved voice is the wrong size"))?;
+            self.deferred.push((frame, cmd, d.u16()?));
+        }
+        self.stats.load(d)?;
+        // [158]
+        self.primed = false;
+        Ok(())
+    }
+
+    /// Hand the backend the params tables the sound controllers built before \[159\]
+    pub fn reinstall_variants(&self, backend: &mut dyn Backend) -> Result<()> {
+        for (i, c) in self.variant_ccs.iter().enumerate().skip(1) {
+            let m = ParamMod::from_controllers(c[0], c[1], c[2], c[3], c[4]);
+            let data = self.bank.build_variant(&self.cfg, &m);
+            let menv = self.bank.build_menv_variant(&self.cfg, &m);
+            backend.set_params_variant(i as u32, &data, &menv)?;
+        }
+        Ok(())
+    }
+
+    /// The largest magnitude written to the output so far, after `--volume` \[160\]
     pub fn output_peak(&self) -> f32 {
         self.output.peak()
     }
