@@ -35,27 +35,42 @@
 /// Open a new terminal window running this executable with `args`, titled
 /// `title` where the platform lets it be.
 
-[3] src/bin/kestrel/tui/window.rs:97
-    // No standard way to ask for a terminal, so try the usual ones in turn,
-    // starting with whatever the session says it prefers.
+[3] src/bin/kestrel/tui/window.rs:95
+/// The terminal emulators to try, in order, each with what comes before the
+/// command to run in it: whatever the session says it prefers (`preferred`, the
+/// `TERMINAL` variable), then the usual ones. There is no standard way to ask.
 
-[4] src/bin/kestrel/tui/window.rs:129
+[4] src/bin/kestrel/tui/window.rs:134
+            // A terminal that is not a server of its own (xterm, kitty,
+            // alacritty, foot...) is this process's child, in the foreground
+            // group of the window this process runs in. Merlin's window is
+            // opened by a window that exits at once, and when it does the
+            // terminal hangs up on that group: the new window went with it,
+            // and Merlin never appeared. A group of its own is not hung up on.
+
+[5] src/bin/kestrel/tui/window.rs:142
+        // A terminal that cannot open one (no display, an option it does not
+        // know) exits at once with a failure, and the next is tried. One that
+        // is still running is the window, and so is one that handed the work to
+        // its server and exited cleanly.
+
+[6] src/bin/kestrel/tui/window.rs:161
 /// Renders and batches under way in this process. A window with any is not
 /// asked to go.
 
-[5] src/bin/kestrel/tui/window.rs:153
+[7] src/bin/kestrel/tui/window.rs:185
 /// How often a window looks for a request to go, and how long a window that
 /// asked waits for the answer.
 
-[6] src/bin/kestrel/tui/window.rs:166
+[8] src/bin/kestrel/tui/window.rs:198
 /// This process answers a request to go, for as long as it lives: on a thread
 /// of its own, through `exit(0)`, so the window closes. Called by the guided
 /// renderer, the window Extras is opened from.
 
-[7] src/bin/kestrel/tui/window.rs:222
+[9] src/bin/kestrel/tui/window.rs:254
 /// Open a window and see the one it was started from out: `parent`, when
 /// there is one, is asked to go. The caller then exits, which closes its own.
 
-[8] src/bin/kestrel/tui/window.rs:243
+[10] src/bin/kestrel/tui/window.rs:289
     /// Plays the window being asked: looks until there is a request, as the
     /// watcher does, and says whether it would have exited.

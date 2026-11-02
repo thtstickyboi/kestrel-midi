@@ -69,14 +69,12 @@ fn spawn(_title: &str, exe: &Path, args: &[String]) -> std::io::Result<()> {
         .map(|_| ())
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
-fn spawn(_title: &str, exe: &Path, args: &[String]) -> std::io::Result<()> {
-    // [3]
-    let mut tried: Vec<(String, Vec<&str>)> = Vec::new();
-    if let Ok(t) = std::env::var("TERMINAL") {
-        if !t.is_empty() {
-            tried.push((t, vec!["-e"]));
-        }
+/// The terminal emulators to try, in order, each with what comes before the \[3\]
+#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
+fn terminals(preferred: Option<String>) -> Vec<(String, Vec<&'static str>)> {
+    let mut tried: Vec<(String, Vec<&'static str>)> = Vec::new();
+    if let Some(t) = preferred.filter(|t| !t.is_empty()) {
+        tried.push((t, vec!["-e"]));
     }
     for (term, lead) in [
         ("x-terminal-emulator", vec!["-e"]),
@@ -91,10 +89,35 @@ fn spawn(_title: &str, exe: &Path, args: &[String]) -> std::io::Result<()> {
     ] {
         tried.push((term.to_string(), lead));
     }
-    for (term, lead) in tried {
-        let started = std::process::Command::new(&term).args(lead).arg(exe).args(args).spawn();
-        if started.is_ok() {
-            return Ok(());
+    tried
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn spawn(_title: &str, exe: &Path, args: &[String]) -> std::io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    for (term, lead) in terminals(std::env::var("TERMINAL").ok()) {
+        let mut command = std::process::Command::new(&term);
+        command
+            .args(lead)
+            .arg(exe)
+            .args(args)
+            // The new window has a terminal of its own, so it needs none of this one's.
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            // [4]
+            .process_group(0);
+        let Ok(mut child) = command.spawn() else { continue };
+        // [5]
+        let until = std::time::Instant::now() + Duration::from_millis(600);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) if !status.success() => break,
+                Ok(Some(_)) | Err(_) => return Ok(()),
+                Ok(None) if std::time::Instant::now() >= until => return Ok(()),
+                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            }
         }
     }
     Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no terminal emulator found"))
@@ -102,7 +125,7 @@ fn spawn(_title: &str, exe: &Path, args: &[String]) -> std::io::Result<()> {
 
 // ---- asking a window to go ------------------------------------------------
 
-/// Renders and batches under way in this process. A window with any is not \[4\]
+/// Renders and batches under way in this process. A window with any is not \[6\]
 static BUSY: AtomicUsize = AtomicUsize::new(0);
 
 /// Held while a render is on the screen.
@@ -125,7 +148,7 @@ fn busy() -> bool {
     BUSY.load(Ordering::SeqCst) > 0
 }
 
-/// How often a window looks for a request to go, and how long a window that \[5\]
+/// How often a window looks for a request to go, and how long a window that \[7\]
 const POLL: Duration = Duration::from_millis(150);
 const PATIENCE: Duration = Duration::from_secs(3);
 
@@ -137,7 +160,7 @@ fn refusal_file(dir: &Path, pid: u32) -> PathBuf {
     dir.join(format!("kestrel-quit-{pid}.refused"))
 }
 
-/// This process answers a request to go, for as long as it lives: on a thread \[6\]
+/// This process answers a request to go, for as long as it lives: on a thread \[8\]
 pub fn serve_quit() {
     let dir = std::env::temp_dir();
     let pid = std::process::id();
@@ -191,7 +214,7 @@ fn ask(dir: &Path, pid: u32, patience: Duration) -> Asked {
     }
 }
 
-/// Open a window and see the one it was started from out: `parent`, when \[7\]
+/// Open a window and see the one it was started from out: `parent`, when \[9\]
 pub fn hand_over(title: &str, args: &[String], parent: Option<u32>) -> Result<Handover, String> {
     open(title, args)?;
     Ok(match parent.map(|pid| ask(&std::env::temp_dir(), pid, PATIENCE)) {
@@ -211,7 +234,21 @@ mod tests {
         d
     }
 
-    /// Plays the window being asked: looks until there is a request, as the \[8\]
+    #[test]
+    fn the_sessions_terminal_is_tried_first_and_each_one_has_its_own_lead() {
+        let plain = terminals(None);
+        assert_eq!(plain[0], ("x-terminal-emulator".to_string(), vec!["-e"]));
+        assert!(plain.iter().any(|(t, lead)| t == "kitty" && lead.is_empty()));
+        assert!(plain.iter().any(|(t, lead)| t == "wezterm" && lead == &["start", "--"]));
+        assert!(plain.iter().any(|(t, lead)| t == "gnome-terminal" && lead == &["--"]));
+        let mine = terminals(Some("st".to_string()));
+        assert_eq!(mine[0], ("st".to_string(), vec!["-e"]));
+        assert_eq!(mine.len(), plain.len() + 1);
+        // An empty TERMINAL says nothing.
+        assert_eq!(terminals(Some(String::new())).len(), plain.len());
+    }
+
+    /// Plays the window being asked: looks until there is a request, as the \[10\]
     fn watcher(dir: PathBuf, pid: u32, busy: bool) -> std::thread::JoinHandle<bool> {
         std::thread::spawn(move || {
             for _ in 0..400 {
