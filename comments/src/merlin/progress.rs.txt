@@ -1,0 +1,70 @@
+# Comments extracted from src/merlin/progress.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/merlin/progress.rs:5
+//! What a per-key merlin render tells whoever watches it, and how it is
+//! stopped.
+//!
+//! The session's own thread cannot say. It sits inside the render's first
+//! block until the last key is done, which is minutes to most of an hour, so
+//! nothing it polls (`Observer::block`, `Observer::cancelled`) is reached. The
+//! render's threads write here instead, and a `Monitor` reads it whenever its
+//! reader asks, and sets the stop, which the pre-pass and the render's
+//! threads check.
+//!
+//! Three stages, in order. **Arming** is the pre-pass over the whole file,
+//! measured in the bytes of its tracks read. **Rendering** is the keys, each
+//! over the whole song; progress is the note-ons of the keys done, with the
+//! key in hand counted by how far through the song its windows have got. Keys
+//! cost very different amounts (9 to 24 s each on the largest file measured),
+//! so the estimate waits for three of them. **Mastering** is the master read
+//! out through the limiter and the encoder, a block at a time.
+
+[2] src/merlin/progress.rs:30
+/// Keys that have to be done, and the share of the note-ons, before the
+/// estimate is shown: the first keys carry the device's start-up and say
+/// little of the rest. Measured 2026-11-02, on one file: at three keys the estimate
+/// was 151 s of the 52 left, at 5% about twice, and by 20% within 25%.
+
+[3] src/merlin/progress.rs:37
+/// The error a stopped render returns, which the session turns into a
+/// cancelled render and not a failed one. Look for it with
+/// `error.downcast_ref::<Cancelled>()`.
+
+[4] src/merlin/progress.rs:127
+    /// Ask the render to stop. It does at its next check, which the pre-pass
+    /// makes about a million events apart and the render a window apart.
+
+[5] src/merlin/progress.rs:170
+    /// The keys begin: each one's note-ons, the windows the song takes, and the
+    /// store, if one was filed.
+
+[6] src/merlin/progress.rs:196
+    /// The device has had all of `key`. Said again for a key's later passes
+    /// (its bent notes), which changes nothing.
+
+[7] src/merlin/progress.rs:285
+    /// Rendering: keys that have notes, keys done, note-ons in all and in the
+    /// keys done.
+
+[8] src/merlin/progress.rs:291
+    /// The key being rendered, its note-ons, and how far through the song it
+    /// has got, 0 to 1.
+
+[9] src/merlin/progress.rs:296
+    /// Note-ons rendered over all of them, 0 to 1, the key in hand counted by
+    /// its fraction.
+
+[10] src/merlin/progress.rs:320
+    /// Seconds of keys left, from the rate so far. `None` until three keys are
+    /// done and a twentieth of the notes: the first ones cost little or much by
+    /// what they hold, not by where they are in the order.
+
+[11] src/merlin/progress.rs:354
+    /// The overall bar is the note-ons of the keys done and the key in hand's
+    /// share by how far through the song it is, over all of them.

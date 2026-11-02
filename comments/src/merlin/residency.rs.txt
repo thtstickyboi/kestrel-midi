@@ -1,0 +1,201 @@
+# Comments extracted from src/merlin/residency.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/merlin/residency.rs:5
+//! Which cached things stay on the card, and which one goes when the room runs
+//! out.
+//!
+//! Merlin has two device caches that used to grow and never shrink -- the
+//! kernel cache in [`crate::merlin::fdl`], one entry at ~705 KB, and the head
+//! cache in [`crate::merlin::head`], one waveform at up to 1.9 MB. Both filled
+//! on real material the moment channel bend joined the cache key (2026-09-07):
+//! a standing bend is a resample, so it does not collapse the way duration
+//! does, and one 44.75 M-note test file goes from 3,252 distinct entries to
+//! **99,270**. At 705 KB that is 71 GiB of kernels against a 2.4 GiB budget,
+//! and the head cache filled first -- 769 waveforms against 768 after six
+//! seconds of audio, where the whole file used 512 before.
+//!
+//! ## Why eviction is even allowed
+//!
+//! Because of the shape of the multiply-accumulate, which is a **forward
+//! scatter**: when entry `e` fires at step `t`, `mac` writes
+//! `ring[bus][(t+k) % K] += H[e,k] * D[e,t]` for every one of `e`'s lags `k`,
+//! all in that step. Its whole tail is deposited in the ring there and then.
+//! So **a kernel is needed only during the steps its entry fires in** -- the
+//! cache holds *build cost*, not correctness, and a kernel thrown away is a
+//! kernel that has to be rebuilt rather than a note that goes missing.
+//!
+//! A rebuild is bit-identical, which the byte-identity requirement needs:
+//! `Kernel::segment` reads `[skip, skip + depth * P)` of a sustain render that
+//! the planner has already grown past that point, and `transform` is a fixed
+//! schedule. The same argument covers a head row, which is a prefix of the same
+//! render.
+//!
+//! ## The policy, and what it is honestly not
+//!
+//! the development notes section 7 argues for **Belady** -- evict whatever is used
+//! furthest in the future -- on the grounds that offline "the whole file is
+//! visible". That is true of the *file* and not of this backend: merlin is a
+//! streaming [`Backend`](crate::backend::Backend), it learns a note when
+//! `spawn` hands it over, and it can only place that note once its note-off has
+//! arrived. What it can see ahead is the planned-impulse ring, which is a few
+//! blocks. True Belady wants a pre-scan pass that does not exist.
+//!
+//! So this is **LRU with the visible future used as a tiebreak**, which is the
+//! most Belady the available information supports:
+//!
+//! 1. Anything needed by the step being encoded is **pinned** and cannot go.
+//! 2. Among the rest, an id with **no planned use at all** goes before one that
+//!    has some. `pending` is a plain counter maintained per planned note, so
+//!    this costs nothing per note -- a per-step scan of the ring to find the
+//!    exact next-use step would cost more than the convolution.
+//! 3. Within a class, least recently used, with the id as a tiebreak so the
+//!    victim is a pure function of the input and not of hashing.
+//!
+//! Step 2 is what the access pattern makes worth having. The development notes
+//! measured it as piecewise-constant -- entries sit flat across a passage and
+//! jump at a section change -- so the entries a passage has finished with are
+//! exactly the ones with no pending impulses, and they leave before anything
+//! still in play.
+//!
+//! ## What it cannot do
+//!
+//! Nothing here helps if one *step* needs more than the budget at once, because
+//! every id it needs is pinned. That is a real limit and the number to design
+//! against: the largest test file's peak block fires 3,428 distinct entries,
+//! which is 2.55 GiB -- the entire budget, resident simultaneously. The caller
+//! reports that as its own failure rather than thrashing towards it.
+
+[2] src/merlin/residency.rs:69
+/// Eviction bookkeeping for one cache, over dense ids.
+///
+/// Holds no memory of its own beyond three words per id: the caller owns the
+/// storage and calls [`Self::victim`] when it needs room.
+
+[3] src/merlin/residency.rs:75
+    /// Planned impulses not yet fired, per id. This is the whole of the future
+    /// merlin can see; see the module docs.
+
+[4] src/merlin/residency.rs:80
+    /// Step at which this id was pinned. Equal to `now` means it is needed by
+    /// the step being encoded and is not a candidate.
+
+[5] src/merlin/residency.rs:84
+    /// Resident ids, so `victim` scans the live set rather than every id ever
+    /// interned. One test file interns 99,270 entries and holds ~1,465.
+
+[6] src/merlin/residency.rs:91
+    /// Steps in which something had to be evicted, and the worst step's count.
+    /// A render whose working set fits sees zero after the opening.
+
+[7] src/merlin/residency.rs:105
+            // `u64::MAX` rather than 0: an id that has never been used must not
+            // look like the least recently used one, or the first eviction
+            // would pick something that was interned and is about to fire.
+
+[8] src/merlin/residency.rs:139
+    /// `id` is needed by the step being encoded: it cannot be evicted until the
+    /// next [`Self::begin_step`].
+
+[9] src/merlin/residency.rs:148
+    /// Record a use of `id` **without** pinning it to the step being encoded.
+    ///
+    /// [`Self::pin`] says "this step cannot proceed without it" and takes the
+    /// id out of the victim pool until the next [`Self::begin_step`]. This says
+    /// only "it was wanted just now", which is what keeps LRU meaningful for a
+    /// cache filled outside the step loop: the host sustain renders are built
+    /// while a block is being *planned*, they are not needed simultaneously
+    /// with each other, and pinning them there would make a block that plans
+    /// more waveforms than the budget holds fail when it could have evicted.
+    ///
+    /// Without this such an id would keep the `u64::MAX` [`Self::reserve`]
+    /// gives it, read as the most recently used thing in the cache, and never
+    /// be chosen at all.
+
+[10] src/merlin/residency.rs:189
+    /// `n` uses that were not looked up because an earlier one in the same step
+    /// had already settled them. They are hits, and counting them keeps the
+    /// rate comparable with what it was when every use made its own lookup.
+
+[11] src/merlin/residency.rs:196
+    /// The id to throw away, or `None` when everything resident is pinned to
+    /// this step -- which is the caller's cue to report that one step's demand
+    /// exceeds the budget rather than to keep asking.
+    ///
+    /// Linear over the resident set on purpose. A heap would have to be
+    /// reordered on every *use*, which is once per firing entry per step and is
+    /// the hot path; this is once per *miss*, and a render whose working set
+    /// fits has almost none after the opening.
+
+[12] src/merlin/residency.rs:211
+            // Ordered so that `min` picks it: no pending use before some, then
+            // least recently used, then lowest id. The id breaks every tie, so
+            // the victim is a pure function of the input.
+
+[13] src/merlin/residency.rs:263
+        // 0 and 1 are candidates again; both have no pending use and the same
+        // `used`, so the id breaks the tie.
+
+[14] src/merlin/residency.rs:296
+        // Both are clear now, so it falls back to least recently used, and both
+        // were last used at step 1 -- the id decides.
+
+[15] src/merlin/residency.rs:318
+        // Interned and admitted but not yet needed by any step: `used` is
+        // `u64::MAX`, so it sorts *after* anything that has been used. Zeroing
+        // it instead would evict the entry that is about to fire.
+
+[16] src/merlin/residency.rs:343
+// ---------------------------------------------------------------------------
+// The page allocator both device caches run on, as free functions so it can be
+// tested without a GPU.
+//
+// Shared because the two caches want exactly the same thing for different
+// reasons: `fdl.rs` needs a kernel's partitions contiguous because the
+// multiply-accumulate indexes them arithmetically, and `head.rs` needs a
+// waveform's frames contiguous because the head shader walks them in order.
+// Neither can afford an indirection in its inner loop.
+// ---------------------------------------------------------------------------
+
+[17] src/merlin/residency.rs:354
+/// First fit across the buffers, in order, returning `(buffer, first page)`.
+///
+/// First fit rather than best fit because the block sizes are few and large: a
+/// kernel's depth is its *region's* release tail rounded up to partitions, and
+/// a bank has a handful of distinct ones -- the reference bank runs 1.25 s on
+/// 54 keys, 1.95-3.0 s on 28 and 4.0 s on 6. A freed run is therefore reused at
+/// its own size almost every time, and `put_run`'s coalescing covers the rest.
+///
+/// A run never straddles a buffer: the multiply-accumulate reads
+/// `m.x + k * bins + bin`, so an entry's partitions have to be adjacent, and
+/// the alternative is a page table in the hot loop.
+
+[18] src/merlin/residency.rs:380
+/// Give a run back, merging it with either neighbour.
+///
+/// The coalescing is what lets a long kernel be allocated out of several short
+/// evictions, which is the case the policy actually produces: a passage ends,
+/// its entries go one by one, and the next passage's deeper ones need the space
+/// as one piece.
+
+[19] src/merlin/residency.rs:389
+    // Forward first, then backward, so one insert can absorb both neighbours
+    // in a single pass.
+
+[20] src/merlin/residency.rs:417
+        // 4 free in the first, 10 in the second. A request for 6 has to land
+        // whole in the second -- the MAC reads an entry as one contiguous run.
+
+[21] src/merlin/residency.rs:428
+        // Three adjacent blocks freed out of order; the middle one has to
+        // absorb both sides, or a later deep kernel would not fit in space
+        // that is physically contiguous.
+
+[22] src/merlin/residency.rs:446
+        // The policy evicts them in whatever order it ranks them, not in
+        // address order, so the coalescing has to work backwards too.

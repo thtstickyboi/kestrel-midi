@@ -102,6 +102,51 @@
 /// note, which the shaped helpers above deliberately hide.
 
 [19] src/testkit.rs:607
+/// Black MIDI's layering in miniature, for duplicate-note coalescing
+/// (the development notes): `copies` identical tracks of one pseudo-random part on
+/// channel 0, and beside them decoys that each differ from the part in one way
+/// coalescing has to see.
+///
+/// * every note-off one tick later;
+/// * every velocity one higher;
+/// * the part on channel 1, and on channel 0 of port B;
+/// * a conductor track, ahead of every part on a tick, carrying the sustain
+///   pedal, CC7, pitch bend, CC120 and CC123 on channels 0 and 1, and a stretch
+///   of portamento.
+///
+/// The part strikes chords, repeats a key on one tick, and restrikes a key on
+/// the tick its last note ends, so duplicates also arise inside one copy. The
+/// same `seed` writes the same file.
+
+[20] src/testkit.rs:698
+/// Black MIDI's shape at the size the drain is measured at (the development notes):
+/// `tracks` tracks that each run the whole length of the song, interleaved
+/// tick by tick -- not one after another, as `scatter_midi`'s are, which a
+/// merge finds cheap because one track at a time is ever the smallest -- and
+/// written in running status, as black MIDI exporters write them.
+///
+/// * The tracks come in layers: there are `tracks / copies` parts, and track
+///   `t` plays part `t % parts`, so every part is written `copies` times on one
+///   channel. One copy in eight of every fourth part is one velocity louder,
+///   so not every layer is a duplicate.
+/// * A part is on channel `p % 16` of port `p / 16 % 16` (an FF 21 opens the
+///   track), with chords, repeated keys and restrikes, and the occasional
+///   pedal, CC7, CC10, CC11, bend and program change of its own.
+/// * The first track is a conductor: a GS reset, a scale tuning message on
+///   one channel (read as a run of events), and a tempo change every few
+///   thousand ticks.
+///
+/// The same `seed` writes the same file. About `2 * tracks * notes` events.
+
+[21] src/testkit.rs:796
+        // Scale/octave tuning, 1-byte form, on channel 2 of port A: twelve
+        // offsets around the centre, read as a run of `Tune` events.
+
+[22] src/testkit.rs:816
+    // Running status: a channel message whose status is the one before it in
+    // the track, with no meta event between, is written without it.
+
+[23] src/testkit.rs:840
 /// The three messages that set a channel's bend range through RPN 0. Without
 /// them the range is the GM default of two semitones, which cannot express an
 /// exact interval: the largest bend is 8191/8192 of the range, not all of it.

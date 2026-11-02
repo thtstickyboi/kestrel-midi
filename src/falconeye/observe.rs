@@ -183,6 +183,11 @@ impl Observer for Logged<'_> {
         self.inner.tracks(p);
     }
 
+    fn merlin(&mut self, progress: &std::sync::Arc<crate::merlin::progress::MerlinProgress>) {
+        renderlog::note("MERLIN", "a per-key render: it reports by stage, not by block");
+        self.inner.merlin(progress);
+    }
+
     fn cancelled(&self) -> bool {
         self.inner.cancelled()
     }
@@ -225,6 +230,21 @@ mod tests {
     use super::*;
 
     /// The render log wraps the observer of every guided and API render. A wrapper \[7\]
+    #[test]
+    fn the_logging_wrapper_passes_on_the_merlin_progress() {
+        struct Takes(Option<std::sync::Arc<crate::merlin::progress::MerlinProgress>>);
+        impl Observer for Takes {
+            fn merlin(&mut self, p: &std::sync::Arc<crate::merlin::progress::MerlinProgress>) {
+                self.0 = Some(p.clone());
+            }
+        }
+        let progress = crate::merlin::progress::MerlinProgress::new();
+        let mut inner = Takes(None);
+        Logged::new(&mut inner).merlin(&progress);
+        let got = inner.0.expect("the observer was not told");
+        assert!(std::sync::Arc::ptr_eq(&got, &progress), "it was told of another progress");
+    }
+
     #[test]
     fn the_logging_wrapper_passes_on_what_kind_of_stop_it_is() {
         struct Stops {

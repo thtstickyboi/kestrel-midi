@@ -41,29 +41,29 @@
     // `.partial.` file, which is not a render anyone asked for. The names were
     // free when the batch started, so this one is ours to remove.
 
-[7] src/bin/kestrel/tui/batch.rs:345
+[7] src/bin/kestrel/tui/batch.rs:346
     /// The guided renderer's promise, for a batch: a table of rows, each given
     /// its soundfonts with the arrow keys, writes what the same commands write.
     /// Two MIDIs on two sets, with G turned away once for a row that has none.
 
-[8] src/bin/kestrel/tui/batch.rs:389
+[8] src/bin/kestrel/tui/batch.rs:390
     /// Space marks rows, and Enter gives all the marked ones one set: a table
     /// that ends up with a single set takes the bank it already loaded.
 
-[9] src/bin/kestrel/tui/batch.rs:419
+[9] src/bin/kestrel/tui/batch.rs:420
         // The first batch ends on Home, which leaves the flow for the main menu; the
         // second call is the next choice made there.
 
-[10] src/bin/kestrel/tui/batch.rs:445
+[10] src/bin/kestrel/tui/batch.rs:446
     /// "Resume a render": a per-track merge stopped part way is continued from
     /// its checkpoint by the guided renderer, and writes what the same command
     /// writes uninterrupted. The stop is the hook `kestrel resume`'s tests use.
 
-[11] src/bin/kestrel/tui/batch.rs:499
+[11] src/bin/kestrel/tui/batch.rs:500
         // The done screen lists the flags the render was made under, which the checkpoint holds
         // (it said "none" for a resumed render that had --dc-blocker and --volume 80, 2026-10-06).
 
-[12] src/bin/kestrel/tui/batch.rs:516
+[12] src/bin/kestrel/tui/batch.rs:517
     /// The same for a render of one file: it saves the render itself, the guided
     /// renderer picks the checkpoint up, and the file comes out as the same
     /// command writes it uninterrupted. The stop panel names the checkpoint and

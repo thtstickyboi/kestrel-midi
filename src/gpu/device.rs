@@ -12,7 +12,7 @@ pub fn backend_known(name: &str) -> bool {
     parse_backends(name).is_some()
 }
 
-fn parse_backends(name: &str) -> Option<wgpu::Backends> {
+pub(crate) fn parse_backends(name: &str) -> Option<wgpu::Backends> {
     match name.to_ascii_lowercase().as_str() {
         "vulkan" | "vk" => Some(wgpu::Backends::VULKAN),
         "dx12" | "d3d12" => Some(wgpu::Backends::DX12),
@@ -33,14 +33,14 @@ fn dx12_compiler() -> wgpu::Dx12Compiler {
 }
 
 /// Discrete first, then integrated. Within a tier, prefer Vulkan over DX12 \[3\]
-fn rank(i: &wgpu::AdapterInfo) -> (u8, u8) {
-    let t = match i.device_type {
+fn rank(device_type: wgpu::DeviceType, backend: wgpu::Backend) -> (u8, u8) {
+    let t = match device_type {
         wgpu::DeviceType::DiscreteGpu => 0,
         wgpu::DeviceType::IntegratedGpu => 1,
         wgpu::DeviceType::VirtualGpu => 2,
         _ => 3,
     };
-    let b = match i.backend {
+    let b = match backend {
         wgpu::Backend::Vulkan => 0,
         wgpu::Backend::Metal => 0,
         wgpu::Backend::Dx12 => 1,
@@ -157,11 +157,9 @@ fn backend_word(b: wgpu::Backend) -> &'static str {
 
 /// The other ways this machine offers to open a GPU, which a failure names: every \[9\]
 fn other_ways(failed: &wgpu::AdapterInfo) -> Vec<String> {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-    let mut found: Vec<String> = instance
-        .enumerate_adapters(wgpu::Backends::all())
+    let mut found: Vec<String> = super::listing::list(wgpu::Backends::all())
+        .adapters
         .into_iter()
-        .map(|a| a.get_info())
         .filter(|i| i.device_type != wgpu::DeviceType::Cpu)
         .filter(|i| !(i.name == failed.name && i.backend == failed.backend))
         .map(|i| format!("{} on {:?} (--gpu-backend {})", i.name, i.backend, backend_word(i.backend)))
@@ -193,12 +191,53 @@ fn open_failure(adapter: &str, backend: wgpu::Backend, driver: &str, error: &str
     text
 }
 
-/// The adapter a render with `cfg` runs on, chosen as `create` chooses it, \[10\]
+/// The backend of the adapter a render with `cfg` lands on, from a listing taken \[10\]
+fn listed_backend(cfg: &Config, backends: wgpu::Backends) -> Option<wgpu::Backends> {
+    if !super::listing::isolated() {
+        return None;
+    }
+    let mut found = super::listing::list(backends).adapters;
+    found.sort_by_key(|i| rank(i.device_type, i.backend));
+    let i = default_of(&found, backends, cfg.gpu_adapter.as_deref())?;
+    log::debug!(
+        "the listing ranks {} on {} first; this process opens {} alone",
+        found[i].name,
+        backend_word(found[i].backend),
+        backend_word(found[i].backend)
+    );
+    Some(wgpu::Backends::from(found[i].backend))
+}
+
+/// The adapter a render lands on among `found`, sorted by `rank`: the first that \[11\]
+fn default_of(found: &[super::listing::Listed], backends: wgpu::Backends, want: Option<&str>) -> Option<usize> {
+    let want = want.map(str::to_ascii_lowercase);
+    found.iter().position(|i| {
+        let named = match &want {
+            Some(w) => i.name.to_ascii_lowercase().contains(w),
+            None => true,
+        };
+        i.device_type != wgpu::DeviceType::Cpu && backends.contains(wgpu::Backends::from(i.backend)) && named
+    })
+}
+
+/// The adapter a render with `cfg` runs on, chosen as `create` chooses it, \[12\]
 pub fn pick_adapter(cfg: &Config) -> Result<wgpu::Adapter> {
     let backends = match &cfg.gpu_backend {
         Some(b) => parse_backends(b)
             .ok_or_else(|| anyhow::anyhow!("unknown gpu backend {b:?}"))?,
-        None => wgpu::Backends::all(),
+        // [13]
+        None => {
+            let avoided = super::listing::avoided();
+            if !avoided.is_empty() {
+                log::warn!(
+                    "leaving out {}, whose adapter listing did not finish in this session; \
+                     --gpu-backend names a backend to use anyway",
+                    backend_names(avoided)
+                );
+            }
+            let all = wgpu::Backends::all() - avoided;
+            listed_backend(cfg, all).unwrap_or(all)
+        }
     };
 
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
@@ -227,7 +266,10 @@ pub fn pick_adapter(cfg: &Config) -> Result<wgpu::Adapter> {
         }
     }
 
-    candidates.sort_by_key(|a| rank(&a.get_info()));
+    candidates.sort_by_key(|a| {
+        let i = a.get_info();
+        rank(i.device_type, i.backend)
+    });
 
     candidates.into_iter().next().ok_or_else(|| {
         anyhow::anyhow!(
@@ -245,18 +287,18 @@ fn finish_create(
     adapter_limits: wgpu::Limits,
     has_timestamps: bool,
 ) -> Result<(wgpu::Device, wgpu::Queue, wgpu::AdapterInfo, wgpu::Limits, bool)> {
-    // [11]
+    // [14]
     device.on_uncaptured_error(std::sync::Arc::new(|e| {
         log::error!("wgpu device error: {e}");
         panic!("wgpu device error: {e}");
     }));
 
-    // [12]
+    // [15]
     *LOST.lock().unwrap_or_else(|p| p.into_inner()) = None;
     device.set_device_lost_callback(|reason, message| {
         // `Destroyed` is the device being dropped at the end of a render.
         if reason != wgpu::DeviceLostReason::Destroyed {
-            // [13]
+            // [16]
             log::error!(
                 "gpu device lost: {message}. On Windows this is usually the graphics driver being \
                  reset because one piece of GPU work ran past its 2-second limit; fewer voices \
@@ -272,7 +314,7 @@ fn finish_create(
 /// What the device-lost callback last said, if the device was lost.
 static LOST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-/// The error for a poll or a map that failed, which is how a lost device \[14\]
+/// The error for a poll or a map that failed, which is how a lost device \[17\]
 pub(super) fn lost(device: Option<&wgpu::Device>, detail: impl std::fmt::Display) -> anyhow::Error {
     let reason = LOST
         .lock()
@@ -300,7 +342,7 @@ pub(super) fn lost(device: Option<&wgpu::Device>, detail: impl std::fmt::Display
     )
 }
 
-/// Compute-only bind group layout. `read_only[i]` says whether binding i is a \[15\]
+/// Compute-only bind group layout. `read_only[i]` says whether binding i is a \[18\]
 pub fn bind_layout(
     device: &wgpu::Device,
     label: &str,
@@ -312,7 +354,7 @@ pub fn bind_layout(
     })
 }
 
-/// `bind_layout`'s entries: binding 0 the uniforms, and a storage buffer at \[16\]
+/// `bind_layout`'s entries: binding 0 the uniforms, and a storage buffer at \[19\]
 pub fn layout_entries(read_only: &[bool]) -> Vec<wgpu::BindGroupLayoutEntry> {
     read_only
         .iter()
@@ -370,35 +412,47 @@ pub fn bind(
     })
 }
 
-/// List every adapter wgpu can reach, for working out which device a render \[17\]
-pub fn print_adapters() -> Result<()> {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-    for a in instance.enumerate_adapters(wgpu::Backends::all()) {
-        let info = a.get_info();
-        let l = a.limits();
+/// The names of `backends`, as `--gpu-backend` spells them, for a message.
+pub(crate) fn backend_names(backends: wgpu::Backends) -> String {
+    [wgpu::Backend::Vulkan, wgpu::Backend::Metal, wgpu::Backend::Dx12, wgpu::Backend::Gl]
+        .into_iter()
+        .filter(|b| backends.contains(wgpu::Backends::from(*b)))
+        .map(backend_word)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// List every adapter wgpu can reach on `backend` (`--gpu-backend`'s names; \[20\]
+pub fn print_adapters(backend: Option<&str>) -> Result<()> {
+    let backends = match backend {
+        Some(b) => parse_backends(b).ok_or_else(|| anyhow::anyhow!("unknown gpu backend {b:?}"))?,
+        None => wgpu::Backends::all(),
+    };
+    let listing = super::listing::list(backends);
+    for a in &listing.adapters {
         println!(
             "{:?}  {}  [{:?}]  driver {} {}",
-            info.backend, info.name, info.device_type, info.driver, info.driver_info
+            a.backend, a.name, a.device_type, a.driver, a.driver_info
         );
         println!(
             "    storage buffer max {} MiB | workgroup storage {} B | \
              {} invocations/wg | {} workgroups/dim",
-            l.max_storage_buffer_binding_size / 1048576,
-            l.max_compute_workgroup_storage_size,
-            l.max_compute_invocations_per_workgroup,
-            l.max_compute_workgroups_per_dimension
+            a.max_storage_buffer_binding_size / 1048576,
+            a.max_compute_workgroup_storage_size,
+            a.max_compute_invocations_per_workgroup,
+            a.max_compute_workgroups_per_dimension
         );
-        // [18]
+        // [21]
         let steal = Config::default().max_steal_percent;
-        let binding = (l.max_storage_buffer_binding_size as u64).min(l.max_buffer_size);
+        let binding = a.binding_bytes();
         println!(
             "    max --max-voices {} at --steal-percent {} ({} pool slots)",
             crate::gpu::max_voices_for_binding(binding, steal),
             steal,
             binding / 96,
         );
-        // [19]
-        match memory_for(&info) {
+        // [22]
+        match a.memory_bytes {
             Some(m) => println!(
                 "    memory {} MiB for a render to plan on; the voices that fit in it depend on the soundfont's samples \
                  (about {} bytes a pool slot)",
@@ -407,11 +461,14 @@ pub fn print_adapters() -> Result<()> {
             ),
             None => println!("    memory: no figure on this system, so only the binding's limit above is known"),
         }
+        println!("    subgroups {} | int64 {} | timestamps {}", a.subgroups, a.int64, a.timestamps);
+    }
+    for f in &listing.failed {
         println!(
-            "    subgroups {} | int64 {} | timestamps {}",
-            a.features().contains(wgpu::Features::SUBGROUP),
-            a.features().contains(wgpu::Features::SHADER_INT64),
-            a.features().contains(wgpu::Features::TIMESTAMP_QUERY),
+            "{:?}  could not be listed: its listing process {}. Renders leave it out unless --gpu-backend {} names it.",
+            f.backend,
+            f.how,
+            backend_word(f.backend)
         );
     }
     Ok(())
@@ -423,18 +480,18 @@ pub struct AdapterSummary {
     pub name: String,
     pub backend: wgpu::Backend,
     pub device_type: wgpu::DeviceType,
-    /// The most of one buffer the adapter will bind to a shader, which is \[20\]
+    /// The most of one buffer the adapter will bind to a shader, which is \[23\]
     pub binding_bytes: u64,
-    /// The largest `--max-voices` that binding takes at the configured \[21\]
+    /// The largest `--max-voices` that binding takes at the configured \[24\]
     pub max_voices: u32,
     /// PCI ids, as `wgpu::AdapterInfo` has them.
     pub vendor: u32,
     pub device: u32,
-    /// The memory a render can plan on, where it can be read: the card's own for a \[22\]
+    /// The memory a render can plan on, where it can be read: the card's own for a \[25\]
     pub memory_bytes: Option<u64>,
 }
 
-/// The memory a render can plan on for this adapter, for [`AdapterSummary::memory_bytes`]. \[23\]
+/// The memory a render can plan on for this adapter, for [`AdapterSummary::memory_bytes`]. \[26\]
 pub fn memory_for(info: &wgpu::AdapterInfo) -> Option<u64> {
     /// What was read for an adapter, by its ids and whether it is integrated.
     type Known = Vec<((u32, u32, bool), Option<u64>)>;
@@ -448,7 +505,7 @@ pub fn memory_for(info: &wgpu::AdapterInfo) -> Option<u64> {
         wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::VirtualGpu => {
             super::vram::dedicated_total(info.vendor, info.device).filter(|&b| b > 0)
         }
-        // [24]
+        // [27]
         wgpu::DeviceType::IntegratedGpu if cfg!(windows) => super::vram::sample_quick(info.vendor, info.device)
             .and_then(|m| m.process_budget)
             .filter(|&b| b > 0),
@@ -467,39 +524,35 @@ impl AdapterSummary {
     }
 }
 
-/// Every adapter wgpu can reach, best first, and the index of the one \[25\]
-pub fn survey(cfg: &Config) -> Result<(Vec<AdapterSummary>, Option<usize>)> {
+/// What [`survey`] found.
+#[derive(Debug, Clone)]
+pub struct Survey {
+    /// Every adapter wgpu can reach, best first.
+    pub adapters: Vec<AdapterSummary>,
+    /// The index of the one `create` would open -- `None` when nothing is eligible.
+    pub default: Option<usize>,
+    /// The backends whose listing crashed, hung or failed, and how. Renders that \[28\]
+    pub failed: Vec<super::listing::Failed>,
+}
+
+/// Every adapter wgpu can reach, best first, and the one `create` would open \[29\]
+pub fn survey(cfg: &Config) -> Result<Survey> {
     let backends = match &cfg.gpu_backend {
         Some(b) => parse_backends(b)
             .ok_or_else(|| anyhow::anyhow!("unknown gpu backend {b:?}"))?,
         None => wgpu::Backends::all(),
     };
-    let want = cfg.gpu_adapter.as_ref().map(|w| w.to_ascii_lowercase());
+    let listing = super::listing::list(wgpu::Backends::all());
+    let mut found = listing.adapters;
+    found.sort_by_key(|i| rank(i.device_type, i.backend));
+    let default = default_of(&found, backends, cfg.gpu_adapter.as_deref());
 
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-    let mut found: Vec<(wgpu::AdapterInfo, wgpu::Limits)> = instance
-        .enumerate_adapters(wgpu::Backends::all())
+    let adapters = found
         .into_iter()
-        .map(|a| (a.get_info(), a.limits()))
-        .collect();
-    found.sort_by_key(|(i, _)| rank(i));
-
-    let pick = found.iter().position(|(i, _)| {
-        let named = match &want {
-            Some(w) => i.name.to_ascii_lowercase().contains(w),
-            None => true,
-        };
-        i.device_type != wgpu::DeviceType::Cpu
-            && backends.contains(wgpu::Backends::from(i.backend))
-            && named
-    });
-
-    let list = found
-        .into_iter()
-        .map(|(i, l)| {
-            let binding = (l.max_storage_buffer_binding_size as u64).min(l.max_buffer_size);
+        .map(|i| {
+            let binding = i.binding_bytes();
             AdapterSummary {
-                memory_bytes: memory_for(&i),
+                memory_bytes: i.memory_bytes,
                 vendor: i.vendor,
                 device: i.device,
                 name: i.name,
@@ -510,7 +563,7 @@ pub fn survey(cfg: &Config) -> Result<(Vec<AdapterSummary>, Option<usize>)> {
             }
         })
         .collect();
-    Ok((list, pick))
+    Ok(Survey { adapters, default, failed: listing.failed })
 }
 
 #[cfg(test)]
@@ -536,12 +589,12 @@ mod tests {
         assert!(!text.contains("lost") && !text.contains("also offers") && text.contains("--backend cpu"), "{text}");
     }
 
-    /// A software adapter has no memory of its own to plan on, and an adapter that has a \[26\]
+    /// A software adapter has no memory of its own to plan on, and an adapter that has a \[30\]
     #[test]
     fn a_survey_gives_memory_only_where_there_is_some_and_the_same_each_time() {
         let cfg = Config::default();
-        let (first, _) = survey(&cfg).unwrap();
-        let (again, _) = survey(&cfg).unwrap();
+        let first = survey(&cfg).unwrap().adapters;
+        let again = survey(&cfg).unwrap().adapters;
         assert_eq!(first.len(), again.len());
         for (a, b) in first.iter().zip(&again) {
             assert_eq!(a.memory_bytes, b.memory_bytes, "{}", a.name);
@@ -555,6 +608,53 @@ mod tests {
         }
     }
 
+    fn listed(name: &str, backend: wgpu::Backend, device_type: wgpu::DeviceType) -> crate::gpu::listing::Listed {
+        crate::gpu::listing::Listed {
+            name: name.into(),
+            backend,
+            device_type,
+            vendor: 0,
+            device: 0,
+            driver: String::new(),
+            driver_info: String::new(),
+            max_buffer_size: 2047 << 20,
+            max_storage_buffer_binding_size: 2047 << 20,
+            max_storage_buffers_per_shader_stage: 16,
+            max_compute_workgroup_storage_size: 32768,
+            max_compute_invocations_per_workgroup: 1024,
+            max_compute_workgroups_per_dimension: 65535,
+            int64_atomics: false,
+            int64: false,
+            subgroups: false,
+            timestamps: false,
+            memory_bytes: None,
+        }
+    }
+
+    /// A user's adapters, as their machine report listed them (2026-10-23). A \[31\]
+    #[test]
+    fn a_render_opens_the_backend_of_the_adapter_it_lands_on() {
+        use wgpu::{Backend, DeviceType};
+        let mut found = vec![
+            listed("AMD Radeon 780M Graphics", Backend::Vulkan, DeviceType::IntegratedGpu),
+            listed("Example Discrete GPU", Backend::Vulkan, DeviceType::DiscreteGpu),
+            listed("AMD Radeon 780M Graphics", Backend::Dx12, DeviceType::IntegratedGpu),
+            listed("Example Discrete GPU", Backend::Dx12, DeviceType::DiscreteGpu),
+            listed("Microsoft Basic Render Driver", Backend::Dx12, DeviceType::Cpu),
+            listed("AMD Radeon 780M Graphics", Backend::Gl, DeviceType::Other),
+        ];
+        found.sort_by_key(|i| rank(i.device_type, i.backend));
+        let pick = |backends, want| default_of(&found, backends, want).map(|i| (found[i].name.as_str(), found[i].backend));
+        let all = wgpu::Backends::all();
+        assert_eq!(pick(all, None), Some(("Example Discrete GPU", Backend::Vulkan)));
+        assert_eq!(pick(all - wgpu::Backends::VULKAN, None), Some(("Example Discrete GPU", Backend::Dx12)));
+        assert_eq!(pick(all, Some("780m")), Some(("AMD Radeon 780M Graphics", Backend::Vulkan)));
+        assert_eq!(pick(wgpu::Backends::GL, None), Some(("AMD Radeon 780M Graphics", Backend::Gl)));
+        // Never the software renderer, and nothing for a name nobody has.
+        assert_eq!(pick(wgpu::Backends::DX12, Some("basic render")), None);
+        assert_eq!(pick(all, Some("radeon rx")), None);
+    }
+
     #[test]
     fn the_limits_and_memory_lines_are_in_mebibytes() {
         let limits = wgpu::Limits {
@@ -564,7 +664,7 @@ mod tests {
         };
         let line = limits_line(&limits);
         assert!(line.contains("buffer 4096 MiB, storage binding 2048 MiB"), "{line}");
-        // [27]
+        // [32]
         for none in [1u64 << 52, u64::MAX] {
             let unlimited = wgpu::Limits { max_buffer_size: none, ..limits.clone() };
             assert!(limits_line(&unlimited).contains("buffer no limit, storage binding"), "{}", limits_line(&unlimited));

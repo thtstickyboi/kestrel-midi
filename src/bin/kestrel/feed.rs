@@ -278,7 +278,7 @@ pub fn run(args: &RenderArgs) -> Result<()> {
         "type": "hello",
         "schema": SCHEMA,
         "version": env!("CARGO_PKG_VERSION"),
-        "midi": args.midi.to_string_lossy(),
+        "midi": args.input().to_string_lossy(),
         "out": args.out.to_string_lossy(),
         "interval_ms": interval_ms,
     });
@@ -448,6 +448,9 @@ impl Observer for BatchFeed {
     }
     fn tracks(&mut self, progress: &session::TrackProgress) {
         self.obs.tracks(progress);
+    }
+    fn merlin(&mut self, progress: &Arc<kestrel::merlin::progress::MerlinProgress>) {
+        self.obs.merlin(progress);
     }
     fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed) || self.obs.cancelled()

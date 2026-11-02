@@ -1,0 +1,129 @@
+# Comments extracted from src/gpu/listing.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/gpu/listing.rs:5
+//! The GPU adapters, listed one backend at a time, each in a process of its own.
+//!
+//! Listing the adapters is the first thing Kestrel asks of the graphics drivers,
+//! and it asks every backend's: Vulkan's loader with the layers other programs
+//! install into it, DX12, and OpenGL. A driver that crashes there takes the
+//! process with it before anything can be said. On 2026-10-23 a user's discrete GPU
+//! (4 GB, so a laptop, with an integrated GPU beside it) ended the guided renderer
+//! at "Looking for GPU adapters", 9 s in, with nothing on screen: no error, no
+//! log, and no way past it, since every listing opened every backend whatever
+//! `--gpu-backend` said.
+//!
+//! So a front end lists each backend in a child, `kestrel --force-cli
+//! list-adapters --backend <name>`, all of them at once, and reads what each
+//! prints, a line an adapter. A child that crashes, hangs or fails costs its
+//! backend and nothing else: [`Listing::failed`] says how it ended, and in which
+//! module, where Windows can say: the child arms FalconEye's crash filter on its
+//! stdout, and the lister reads the module from outside while the filter waits,
+//! as FalconEye's watcher does for a render. A backend that failed is left out of
+//! every later listing and adapter choice in this process ([`avoided`]) unless a
+//! render names it. The machine report's self-test has run in a process of its
+//! own since 1.3.0 for the same reason (`falconeye::selftest`).
+//!
+//! A library caller and the tests have no Kestrel executable to start, and list
+//! in their own process, as before. [`isolate_with`] is what a front end calls.
+
+[2] src/gpu/listing.rs:39
+/// How long one backend's listing may take before it is taken to be hung and
+/// stopped. one user's whole listing ran 9 s before it crashed; a healthy one takes
+/// well under a second here, a cold discrete GPU waking up a few.
+
+[3] src/gpu/listing.rs:44
+/// What a listing child prints last, once every adapter is out: a child that
+/// then crashes as its drivers unload has still listed them.
+
+[4] src/gpu/listing.rs:48
+/// The order backends are listed and their adapters kept in, which is the order
+/// wgpu enumerates them in one process: the ranking that picks the default
+/// adapter is a stable sort over it.
+
+[5] src/gpu/listing.rs:53
+/// One adapter, as much of it as a listing, `gpu-info` and the machine report
+/// show, read where it was listed.
+
+[6] src/gpu/listing.rs:117
+    /// How its process ended, to follow "its listing process": "crashed: an access
+    /// violation ... (exit code 0xc0000005), in nvoglv64.dll+0x1a2b30".
+
+[7] src/gpu/listing.rs:134
+/// Each backend's isolated listing, taken once a process and only when asked
+/// for: adapters do not come and go while Kestrel runs, each listing starts a
+/// process, and a backend nobody asked about is never opened.
+
+[8] src/gpu/listing.rs:145
+/// List adapters from now on in processes of their own, started from `exe`,
+/// which must have `list-adapters`: what every front end calls first.
+
+[9] src/gpu/listing.rs:156
+/// The backends whose listing crashed, hung or failed in this process. A render
+/// that names no backend leaves them out (`device::pick_adapter`), since what
+/// crashed a listing would crash the render's own listing too.
+
+[10] src/gpu/listing.rs:163
+/// The adapters on `backends`: each backend in a process of its own once a front
+/// end has called [`isolate_with`], and in this process otherwise.
+
+[11] src/gpu/listing.rs:180
+/// [`list`], isolated with `exe` when there is one, and taken afresh: for the
+/// machine report, which is handed its executable rather than reading the
+/// process's.
+
+[12] src/gpu/listing.rs:196
+/// The adapters on `backends`, listed in this process. The instance is made for
+/// those backends only: creating Vulkan's alone loads its layers, so a listing of
+/// DX12 must not create it.
+
+[13] src/gpu/listing.rs:210
+/// Each of `backends` this build has in a child of `exe`, all at once, each
+/// stopped if it has not finished within `timeout`. Not kept for [`list`].
+
+[14] src/gpu/listing.rs:217
+/// Each of `backends` in a child of `exe`, all at once. A backend whose listing
+/// did not finish is logged, and avoided from here on.
+
+[15] src/gpu/listing.rs:255
+/// One backend's listing, in a child of `exe`: its adapters, or how the child
+/// ended before it had listed them.
+
+[16] src/gpu/listing.rs:259
+    // Its stderr goes to a file, as the self-test's does: its last lines are worth
+    // quoting when it fails, and a pipe nobody reads could fill and stop it.
+
+[17] src/gpu/listing.rs:293
+                    // Its crash filter is waiting: the process is whole until it is
+                    // released, so its modules can still be read.
+
+[18] src/gpu/listing.rs:347
+/// The child: `kestrel --force-cli list-adapters --backend <name>`, started by
+/// [`list_one`]. Prints each adapter as a JSON line, then [`DONE`].
+
+[19] src/gpu/listing.rs:352
+    // A native crash while listing is told to whoever reads stdout, and waits
+    // while it reads where the crash was. See `winsys`.
+
+[20] src/gpu/listing.rs:369
+/// Fail on purpose while listing a backend, `KESTREL_LIST_CRASH=<kind>@<backend>`,
+/// to see what a driver that crashes or hangs there does to the listing: `segv`
+/// crashes with an access violation, `hang` stops, `exit` exits with code 3. Dev
+/// builds only, like `KESTREL_SELFTEST_CRASH`.
+
+[21] src/gpu/listing.rs:454
+    /// What a child prints is what the lister reads back, backend and kind
+    /// included, which wgpu cannot serialise in this build.
+
+[22] src/gpu/listing.rs:491
+    /// A listing is each backend's in the order asked for: its adapters, or
+    /// how it failed, and a failed backend costs only itself.
+
+[23] src/gpu/listing.rs:528
+    /// A backend asked for by name is the only one listed: `--gpu-backend` is
+    /// how someone whose Vulkan crashes keeps Kestrel away from it.

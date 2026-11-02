@@ -8,10 +8,32 @@ mod batch;
 pub use batch::{GpuBatch, LaneBackend, LANES_MAX};
 mod budget;
 use budget::SubmitBudget;
-mod device;
+pub(crate) mod device;
 pub mod vram;
 
-pub use device::{backend_known, memory_for, print_adapters, survey, AdapterSummary};
+pub use device::{backend_known, memory_for, print_adapters, survey, AdapterSummary, Survey};
+pub mod listing;
+pub(crate) use device::parse_backends;
+
+/// Open a device without building any of the render pipelines. \[2\]
+pub fn open_device(
+    cfg: &Config,
+) -> Result<(wgpu::Device, wgpu::Queue, String, wgpu::Limits, bool)> {
+    let (device, queue, info, limits, has_timestamps) = device::create(cfg)?;
+    Ok((device, queue, adapter_label(&info), limits, has_timestamps))
+}
+
+/// [`open_device`] with the adapter's full description rather than its name, \[3\]
+pub fn open_device_info(
+    cfg: &Config,
+) -> Result<(wgpu::Device, wgpu::Queue, wgpu::AdapterInfo, wgpu::Limits, bool)> {
+    device::create(cfg)
+}
+
+/// How an adapter is named in log lines: its name and the API it runs under.
+pub fn adapter_label(info: &wgpu::AdapterInfo) -> String {
+    format!("{} ({:?})", info.name, info.backend)
+}
 
 use crate::backend::{Backend, BlockStats};
 use crate::bank::{Bank, ModEnvParams, RegionParams};
@@ -47,30 +69,30 @@ struct Uniforms {
     sort_phase_mask: u32,
 
     sort_dead_region: u32,
-    /// Bit 0 bend, bit 1 gain, bit 2 params variant. One word rather than \[2\]
+    /// Bit 0 bend, bit 1 gain, bit 2 params variant. One word rather than \[4\]
     chan_active: u32,
     params_per_variant: u32,
     steal_by_level: u32,
 
-    /// Half-width of the modulation envelope's pitch-factor table, in \[3\]
+    /// Half-width of the modulation envelope's pitch-factor table, in \[5\]
     menv_factor_half: u32,
     /// Where the shared `log2` mantissa table starts in the same buffer.
     menv_log2_base: u32,
     /// Where portamento's tables start in the same buffer.
     glide_base: u32,
-    /// Frame 0 of this block's position on the envelope grid. See \[4\]
+    /// Frame 0 of this block's position on the envelope grid. See \[6\]
     env_phase: u32,
 
-    /// Channels in a controller row, and words of `[base, run]` meta ahead of \[5\]
+    /// Channels in a controller row, and words of `[base, run]` meta ahead of \[7\]
     chan_count: u32,
     off_meta_words: u32,
-    /// The first render workgroup of this submission, when a block's \[6\]
+    /// The first render workgroup of this submission, when a block's \[8\]
     render_wg_base: u32,
-    /// Always 0. A `+0.0` for a shader to add that no compiler can see is one: it \[7\]
+    /// Always 0. A `+0.0` for a shader to add that no compiler can see is one: it \[9\]
     zero: u32,
 }
 
-/// How the voice pool's sort key is packed into 32 bits. \[8\]
+/// How the voice pool's sort key is packed into 32 bits. \[10\]
 #[derive(Debug, Clone, Copy)]
 struct SortKeyLayout {
     bits: u32,
@@ -87,7 +109,7 @@ impl SortKeyLayout {
         let region_bits = 32 - dead_region.leading_zeros();
         let stage_bits = 3u32;
 
-        // [9]
+        // [11]
         let max_len = bank.samples.iter().map(|s| s.len).max().unwrap_or(1).max(1);
         let len_bits = 32 - max_len.leading_zeros();
         let phase_bits = 32u32
@@ -111,21 +133,27 @@ impl SortKeyLayout {
     }
 }
 
-/// Slots in the device state buffer. Mirrors the `S_*` constants in \[10\]
+/// Slots in the device state buffer. Mirrors the `S_*` constants in \[12\]
 const S_LIVE: usize = 0;
 const S_STOLEN: usize = 8;
 const S_DROPPED: usize = 9;
 const STATE_SLOTS: usize = 16;
 
-/// Largest grid one dispatch dimension may take. This is the D3D12 ceiling and \[11\]
+/// Largest grid one dispatch dimension may take. This is the D3D12 ceiling and \[13\]
 const MAX_WORKGROUPS_PER_DIM: u32 = 65535;
 
-/// u32 words the voice pool stores per slot. Mirrors `VOICE_FIELDS` in \[12\]
+/// u32 words the voice pool stores per slot. Mirrors `VOICE_FIELDS` in \[14\]
 const VOICE_FIELDS: u64 = 26;
 
-/// Words actually allocated per slot for this configuration. \[13\]
+/// Words actually allocated per slot for this configuration. \[15\]
 fn voice_fields(cfg: &Config) -> u64 {
     base_voice_fields(cfg) + if cfg.phase.active() { 3 } else { 0 }
+}
+
+/// What a `GpuSynth` built with `cfg` asks of the device for its voices: the two \[16\]
+pub(crate) fn pool_device_bytes(cfg: &Config) -> u64 {
+    let capacity = cfg.pool_slots() as u64;
+    capacity * voice_fields(cfg) * 4 * 2 + capacity * 24
 }
 
 fn base_voice_fields(cfg: &Config) -> u64 {
@@ -138,24 +166,24 @@ fn base_voice_fields(cfg: &Config) -> u64 {
     }
 }
 
-/// The largest `max_voices` an adapter can take, given how much of one buffer \[14\]
+/// The largest `max_voices` an adapter can take, given how much of one buffer \[17\]
 pub fn max_voices_for_binding(binding_bytes: u64, steal_percent: u32) -> u32 {
     let slots = binding_bytes / (VOICE_FIELDS * 4);
     let v = slots * 100 / (100 + steal_percent.clamp(1, 100) as u64);
     v.min(u32::MAX as u64) as u32
 }
 
-/// `max_voices_for_binding` for the layout `cfg` actually allocates, which is \[15\]
+/// `max_voices_for_binding` for the layout `cfg` actually allocates, which is \[18\]
 pub fn max_voices_for_config(binding_bytes: u64, cfg: &Config) -> u32 {
     let slots = binding_bytes / (voice_fields(cfg) * 4);
     (slots * 100 / (100 + cfg.max_steal_percent.clamp(1, 100) as u64))
         .min(u32::MAX as u64) as u32
 }
 
-/// What a render's device buffers come to, in two parts, so a voice limit can be \[16\]
+/// What a render's device buffers come to, in two parts, so a voice limit can be \[19\]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeviceEstimate {
-    /// Everything that does not grow with the voice limit: the sample pool, the \[17\]
+    /// Everything that does not grow with the voice limit: the sample pool, the \[20\]
     pub fixed: u64,
     /// What each pool slot costs: both voice pools, the scan and the sort.
     pub per_slot: u64,
@@ -167,12 +195,12 @@ impl DeviceEstimate {
     }
 }
 
-/// The device buffers `cfg` and `bank` would allocate, as it would allocate them. \[18\]
+/// The device buffers `cfg` and `bank` would allocate, as it would allocate them. \[21\]
 pub fn device_estimate(cfg: &Config, bank: &Bank) -> DeviceEstimate {
     estimate_at(cfg, bank, cfg.pool_slots())
 }
 
-/// `device_estimate` for a pool of `capacity` slots, which only the partials and the \[19\]
+/// `device_estimate` for a pool of `capacity` slots, which only the partials and the \[22\]
 fn estimate_at(cfg: &Config, bank: &Bank, capacity: u32) -> DeviceEstimate {
     let variants = cfg.max_param_variants.max(1) as u64;
     let params = bank.params.len().max(1) as u64 * variants * std::mem::size_of::<RegionParams>() as u64;
@@ -181,7 +209,7 @@ fn estimate_at(cfg: &Config, bank: &Bank, capacity: u32) -> DeviceEstimate {
     let nwg = cfg.max_render_workgroups.clamp(1, MAX_WORKGROUPS_PER_DIM).min(capacity.div_ceil(cfg.workgroup_size).max(1));
     let partials = cfg.block_frames as u64 * 2 * nwg as u64 * 4;
     let out = cfg.block_frames as u64 * 2 * 4;
-    // [20]
+    // [23]
     let gates = ((BASE_CHANNELS as u64 * 128 + 1) * 2 + 32768 * 2) * 4;
     let tiles = (cfg.block_frames / cfg.gate_frames) as u64;
     let chans = (tiles + 1) * BASE_CHANNELS as u64 * CHAN_FIELDS as u64 * 4;
@@ -197,10 +225,10 @@ pub fn bytes_per_slot(cfg: &Config) -> u64 {
     voice_fields(cfg) * 8 + 24
 }
 
-/// How much of a card's memory is left for a render to plan on: an eighth is kept for \[21\]
+/// How much of a card's memory is left for a render to plan on: an eighth is kept for \[24\]
 const MEMORY_RESERVE_DIVISOR: u64 = 8;
 
-/// The most `--max-voices` whose device buffers fit in `memory` bytes with this bank, \[22\]
+/// The most `--max-voices` whose device buffers fit in `memory` bytes with this bank, \[25\]
 pub fn max_voices_in_memory(cfg: &Config, bank: &Bank, memory: u64) -> u32 {
     let usable = memory - memory / MEMORY_RESERVE_DIVISOR;
     let est = estimate_at(cfg, bank, u32::MAX);
@@ -209,10 +237,10 @@ pub fn max_voices_in_memory(cfg: &Config, bank: &Bank, memory: u64) -> u32 {
     (slots * 100 / (100 + cfg.max_steal_percent.clamp(1, 100) as u64)).min(u32::MAX as u64) as u32
 }
 
-/// Output samples a `thin` workgroup reduces: its `@workgroup_size`, which \[23\]
+/// Output samples a `thin` workgroup reduces: its `@workgroup_size`, which \[26\]
 pub(crate) const REDUCE_THIN_LANES: u32 = 64;
 
-/// The most render workgroups a block may have for the reduce pass's `thin` \[24\]
+/// The most render workgroups a block may have for the reduce pass's `thin` \[27\]
 pub(crate) fn reduce_thin_max(cfg: &Config) -> u32 {
     cfg.reduce_thin.min(cfg.workgroup_size).min(256)
 }
@@ -227,7 +255,7 @@ fn substitute(src: &str, cfg: &Config, bank: &Bank) -> String {
         .replace("{{GAIN_RAMP}}", if cfg.gain_ramp { "true" } else { "false" })
         .replace("{{FILTER_RAMP}}", if cfg.filter_ramp { "true" } else { "false" })
         .replace("{{USE_LFO}}", if cfg.lfo_enabled { "true" } else { "false" })
-        // [25]
+        // [28]
         .replace(
             "{{USE_LFO_VOLUME}}",
             if cfg.lfo_enabled && bank.uses_lfo_volume { "true" } else { "false" },
@@ -249,7 +277,7 @@ fn substitute(src: &str, cfg: &Config, bank: &Bank) -> String {
         .replace("{{PRESERVE_PHASE_ATTACK}}", if cfg.phase.preserve_attack_ms > 0.0 { "true" } else { "false" })
 }
 
-/// Write `bytes` into `buf` from `offset`, 64 MiB at a time, letting the device \[26\]
+/// Write `bytes` into `buf` from `offset`, 64 MiB at a time, letting the device \[29\]
 fn upload_in_pieces(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -276,17 +304,42 @@ fn shader_source(body: &str, cfg: &Config, bank: &Bank) -> String {
     s
 }
 
-/// The render pass with or without the channel controller path and the glide \[27\]
+/// The render pass with or without the channel controller path and the glide \[30\]
 fn render_source(cfg: &Config, bank: &Bank, parts: PoolParts, chan: bool, glide: bool, split: bool) -> String {
+    render_source_with(cfg, bank, parts, chan, glide, split, false)
+}
+
+/// [`render_source`] with the solo switch: `true` builds merlin's kernel \[31\]
+pub(crate) fn render_source_with(
+    cfg: &Config,
+    bank: &Bank,
+    parts: PoolParts,
+    chan: bool,
+    glide: bool,
+    split: bool,
+    solo: bool,
+) -> String {
     let analytic = cfg.phase.active();
     let [pool_decls, pool_fetch, pool_pairs] = pool_wgsl(parts);
     let body = include_str!("../../shaders/render.wgsl")
+        .replace("{{SAMPLE}}", include_str!("../../shaders/sample.wgsl"))
         .replace("{{POOL_PARTS}}", &pool_decls)
         .replace("{{POOL_FETCH}}", &pool_fetch)
         .replace("{{POOL_PAIRS}}", &pool_pairs)
         .replace("{{CHAN}}", if chan { "true" } else { "false" })
         .replace("{{GLIDE}}", if glide { "true" } else { "false" })
         .replace("{{WG_BASE}}", if split { "u.render_wg_base" } else { "0u" })
+        // [32]
+        .replace("{{NOT_SOLO_OPEN}}", if solo { "if (false) {" } else { "" })
+        .replace("{{NOT_SOLO_CLOSE}}", if solo { "}" } else { "" })
+        .replace("{{SOLO_ROW_DECL}}", if solo { "var solo_row = 0u;" } else { "" })
+        .replace("{{SOLO_ROW_LOAD}}", if solo { "solo_row = voices[F_NOTE_LO * c + v];" } else { "" })
+        .replace("{{STORE}}", if solo {
+            "if (is_live) { partials[solo_row * u.block_frames + f] = y * gain_l; }"
+        } else {
+            "sh[(i * 2u) * WG + tid] = y * gain_l;
+                sh[(i * 2u + 1u) * WG + tid] = y * gain_r;"
+        })
         .replace("{{PHASE_FUNCTIONS}}", if analytic { include_str!("../../shaders/phase.wgsl") } else { "" })
         .replace("{{PHASE_LOAD}}", if analytic {
             "let pm = voices[F_REGION * c + v] * 4u;
@@ -304,10 +357,19 @@ fn render_source(cfg: &Config, bank: &Bank, parts: PoolParts, chan: bool, glide:
     shader_source(&body, cfg, bank)
 }
 
-/// Where the pool's second part is bound; the third and fourth follow it. \[28\]
+/// Merlin's frame-parallel sustain pass (`sustain.wgsl`), and what it binds of \[33\]
+pub(crate) struct SustainPass {
+    pub pipeline: wgpu::ComputePipeline,
+    pub layout: wgpu::BindGroupLayout,
+    pub uniform: wgpu::Buffer,
+    pub pool: wgpu::Buffer,
+    pub pool_rest: Vec<wgpu::Buffer>,
+}
+
+/// Where the pool's second part is bound; the third and fourth follow it. \[34\]
 const POOL_PART_BINDING: u32 = 13;
 
-/// What a split pool adds to `render.wgsl`: `POOL_PARTS`, the declarations \[29\]
+/// What a split pool adds to `render.wgsl`: `POOL_PARTS`, the declarations \[35\]
 fn pool_wgsl(parts: PoolParts) -> [String; 3] {
     if parts.count <= 1 {
         return Default::default();
@@ -340,7 +402,7 @@ fn pool_wgsl(parts: PoolParts) -> [String; 3] {
     [decls, fetch, pairs]
 }
 
-/// The render bind group, plus the analytic quadrature at binding 10 when \[30\]
+/// The render bind group, plus the analytic quadrature at binding 10 when \[36\]
 fn bind_render(device: &wgpu::Device, layout: &wgpu::BindGroupLayout,
     buffers: &[&wgpu::Buffer], phase: Option<&wgpu::Buffer>, pool_rest: &[wgpu::Buffer]) -> wgpu::BindGroup {
     let mut buffers = buffers.to_vec();
@@ -371,7 +433,7 @@ fn compile(
         source: wgpu::ShaderSource::Wgsl(src.into()),
     };
     let module = if cfg.unchecked_shaders {
-        // [31]
+        // [37]
         unsafe {
             device.create_shader_module_trusted(desc, wgpu::ShaderRuntimeChecks::unchecked())
         }
@@ -402,10 +464,10 @@ struct Pipelines {
     spawn: wgpu::ComputePipeline,
     spawn_commit: wgpu::ComputePipeline,
     render: wgpu::ComputePipeline,
-    /// The same pass compiled with the channel controller path in it. Selected \[32\]
+    /// The same pass compiled with the channel controller path in it. Selected \[38\]
     render_chan: wgpu::ComputePipeline,
     reduce: wgpu::ComputePipeline,
-    /// The reduce for a block with few render workgroups: one thread a sample \[33\]
+    /// The reduce for a block with few render workgroups: one thread a sample \[39\]
     reduce_thin: wgpu::ComputePipeline,
     scan_local: wgpu::ComputePipeline,
     scan_blocks: wgpu::ComputePipeline,
@@ -441,7 +503,7 @@ struct Groups {
     render: wgpu::BindGroup,
     compact: wgpu::BindGroup,
     select: wgpu::BindGroup,
-    /// Indexed by which of the two (key, index) buffers currently holds the \[34\]
+    /// Indexed by which of the two (key, index) buffers currently holds the \[40\]
     sort: [wgpu::BindGroup; 2],
 }
 
@@ -466,6 +528,12 @@ pub struct GpuSynth {
     cut_active: bool,
     voices: [wgpu::Buffer; 2],
     partials_buf: wgpu::Buffer,
+    /// Voices a kernel builder renders, each to its own mono row of \[41\]
+    solo_rows: u32,
+    /// Where a kernel builder's next block of rows is copied: a readback the \[42\]
+    solo_dst: Option<wgpu::Buffer>,
+    solo_offset: u64,
+    solo_bytes: u64,
     out_buf: wgpu::Buffer,
     state_buf: wgpu::Buffer,
     scan_buf: wgpu::Buffer,
@@ -476,25 +544,25 @@ pub struct GpuSynth {
     sort_key: SortKeyLayout,
     cmds_buf: wgpu::Buffer,
     cmds_capacity: u32,
-    /// Note-off runs the gates buffer can hold behind its meta header, two \[35\]
+    /// Note-off runs the gates buffer can hold behind its meta header, two \[43\]
     off_runs_capacity: u64,
-    /// Words of that meta header, `(slots + 1) * 2`. Grows with the MIDI ports \[36\]
+    /// Words of that meta header, `(slots + 1) * 2`. Grows with the MIDI ports \[44\]
     off_meta_words: u64,
     /// Channels in a controller row this block, read off the rows' length.
     chan_count: u32,
-    /// The most of one buffer the adapter binds to a shader, which is as far \[37\]
+    /// The most of one buffer the adapter binds to a shader, which is as far \[45\]
     binding_cap: u64,
     pool_buf: wgpu::Buffer,
     /// The pool's other parts, when it has them; see `pool_parts`.
     pool_rest: Vec<wgpu::Buffer>,
     pool_parts: PoolParts,
     pool_words: u32,
-    /// Analytic quadrature and per-region metadata (`PhaseBank::words`), bound \[38\]
+    /// Analytic quadrature and per-region metadata (`PhaseBank::words`), bound \[46\]
     phase_buf: Option<wgpu::Buffer>,
     params_buf: wgpu::Buffer,
     params_per_variant: u32,
     menv_buf: wgpu::Buffer,
-    // [39]
+    // [47]
     menv_factor_buf: wgpu::Buffer,
     menv_per_variant: u32,
     menv_factor_half: u32,
@@ -502,11 +570,11 @@ pub struct GpuSynth {
     glide_base: u32,
     /// Whether the driver says a voice may glide during the next block.
     glide_active: bool,
-    /// The render pass with the glide path in it, plain and with the \[40\]
+    /// The render pass with the glide path in it, plain and with the \[48\]
     render_glide: Option<[wgpu::ComputePipeline; 2]>,
     /// Their sources, fully substituted, kept so the compile can happen then.
     glide_sources: [String; 2],
-    /// The render pass for a block that goes up in parts, the one that reads \[41\]
+    /// The render pass for a block that goes up in parts, the one that reads \[49\]
     render_split: [Option<wgpu::ComputePipeline>; 4],
     split_sources: [String; 4],
 
@@ -515,15 +583,15 @@ pub struct GpuSynth {
 
     /// Which of `voices` currently holds the live pool.
     parity: usize,
-    /// Host mirror of the device live count, exact because every change to it \[42\]
+    /// Host mirror of the device live count, exact because every change to it \[50\]
     live: u32,
     /// Allocated voice slots, `Config::pool_slots()`. The SoA stride.
     slots: u32,
-    /// The next block's position on the envelope grid: frames rendered so \[43\]
+    /// The next block's position on the envelope grid: frames rendered so \[51\]
     env_phase: u32,
-    /// `(steal_k, spawn_count)` of the block `spawn` planned and uploaded, \[44\]
+    /// `(steal_k, spawn_count)` of the block `spawn` planned and uploaded, \[52\]
     planned: (u32, u32),
-    /// Reused buffer for the thinned spawn list, so a saturated block does not \[45\]
+    /// Reused buffer for the thinned spawn list, so a saturated block does not \[53\]
     spawn_scratch: Vec<SpawnCmd>,
     stolen: u64,
     dropped: u64,
@@ -532,27 +600,27 @@ pub struct GpuSynth {
     timing: Option<Timing>,
     last_timings: Vec<(&'static str, f64)>,
     vram_bytes: u64,
-    /// Of `vram_bytes`, what lives in the `GpuShared` this was built on: the \[46\]
+    /// Of `vram_bytes`, what lives in the `GpuShared` this was built on: the \[54\]
     shared_bytes: u64,
     pool_bytes: u64,
     voice_bytes: u64,
     partial_bytes: u64,
-    /// Render workgroups the partials buffer holds; see \[47\]
+    /// Render workgroups the partials buffer holds; see \[55\]
     max_nwg: u32,
-    /// The last block's submission, which is what `finish` waits for. Not \[48\]
+    /// The last block's submission, which is what `finish` waits for. Not \[56\]
     last_submission: Option<wgpu::SubmissionIndex>,
-    /// How many voices one submission may cover, and what the last block did \[49\]
+    /// How many voices one submission may cover, and what the last block did \[57\]
     budget: SubmitBudget,
     in_flight: Option<InFlight>,
     /// Blocks whose render pass went up as more than one submission.
     split_blocks: u64,
-    /// Other renders are submitting to this device at the same time; see \[50\]
+    /// Other renders are submitting to this device at the same time; see \[58\]
     concurrent: bool,
     /// PCI vendor and device id of the adapter, which is how `vram` finds it.
     adapter_ids: (u32, u32),
 }
 
-/// The block on the device, as `finish` needs it to tell the budget how long \[51\]
+/// The block on the device, as `finish` needs it to tell the budget how long \[59\]
 struct InFlight {
     /// When its first submission went in.
     at: std::time::Instant,
@@ -560,7 +628,7 @@ struct InFlight {
     parts: u32,
 }
 
-/// Everything GPU renders in one process can share: the device, and the sample \[52\]
+/// Everything GPU renders in one process can share: the device, and the sample \[60\]
 #[derive(Clone)]
 pub struct GpuShared {
     device: wgpu::Device,
@@ -568,7 +636,7 @@ pub struct GpuShared {
     adapter_info: wgpu::AdapterInfo,
     limits: wgpu::Limits,
     has_timestamps: bool,
-    /// The sample pool, in one buffer unless it is bigger than one binding; \[53\]
+    /// The sample pool, in one buffer unless it is bigger than one binding; \[61\]
     pool_bufs: Vec<wgpu::Buffer>,
     pool_parts: PoolParts,
     /// Words in all of `pool_bufs` together, for the `pool_words` uniform.
@@ -579,20 +647,35 @@ pub struct GpuShared {
 }
 
 impl GpuShared {
-    /// Say that the renders built on this will run at the same time, so each \[54\]
+    /// Say that the renders built on this will run at the same time, so each \[62\]
     pub fn concurrent(mut self) -> Self {
         self.concurrent = true;
         self
     }
 
-    /// Open the device and upload `bank`'s sample pool, after checking `cfg` \[55\]
+    /// Open the device and upload `bank`'s sample pool, after checking `cfg` \[63\]
     pub fn new(cfg: &Config, bank: &Bank, phase: &crate::phase::PhaseBank) -> Result<Self> {
         cfg.validate()?;
         let (device, queue, adapter_info, limits, has_timestamps) = device::create(cfg)?;
+        Self::on_device(cfg, bank, phase, device, queue, adapter_info, limits, has_timestamps)
+    }
+
+    /// `new` on a device that is already open: merlin opens one for its own \[64\]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn on_device(
+        cfg: &Config,
+        bank: &Bank,
+        phase: &crate::phase::PhaseBank,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        adapter_info: wgpu::AdapterInfo,
+        limits: wgpu::Limits,
+        has_timestamps: bool,
+    ) -> Result<Self> {
         let adapter_name = format!("{} ({:?})", adapter_info.name, adapter_info.backend);
         let binding_cap = check_limits(cfg, &limits, &adapter_name)?;
 
-        // [56]
+        // [65]
         let phase_buf = if cfg.phase.active() {
             if limits.max_storage_buffers_per_shader_stage < 10 {
                 bail!("analytic phase requires 10 compute storage buffers; this adapter supports {}",
@@ -612,7 +695,7 @@ impl GpuShared {
             Some(buf)
         } else { None };
 
-        // [57]
+        // [66]
         let pool = &bank.pool;
         let even = pool.len() / 2 * 2;
         let pool_words = pool.len().div_ceil(2).max(1) as u64;
@@ -638,7 +721,7 @@ impl GpuShared {
         }
         let part_bytes = parts.words_each as u64 * 4;
         let bytes: &[u8] = bytemuck::cast_slice(&pool[..even]);
-        // [58]
+        // [67]
         device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         let mut pool_bufs = Vec::with_capacity(parts.count as usize);
         let mut uploaded = Ok(());
@@ -668,7 +751,7 @@ impl GpuShared {
         }
         uploaded?;
         if even < pool.len() {
-            // [59]
+            // [68]
             let at = even as u64 * 2;
             let k = at / part_bytes;
             queue.write_buffer(&pool_bufs[k as usize], at - k * part_bytes, bytemuck::cast_slice(&[pool[even], 0]));
@@ -703,7 +786,7 @@ impl GpuShared {
         self.pool_bytes + self.phase_buf.as_ref().map_or(0, |b| b.size())
     }
 
-    /// The most voices one render on this device can be given: the largest \[60\]
+    /// The most voices one render on this device can be given: the largest \[69\]
     pub fn max_voices(&self, cfg: &Config) -> u32 {
         max_voices_for_config(self.binding_bytes(), cfg)
     }
@@ -718,13 +801,13 @@ impl GpuShared {
         self.pool_parts
     }
 
-    /// The pool's first buffer, which the render pass binds at 1, and the \[61\]
+    /// The pool's first buffer, which the render pass binds at 1, and the \[70\]
     fn pool_split(&self) -> (&wgpu::Buffer, &[wgpu::Buffer]) {
         (&self.pool_bufs[0], &self.pool_bufs[1..])
     }
 }
 
-/// Read several readback buffers back with one device wait: `GpuSynth`'s and \[62\]
+/// Read several readback buffers back with one device wait: `GpuSynth`'s and \[71\]
 fn map_read(
 device: &wgpu::Device,
 bufs: &[&wgpu::Buffer],
@@ -735,7 +818,7 @@ last_submission: Option<wgpu::SubmissionIndex>,
     map_read_prefix(device, &whole, concurrent, last_submission)
 }
 
-/// `map_read` of the first `len` bytes of each buffer only: a batch reads \[63\]
+/// `map_read` of the first `len` bytes of each buffer only: a batch reads \[72\]
 fn map_read_prefix(
 device: &wgpu::Device,
 bufs: &[(&wgpu::Buffer, u64)],
@@ -752,7 +835,7 @@ last_submission: Option<wgpu::SubmissionIndex>,
     }
     let mut mapped: Vec<Option<Result<(), wgpu::BufferAsyncError>>> = vec![None; bufs.len()];
     if concurrent {
-        // [64]
+        // [73]
         let mut spins = 0u32;
         loop {
             device
@@ -801,13 +884,13 @@ last_submission: Option<wgpu::SubmissionIndex>,
     Ok(out)
 }
 
-/// How one block's spawn list fits the pool. Shared by `GpuSynth` and the \[65\]
+/// How one block's spawn list fits the pool. Shared by `GpuSynth` and the \[74\]
 struct SpawnPlan {
     steal_k: u32,
     spawn_count: u32,
     /// Note-ons refused this block, over the pool or over the steal bound.
     dropped: u64,
-    /// The commands to upload are `scratch`'s, thinned from `pending`, rather \[66\]
+    /// The commands to upload are `scratch`'s, thinned from `pending`, rather \[75\]
     thinned: bool,
 }
 
@@ -815,7 +898,7 @@ fn plan_spawns(cfg: &Config, live: u32, pending: &[SpawnCmd], scratch: &mut Vec<
     let cap = cfg.max_voices;
     let mut dropped = 0u64;
 
-    // [67]
+    // [76]
     let want = (pending.len() as u32).min(cap);
     if want < pending.len() as u32 {
         dropped += pending.len() as u64 - want as u64;
@@ -824,7 +907,7 @@ fn plan_spawns(cfg: &Config, live: u32, pending: &[SpawnCmd], scratch: &mut Vec<
     let mut steal_k = 0u32;
     if live + want > cap {
         match cfg.steal_rule {
-            // [68]
+            // [77]
             StealRule::Oldest | StealRule::Quietest => {
                 steal_k = (live + want - cap).min(live).min(cfg.max_steal())
             }
@@ -838,7 +921,7 @@ fn plan_spawns(cfg: &Config, live: u32, pending: &[SpawnCmd], scratch: &mut Vec<
     let take = spawn_count as usize;
     let thinned = spawn_count > 0 && take != total;
     if thinned {
-        // [69]
+        // [78]
         scratch.clear();
         scratch.reserve(take);
         match cfg.admit_rule {
@@ -853,7 +936,7 @@ fn plan_spawns(cfg: &Config, live: u32, pending: &[SpawnCmd], scratch: &mut Vec<
     SpawnPlan { steal_k, spawn_count, dropped, thinned }
 }
 
-/// The read-only tables the render pass reads beside the params, as one \[70\]
+/// The read-only tables the render pass reads beside the params, as one \[79\]
 fn read_only_tables(cfg: &Config, bank: &Bank) -> (Vec<u32>, u32, u32) {
     let mut t: Vec<u32> = if bank.menv_factors.is_empty() { vec![1 << 24] } else { bank.menv_factors.clone() };
     let log2_base = t.len() as u32;
@@ -867,7 +950,7 @@ fn read_only_tables(cfg: &Config, bank: &Bank) -> (Vec<u32>, u32, u32) {
     (t, log2_base, glide_base)
 }
 
-/// Workgroups for a grid-strided pass over `items`: one per `workgroup_size` \[71\]
+/// Workgroups for a grid-strided pass over `items`: one per `workgroup_size` \[80\]
 fn dispatch_count(cfg: &Config, items: u32) -> u32 {
     let ceiling = cfg.max_pool_workgroups.clamp(1, MAX_WORKGROUPS_PER_DIM);
     items.div_ceil(cfg.workgroup_size).clamp(1, ceiling)
@@ -900,12 +983,12 @@ struct BlockU {
     off_meta_words: u32,
 }
 
-/// One block's uniforms. Shared by `GpuSynth` and the batch, so the two cannot \[72\]
+/// One block's uniforms. Shared by `GpuSynth` and the batch, so the two cannot \[81\]
 fn make_uniforms(cfg: &Config, s: &Shape, b: &BlockU) -> Uniforms {
     Uniforms {
         block_frames: cfg.block_frames,
         tiles: cfg.block_frames / cfg.reduce_tile,
-        // [73]
+        // [82]
         capacity: s.slots,
         spawn_count: b.spawn_count,
         render_workgroups: b.nwg,
@@ -935,35 +1018,35 @@ fn make_uniforms(cfg: &Config, s: &Shape, b: &BlockU) -> Uniforms {
     }
 }
 
-/// Where `Uniforms::render_wg_base` sits, for the write between the parts of \[74\]
+/// Where `Uniforms::render_wg_base` sits, for the write between the parts of \[83\]
 const RENDER_WG_BASE: u64 = std::mem::offset_of!(Uniforms, render_wg_base) as u64;
 
-/// Submissions a block's render pass goes up as: enough that none covers \[75\]
+/// Submissions a block's render pass goes up as: enough that none covers \[84\]
 fn render_parts(voices: u32, nwg: u32, budget: u32) -> u32 {
     voices.div_ceil(budget.max(1)).clamp(1, nwg.max(1))
 }
 
-/// Render workgroups a render can ever dispatch, which sizes its partials \[76\]
+/// Render workgroups a render can ever dispatch, which sizes its partials \[85\]
 fn max_render_workgroups(cfg: &Config) -> u32 {
     cfg.max_render_workgroups
         .clamp(1, MAX_WORKGROUPS_PER_DIM)
         .min(cfg.pool_slots().div_ceil(cfg.workgroup_size).max(1))
 }
 
-/// The most device buffers the sample pool is split across. \[77\]
+/// The most device buffers the sample pool is split across. \[86\]
 pub const POOL_PARTS_MAX: u32 = 4;
 
-/// Storage buffers the fullest render pass binds besides the pool's extra \[78\]
+/// Storage buffers the fullest render pass binds besides the pool's extra \[87\]
 const RENDER_STORAGE_BUFFERS: u32 = 12;
 
-/// The sample pool as it sits on the device: `count` buffers of `words_each` \[79\]
+/// The sample pool as it sits on the device: `count` buffers of `words_each` \[88\]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PoolParts {
     pub words_each: u32,
     pub count: u32,
 }
 
-/// Lay out a pool of `pool_words` words in buffers the adapter can bind, or \[80\]
+/// Lay out a pool of `pool_words` words in buffers the adapter can bind, or \[89\]
 fn pool_parts(
     pool_words: u64,
     pool_rate: u32,
@@ -1020,13 +1103,13 @@ fn pool_parts(
     Ok(PoolParts { words_each: cap_words as u32, count })
 }
 
-/// The sample-pool budget until 1.2.3, and still the least `auto_pool_budget` \[81\]
+/// The sample-pool budget until 1.2.3, and still the least `auto_pool_budget` \[90\]
 pub const POOL_BUDGET_FLOOR: u64 = 2 << 30;
 
-/// Video memory `pool_budget_for` keeps for everything but the pool: a \[82\]
+/// Video memory `pool_budget_for` keeps for everything but the pool: a \[91\]
 const POOL_BUDGET_RESERVE: u64 = 3 << 29;
 
-/// `--pool-budget` when it is not given, decided with the user 2026-09-27: \[83\]
+/// `--pool-budget` when it is not given, decided with the user 2026-09-27: \[92\]
 pub fn auto_pool_budget(cfg: &Config) -> u64 {
     type Key = (Option<String>, Option<String>);
     static CACHE: std::sync::Mutex<Vec<(Key, u64)>> = std::sync::Mutex::new(Vec::new());
@@ -1055,7 +1138,7 @@ pub fn auto_pool_budget(cfg: &Config) -> u64 {
     budget
 }
 
-/// The pool budget for a card with `total` bytes of dedicated memory that \[84\]
+/// The pool budget for a card with `total` bytes of dedicated memory that \[93\]
 fn pool_budget_for(total: Option<u64>, binding: u64) -> u64 {
     let ceiling = (POOL_PARTS_MAX as u64 * (binding / 4) * 4).clamp(POOL_BUDGET_FLOOR, 8 << 30);
     match total {
@@ -1064,14 +1147,14 @@ fn pool_budget_for(total: Option<u64>, binding: u64) -> u64 {
     }
 }
 
-/// Refuse a configuration the adapter cannot run, and return the most of one \[85\]
+/// Refuse a configuration the adapter cannot run, and return the most of one \[94\]
 struct MemoryNote {
     text: String,
     /// The buffers need more than the process has left of its budget.
     short: bool,
 }
 
-/// Say what `needs` bytes of new buffers come to against `memory`'s budget, and \[86\]
+/// Say what `needs` bytes of new buffers come to against `memory`'s budget, and \[95\]
 fn memory_note(needs: u64, scaled: u64, max_voices: u32, memory: &vram::GpuMemory) -> Option<MemoryNote> {
     let (budget, used) = (memory.process_budget?, memory.process_used?);
     let free = budget.saturating_sub(used);
@@ -1104,7 +1187,7 @@ fn memory_note(needs: u64, scaled: u64, max_voices: u32, memory: &vram::GpuMemor
 }
 
 fn check_limits(cfg: &Config, limits: &wgpu::Limits, adapter_name: &str) -> Result<u64> {
-    // [87]
+    // [96]
     let need_shared = cfg.workgroup_size * (cfg.reduce_tile * 2 + 1) * 4;
     if need_shared > limits.max_compute_workgroup_storage_size {
         bail!(
@@ -1116,7 +1199,7 @@ fn check_limits(cfg: &Config, limits: &wgpu::Limits, adapter_name: &str) -> Resu
         );
     }
 
-    // [88]
+    // [97]
     let voice_pool_bytes = cfg.pool_slots() as u64 * voice_fields(cfg) * 4;
     let binding_cap = (limits.max_storage_buffer_binding_size as u64).min(limits.max_buffer_size);
     if voice_pool_bytes > binding_cap {
@@ -1174,7 +1257,28 @@ impl GpuSynth {
         Ok(s)
     }
 
-    /// A render's own buffers and pipelines, on a device and sample pool that \[89\]
+    /// The same, on a device somebody else already opened. \[98\]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_on(
+        cfg: &Config,
+        bank: Arc<Bank>,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        adapter_info: wgpu::AdapterInfo,
+        limits: wgpu::Limits,
+        has_timestamps: bool,
+    ) -> Result<Self> {
+        cfg.validate()?;
+        let phase = crate::phase::PhaseBank::prepare(&bank, &cfg.phase)?;
+        let shared = GpuShared::on_device(
+            cfg, &bank, &phase, device, queue, adapter_info, limits, has_timestamps,
+        )?;
+        let s = Self::on_shared(cfg, bank, &shared)?;
+        s.log_buffers();
+        Ok(s)
+    }
+
+    /// A render's own buffers and pipelines, on a device and sample pool that \[99\]
     pub fn on_shared(cfg: &Config, bank: Arc<Bank>, shared: &GpuShared) -> Result<Self> {
         cfg.validate()?;
         let device = shared.device.clone();
@@ -1187,10 +1291,10 @@ impl GpuSynth {
             bail!("the shared device was prepared for a different analytic phase setting");
         }
 
-        // [90]
+        // [100]
         let scan_workgroups = cfg.pool_slots().div_ceil(cfg.workgroup_size);
 
-        // [91]
+        // [101]
         let capacity = cfg.pool_slots();
         let tiles = cfg.block_frames / cfg.gate_frames;
         let nwg = max_render_workgroups(cfg);
@@ -1200,7 +1304,7 @@ impl GpuSynth {
         let (pool_parts, pool_words) = (shared.pool_parts, shared.pool_words);
         let phase_buf = shared.phase_buf.clone();
 
-        // [92]
+        // [102]
         let fallback;
         let params: &[RegionParams] = if bank.params.is_empty() {
             fallback = [RegionParams {
@@ -1224,7 +1328,7 @@ impl GpuSynth {
         } else {
             &bank.params
         };
-        // [93]
+        // [103]
         let params_per_variant = params.len() as u32;
         let variants = cfg.max_param_variants.max(1);
         let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1235,7 +1339,7 @@ impl GpuSynth {
         });
         upload_in_pieces(&device, &queue, &params_buf, 0, bytemuck::cast_slice(params))?;
 
-        // [94]
+        // [104]
         let menv: Vec<ModEnvParams> = if bank.menv.is_empty() {
             vec![ModEnvParams::default()]
         } else {
@@ -1250,7 +1354,7 @@ impl GpuSynth {
         });
         queue.write_buffer(&menv_buf, 0, bytemuck::cast_slice(&menv));
 
-        // [95]
+        // [105]
         let (menv_tables, menv_log2_base, glide_base) = read_only_tables(cfg, &bank);
         let menv_factor_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mod env tables"),
@@ -1272,12 +1376,12 @@ impl GpuSynth {
         let voice_bytes = capacity as u64 * voice_fields(cfg) * 4;
         let partial_bytes = cfg.block_frames as u64 * 2 * nwg as u64 * 4;
         let out_bytes = cfg.block_frames as u64 * 2 * 4;
-        // [96]
+        // [106]
         let off_meta_words = (BASE_CHANNELS as u64 * 128 + 1) * 2;
         let off_runs_capacity = 32768u64;
         let gates_bytes = (off_meta_words + off_runs_capacity * 2) * 4;
 
-        // [97]
+        // [107]
         let scaled = voice_bytes * 2 + capacity as u64 * 24; // the voice pools, the sort and the scan
         let needs = scaled
             + params_buf.size()
@@ -1304,10 +1408,10 @@ impl GpuSynth {
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         );
         let gates_buf = mk("gates", gates_bytes, storage | wgpu::BufferUsages::COPY_DST);
-        // [98]
+        // [108]
         let chan_bytes = (tiles as u64 + 1) * BASE_CHANNELS as u64 * CHAN_FIELDS as u64 * 4;
         let chan_buf = mk("channels", chan_bytes, storage | wgpu::BufferUsages::COPY_DST);
-        // [99]
+        // [109]
         let voice_usage = storage | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
         let voices = [mk("voices a", voice_bytes, voice_usage), mk("voices b", voice_bytes, voice_usage)];
         let partials_buf = mk("partials", partial_bytes, storage);
@@ -1595,6 +1699,10 @@ impl GpuSynth {
             cut_active: false,
             voices,
             partials_buf,
+            solo_rows: 0,
+            solo_dst: None,
+            solo_offset: 0,
+            solo_bytes: 0,
             out_buf,
             state_buf,
             scan_buf,
@@ -1657,8 +1765,89 @@ impl GpuSynth {
         Ok(s)
     }
 
+    /// A pool that renders each of up to `rows` voices to its own mono row \[110\]
+    pub(crate) fn solo_on_shared(cfg: &Config, bank: Arc<Bank>, shared: &GpuShared, rows: u32) -> Result<Self> {
+        let mut s = Self::on_shared(cfg, bank.clone(), shared)?;
+        let bytes = (rows.max(1) as u64 * cfg.block_frames as u64 * 4).max(4);
+        s.partials_buf = s.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("solo rows"),
+            size: bytes,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        s.rebind_render();
+        let src = render_source_with(cfg, &bank, s.pool_parts, false, false, false, true);
+        s.pipelines.render = compile(&s.device, cfg, "render_solo", src, &s.layouts.render, &["main"]).remove(0);
+        s.solo_rows = rows;
+        Ok(s)
+    }
+
+    /// Submit one block of a kernel builder's batch, its first `bytes` of rows \[111\]
+    pub(crate) fn solo_submit_to(&mut self, dst: &wgpu::Buffer, offset: u64, bytes: u64) -> Result<()> {
+        self.solo_dst = Some(dst.clone());
+        self.solo_offset = offset;
+        self.solo_bytes = bytes;
+        self.submit()
+    }
+
+    /// The sustain pass, on this synth's sample pool.
+    pub(crate) fn solo_sustain_pass(&self, cfg: &Config, bank: &Bank) -> SustainPass {
+        let [pool_decls, pool_fetch, pool_pairs] = pool_wgsl(self.pool_parts);
+        let body = include_str!("../../shaders/sustain.wgsl")
+            .replace("{{SAMPLE}}", include_str!("../../shaders/sample.wgsl"))
+            .replace("{{POOL_PARTS}}", &pool_decls)
+            .replace("{{POOL_FETCH}}", &pool_fetch)
+            .replace("{{POOL_PAIRS}}", &pool_pairs);
+        let mut entries = device::layout_entries(&[true, true, true, true, false]);
+        let part = entries[1];
+        entries.extend((0..self.pool_rest.len() as u32).map(|k| wgpu::BindGroupLayoutEntry { binding: POOL_PART_BINDING + k, ..part }));
+        let layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("sustain"), entries: &entries });
+        let pipeline = compile(&self.device, cfg, "sustain", shader_source(&body, cfg, bank), &layout, &["main"]).remove(0);
+        let u = Uniforms {
+            interp: cfg.interpolation as u32,
+            exp_decay: (cfg.decay_curve == EnvelopeCurve::Exponential) as u32,
+            pool_words: self.pool_words,
+            ..Uniforms::default()
+        };
+        let uniform = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("sustain uniforms"),
+            contents: bytemuck::bytes_of(&u),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        SustainPass { pipeline, layout, uniform, pool: self.pool_buf.clone(), pool_rest: self.pool_rest.clone() }
+    }
+
+    /// The device and queue a kernel builder copies its rows on.
+    pub(crate) fn solo_device(&self) -> (wgpu::Device, wgpu::Queue) {
+        (self.device.clone(), self.queue.clone())
+    }
+
+    /// A readback of `bytes` for a kernel builder's batch to land in.
+    pub(crate) fn solo_readback(&self, bytes: u64) -> wgpu::Buffer {
+        self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("solo rows readback"),
+            size: bytes.max(4),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    /// The last submission made, which a batch waits on once it has been \[112\]
+    pub(crate) fn solo_submission(&self) -> Option<wgpu::SubmissionIndex> {
+        self.last_submission.clone()
+    }
+
+    /// Map the first bytes of each readback once the submission `at` is done.
+    pub(crate) fn solo_map(
+        &self,
+        bufs: &[(&wgpu::Buffer, u64)],
+        at: Option<wgpu::SubmissionIndex>,
+    ) -> Result<Vec<Vec<u8>>> {
+        map_read_prefix(&self.device, bufs, self.concurrent, at)
+    }
+
     /// The `gpu:` line a render has always opened with.
-    fn log_buffers(&self) {
+    pub(crate) fn log_buffers(&self) {
         log::info!(
             "gpu: {} | {:.1} MiB of device buffers ({:.1} MiB sample pool, \
              {:.1} MiB voice pool for {} voices, {:.1} MiB partials)",
@@ -1671,12 +1860,12 @@ impl GpuSynth {
         );
     }
 
-    /// Device bytes this render allocated for itself, apart from what it \[100\]
+    /// Device bytes this render allocated for itself, apart from what it \[113\]
     pub fn own_bytes(&self) -> u64 {
         self.vram_bytes - self.shared_bytes
     }
 
-    /// Make this a fresh backend again, for the next render on the same \[101\]
+    /// Make this a fresh backend again, for the next render on the same \[114\]
     pub fn reset(&mut self) {
         self.queue
             .write_buffer(&self.state_buf, 0, bytemuck::cast_slice(&[0u32; STATE_SLOTS]));
@@ -1796,12 +1985,12 @@ impl GpuSynth {
         })
     }
 
-    /// Workgroups the render pass will be dispatched with this block, given \[102\]
+    /// Workgroups the render pass will be dispatched with this block, given \[115\]
     fn render_workgroups(&self, voices: u32) -> u32 {
         voices.div_ceil(self.cfg.workgroup_size).clamp(1, self.max_nwg)
     }
 
-    /// Compile the render pass that reads `u.render_wg_base`, for the plain or \[103\]
+    /// Compile the render pass that reads `u.render_wg_base`, for the plain or \[116\]
     fn ensure_split(&mut self, chan: bool, glide: bool) {
         let i = ((glide as usize) << 1) | chan as usize;
         if self.render_split[i].is_none() {
@@ -1879,7 +2068,7 @@ impl GpuSynth {
         log::debug!("grew the spawn command buffer to {new_cap} entries");
     }
 
-    /// Grow the gates buffer so it can carry a `meta_words` header and `runs` \[104\]
+    /// Grow the gates buffer so it can carry a `meta_words` header and `runs` \[117\]
     fn grow_gates(&mut self, meta_words: u64, runs: usize) -> Result<()> {
         self.off_meta_words = meta_words;
         let runs = runs as u64;
@@ -1899,7 +2088,7 @@ impl GpuSynth {
         Ok(())
     }
 
-    /// Grow the channels buffer to hold `words` of controller rows: a port's \[105\]
+    /// Grow the channels buffer to hold `words` of controller rows: a port's \[118\]
     fn grow_channels(&mut self, words: usize) {
         let bytes = words as u64 * 4;
         if bytes <= self.chan_buf.size() {
@@ -1915,7 +2104,7 @@ impl GpuSynth {
         log::debug!("grew the channels buffer to {words} words");
     }
 
-    /// Rebuild both render bind groups, after the gates or the channels buffer \[106\]
+    /// Rebuild both render bind groups, after the gates or the channels buffer \[119\]
     fn rebind_render(&mut self) {
         for p in 0..2 {
             self.groups[p].render = bind_render(
@@ -1939,18 +2128,18 @@ impl GpuSynth {
         }
     }
 
-    /// Workgroups to dispatch for `items` voices. Every entry point this feeds \[107\]
+    /// Workgroups to dispatch for `items` voices. Every entry point this feeds \[120\]
     fn dispatch_count(&self, items: u32) -> u32 {
         dispatch_count(&self.cfg, items)
     }
 
-    /// Read several readback buffers back with **one** device wait. \[108\]
+    /// Read several readback buffers back with **one** device wait. \[121\]
     fn map_read_many(&self, bufs: &[&wgpu::Buffer]) -> Result<Vec<Vec<u8>>> {
         map_read(&self.device, bufs, self.concurrent, self.last_submission.clone())
     }
 }
 
-/// How many note-off runs a regrown gates buffer should hold behind a \[109\]
+/// How many note-off runs a regrown gates buffer should hold behind a \[122\]
 fn gates_capacity(runs: u64, held: u64, meta_words: u64, binding_cap: u64) -> Result<u64> {
     let bytes = |cap: u64| (meta_words + cap * 2) * 4;
     if bytes(runs) > binding_cap {
@@ -1978,9 +2167,11 @@ impl Backend for GpuSynth {
     fn set_params_variant(
         &mut self,
         index: u32,
-        data: &[RegionParams],
-        menv: &[ModEnvParams],
+        data: Arc<Vec<RegionParams>>,
+        menv: Arc<Vec<ModEnvParams>>,
     ) -> Result<()> {
+        // Read once into the device buffer; nothing here keeps the table.
+        let (data, menv) = (&data[..], &menv[..]);
         let per = self.params_per_variant as usize;
         if data.len() != per {
             bail!(
@@ -1995,7 +2186,7 @@ impl Backend for GpuSynth {
         self.queue
             .write_buffer(&self.params_buf, off, bytemuck::cast_slice(data));
 
-        // [110]
+        // [123]
         let mper = self.menv_per_variant as usize;
         if menv.len() != mper {
             bail!(
@@ -2014,7 +2205,7 @@ impl Backend for GpuSynth {
         let row_count = (self.cfg.block_frames / self.cfg.gate_frames) as usize + 1;
         self.chan_count = (rows.len() / (row_count * CHAN_FIELDS)) as u32;
         self.grow_channels(rows.len());
-        // [111]
+        // [124]
         self.queue
             .write_buffer(&self.chan_buf, 0, bytemuck::cast_slice(rows));
         self.bend_active = bend;
@@ -2062,7 +2253,7 @@ impl Backend for GpuSynth {
     }
 
     fn spawn(&mut self, cmds: &[SpawnCmd]) -> Result<()> {
-        // [112]
+        // [125]
         let plan = plan_spawns(&self.cfg, self.live, cmds, &mut self.spawn_scratch);
         self.dropped += plan.dropped;
         if plan.spawn_count > 0 {
@@ -2075,10 +2266,10 @@ impl Backend for GpuSynth {
         Ok(())
     }
 
-    /// Queue the whole block: spawn, render, reduce, compact, and the copies \[113\]
+    /// Queue the whole block: spawn, render, reduce, compact, and the copies \[126\]
     fn submit(&mut self) -> Result<()> {
         let (steal_k, spawn_count) = std::mem::take(&mut self.planned);
-        // [114]
+        // [127]
         let nwg = self.render_workgroups(self.live + spawn_count);
         self.write_uniforms(spawn_count, steal_k, nwg);
         // Written, so the next block's position can be taken now.
@@ -2107,7 +2298,7 @@ impl Backend for GpuSynth {
             }};
         }
 
-        // [115]
+        // [128]
         {
             let live_wgs = self.dispatch_count(self.live);
             let mut p = begin!(enc, "steal");
@@ -2130,7 +2321,7 @@ impl Backend for GpuSynth {
                 p.dispatch_workgroups(1, 1, 1);
             }
         }
-        // [116]
+        // [129]
 
         // ---- 2. spawn ----
         {
@@ -2145,7 +2336,7 @@ impl Backend for GpuSynth {
         }
         self.live += spawn_count;
 
-        // [117]
+        // [130]
         let voices = self.live;
         let parts = render_parts(voices, nwg, self.budget.voices());
         if parts > 1 {
@@ -2160,12 +2351,16 @@ impl Backend for GpuSynth {
         }
         let render_index = pass_index as u32;
         pass_index += 1;
-        // [118]
+        // [131]
         let chan = self.bend_active || self.gain_active || self.variant_active;
         let glide_on = self.render_glide.is_some() && self.glide_active;
-        // [119]
+        // [132]
         if parts > 1 {
             self.ensure_split(chan, glide_on);
+        }
+        // [133]
+        if self.solo_rows > 0 {
+            enc.clear_buffer(&self.partials_buf, 0, (self.solo_bytes > 0).then_some(self.solo_bytes));
         }
         let mut first_at: Option<std::time::Instant> = None;
         for part in 0..parts {
@@ -2179,11 +2374,11 @@ impl Backend for GpuSynth {
                 );
                 first_at.get_or_insert_with(std::time::Instant::now);
                 self.queue.submit(Some(done.finish()));
-                // [120]
+                // [134]
                 self.queue.write_buffer(&self.uniform_buf, RENDER_WG_BASE, bytemuck::bytes_of(&first));
             }
             let ts = self.timing.as_ref().and_then(|t| {
-                // [121]
+                // [135]
                 let begin = (part == 0).then_some(render_index * 2);
                 let stop = (part + 1 == parts).then_some(render_index * 2 + 1);
                 (begin.is_some() || stop.is_some()).then_some(wgpu::ComputePassTimestampWrites {
@@ -2210,7 +2405,7 @@ impl Backend for GpuSynth {
                     (None, false) => &self.pipelines.render,
                 }
             });
-            // [122]
+            // [136]
             p.dispatch_workgroups(end - first, 1, 1);
         }
 
@@ -2218,8 +2413,9 @@ impl Backend for GpuSynth {
         {
             let mut p = begin!(enc, "reduce");
             p.set_bind_group(0, &self.reduce_group, &[]);
-            // [123]
-            if nwg <= reduce_thin_max(&self.cfg) {
+            // [137]
+            if self.solo_rows > 0 {
+            } else if nwg <= reduce_thin_max(&self.cfg) {
                 p.set_pipeline(&self.pipelines.reduce_thin);
                 p.dispatch_workgroups((self.cfg.block_frames * 2).div_ceil(REDUCE_THIN_LANES), 1, 1);
             } else {
@@ -2228,13 +2424,13 @@ impl Backend for GpuSynth {
             }
         }
 
-        // ---- 5. compact, and re-sort in the same pass ----
-        {
-            // [124]
+        // [138]
+        if self.solo_rows == 0 {
+            // [139]
             let live_wgs = self.dispatch_count(self.live);
             let mut p = begin!(enc, "compact");
 
-            // [125]
+            // [140]
             p.set_bind_group(0, &self.groups[self.parity].compact, &[]);
             p.set_pipeline(&self.pipelines.scan_local);
             p.dispatch_workgroups(live_wgs, 1, 1);
@@ -2242,7 +2438,7 @@ impl Backend for GpuSynth {
             p.dispatch_workgroups(1, 1, 1);
 
             if self.cfg.sort_voices {
-                // [126]
+                // [141]
                 let mut pair_parity = 0usize;
                 p.set_bind_group(0, &self.groups[self.parity].sort[pair_parity], &[]);
                 p.set_pipeline(&self.pipelines.sort_init);
@@ -2275,9 +2471,14 @@ impl Backend for GpuSynth {
             p.set_pipeline(&self.pipelines.compact_commit);
             p.dispatch_workgroups(1, 1, 1);
         }
-        self.parity ^= 1;
+        if self.solo_rows == 0 {
+            self.parity ^= 1;
+        }
 
         enc.copy_buffer_to_buffer(&self.out_buf, 0, &self.readback_out, 0, self.out_buf.size());
+        if let Some(dst) = &self.solo_dst {
+            enc.copy_buffer_to_buffer(&self.partials_buf, 0, dst, self.solo_offset, self.solo_bytes);
+        }
         enc.copy_buffer_to_buffer(
             &self.state_buf,
             0,
@@ -2296,9 +2497,9 @@ impl Backend for GpuSynth {
         Ok(())
     }
 
-    /// Wait for the queued block and take its audio and counters back. \[127\]
+    /// Wait for the queued block and take its audio and counters back. \[142\]
     fn finish(&mut self, out: &mut [f32]) -> Result<()> {
-        // [128]
+        // [143]
         let mut bufs: Vec<&wgpu::Buffer> = vec![&self.readback_out, &self.readback_state];
         let period_ns = self.timing.as_ref().map(|t| {
             bufs.push(&t.readback);
@@ -2306,7 +2507,7 @@ impl Backend for GpuSynth {
         });
         let waited = std::time::Instant::now();
         let reads = self.map_read_many(&bufs)?;
-        // [129]
+        // [144]
         if let Some(f) = self.in_flight.take() {
             let wait = waited.elapsed().as_secs_f64();
             if let Some((was, now)) = self.budget.observe(f.voices, f.parts, wait, f.at.elapsed().as_secs_f64()) {
@@ -2325,7 +2526,7 @@ impl Backend for GpuSynth {
         let state: &[u32] = bytemuck::cast_slice(&reads[1]);
         self.live = state[S_LIVE].min(self.cfg.max_voices);
         self.stolen = state[S_STOLEN] as u64;
-        // [130]
+        // [145]
         if state[S_DROPPED] != 0 {
             log::error!(
                 "the spawn pass dropped {} voices it should never have been handed",
@@ -2356,7 +2557,7 @@ impl Backend for GpuSynth {
         Ok(())
     }
 
-    /// With the pool empty nothing on the device carries into the next block: \[131\]
+    /// With the pool empty nothing on the device carries into the next block: \[146\]
     fn skip_block(&mut self) -> Result<()> {
         debug_assert_eq!(self.live, 0, "a block with voices alive cannot be skipped");
         self.env_phase = (self.env_phase + self.cfg.block_frames) % self.cfg.env_step_frames();
@@ -2382,7 +2583,7 @@ impl Backend for GpuSynth {
         self.last_timings.clone()
     }
 
-    /// The live voices and the counters beside them. \[132\]
+    /// The live voices and the counters beside them. \[147\]
     fn save_state(&mut self, w: &mut dyn std::io::Write) -> Result<()> {
         if self.in_flight.is_some() || self.planned != (0, 0) {
             bail!("a render can be saved only between blocks, with none submitted");
@@ -2398,7 +2599,7 @@ impl Backend for GpuSynth {
         e.u64(self.dropped);
         e.raw(&state);
         w.write_all(e.as_bytes())?;
-        // [133]
+        // [148]
         let piece = (SAVE_PIECE / 4) as usize;
         for f in 0..fields {
             let mut at = 0usize;
@@ -2473,11 +2674,11 @@ impl Backend for GpuSynth {
     }
 }
 
-/// Bytes of the voice pool read back or written at a time by `save_state` and \[134\]
+/// Bytes of the voice pool read back or written at a time by `save_state` and \[149\]
 const SAVE_PIECE: u64 = 64 << 20;
 
 impl GpuSynth {
-    /// `bytes` of `src` from `offset`, read back through a staging buffer made \[135\]
+    /// `bytes` of `src` from `offset`, read back through a staging buffer made \[150\]
     fn read_range(&self, src: &wgpu::Buffer, offset: u64, bytes: u64) -> Result<Vec<u8>> {
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("save readback"),
@@ -2512,7 +2713,7 @@ impl GpuSynth {
 mod tests {
     use super::{gates_capacity, pool_budget_for, pool_parts, pool_wgsl, PoolParts, POOL_BUDGET_FLOOR, POOL_PARTS_MAX};
 
-    /// The reduce pass's two shapes (`shaders/reduce.wgsl`) on partials a render \[136\]
+    /// The reduce pass's two shapes (`shaders/reduce.wgsl`) on partials a render \[151\]
     #[test]
     fn the_two_reduce_shapes_add_any_partials_to_the_same_bits() {
         use super::{compile, device, shader_source, Uniforms};
@@ -2627,7 +2828,7 @@ mod tests {
         }
     }
 
-    /// The budget by card, at wgpu's 2,047 MiB binding: an 8 GB card keeps \[137\]
+    /// The budget by card, at wgpu's 2,047 MiB binding: an 8 GB card keeps \[152\]
     #[test]
     fn the_pool_budget_is_three_quarters_of_the_card_between_2_gib_and_4_buffers() {
         let cap = (1u64 << 31) - 1;
@@ -2640,7 +2841,7 @@ mod tests {
         assert_eq!(pool_budget_for(Some(2 * GIB), cap), POOL_BUDGET_FLOOR);
         assert_eq!(pool_budget_for(Some(128 << 20), cap), POOL_BUDGET_FLOOR);
         assert_eq!(pool_budget_for(None, cap), POOL_BUDGET_FLOOR);
-        // [138]
+        // [153]
         assert_eq!(pool_budget_for(Some(16 * GIB), 1023 << 20), 4 * (1023u64 << 20));
     }
 
@@ -2653,7 +2854,7 @@ mod tests {
         pool_parts(bytes / 4, rate, CAP, 0, STORAGE, "Test GPU (Vulkan)")
     }
 
-    /// The 1.2.3 report: a 2,610 MiB pool at 48 kHz against a 2,047 MiB \[139\]
+    /// The 1.2.3 report: a 2,610 MiB pool at 48 kHz against a 2,047 MiB \[154\]
     #[test]
     fn a_pool_past_one_binding_is_split_and_one_that_fits_is_not() {
         let whole = |p: PoolParts| p.words_each as u64 * p.count as u64;
@@ -2665,12 +2866,12 @@ mod tests {
         // Four parts is the most: 8 GiB less a few bytes.
         let p = parts(POOL_PARTS_MAX as u64 * (CAP / 4) * 4, 48_000).unwrap();
         assert_eq!(p.count, POOL_PARTS_MAX);
-        // [140]
+        // [155]
         let p = pool_parts(1000, 48_000, CAP, 1200, STORAGE, "Test GPU (Vulkan)").unwrap();
         assert_eq!(p, PoolParts { words_each: 300, count: 4 });
     }
 
-    /// Past four parts it is refused, naming the rate that fits -- 44.1 kHz \[141\]
+    /// Past four parts it is refused, naming the rate that fits -- 44.1 kHz \[156\]
     #[test]
     fn a_pool_past_four_parts_is_refused_with_the_rate_that_fits() {
         let e = parts(9 << 30, 48_000).unwrap_err().to_string();
@@ -2685,7 +2886,7 @@ mod tests {
         assert!(e.contains("3 buffers") && e.contains("bind 14 storage buffers where it allows 13"), "{e}");
     }
 
-    /// The WGSL a split adds, and that a pool in one buffer adds none, which \[142\]
+    /// The WGSL a split adds, and that a pool in one buffer adds none, which \[157\]
     #[test]
     fn a_split_pool_adds_its_bindings_and_its_fetch_and_one_buffer_adds_nothing() {
         assert_eq!(pool_wgsl(PoolParts { words_each: 5, count: 1 }), [String::new(), String::new(), String::new()]);
@@ -2724,13 +2925,13 @@ mod tests {
         assert!((10_000_000..16_777_216).contains(&clamped), "{clamped}");
     }
 
-    /// A file reaching a new port grows the header with no more runs than \[143\]
+    /// A file reaching a new port grows the header with no more runs than \[158\]
     #[test]
     fn a_grown_header_keeps_the_runs_the_buffer_already_held() {
         assert_eq!(gates_capacity(10, 32768, META8, 2 * GIB).unwrap(), 32768);
     }
 
-    /// The count from the crash on 2026-09-13, as entries. It used to wrap the \[144\]
+    /// The count from the crash on 2026-09-13, as entries. It used to wrap the \[159\]
     #[test]
     fn too_many_runs_for_one_binding_is_an_error_that_names_the_sizes() {
         let e = gates_capacity(2_452_415_145, 32768, META, 2 * GIB).unwrap_err().to_string();
@@ -2738,7 +2939,7 @@ mod tests {
         assert!(e.contains("lower --block"), "{e}");
     }
 
-    /// The lost-device message is one paragraph. Its first version left runs \[145\]
+    /// The lost-device message is one paragraph. Its first version left runs \[160\]
     #[test]
     fn the_lost_device_message_reads_as_one_paragraph() {
         let m = super::device::lost(None, "device poll failed: WrongSubmissionIndex(324, 323)").to_string();
@@ -2746,7 +2947,7 @@ mod tests {
         assert!(m.contains("--block 1024") && m.ends_with("(wgpu: device poll failed: WrongSubmissionIndex(324, 323))"), "{m}");
     }
 
-    /// An integrated GPU with 5,000,000 voices (2026-10-05): the buffers asked for \[146\]
+    /// An integrated GPU with 5,000,000 voices (2026-10-05): the buffers asked for \[161\]
     #[test]
     fn buffers_past_the_memory_budget_are_said_so_with_the_voice_limit_that_fits() {
         use super::{memory_note, vram};
@@ -2774,7 +2975,7 @@ mod tests {
         assert!(memory_note(1, 1, 1, &vram::GpuMemory::default()).is_none());
     }
 
-    /// The guided renderer's device max is worked out from this estimate, so it has to \[147\]
+    /// The guided renderer's device max is worked out from this estimate, so it has to \[162\]
     #[test]
     fn an_estimate_is_what_a_render_allocates() {
         use super::{device, device_estimate, GpuSynth};
@@ -2817,7 +3018,7 @@ mod tests {
         }
     }
 
-    /// What fits: the usable memory is seven eighths of the card's, less what does not \[148\]
+    /// What fits: the usable memory is seven eighths of the card's, less what does not \[163\]
     #[test]
     fn the_voices_that_fit_in_memory_come_from_the_estimate() {
         use super::{device_estimate, max_voices_in_memory};
@@ -2833,7 +3034,7 @@ mod tests {
             let memory = gib << 30;
             let n = max_voices_in_memory(&cfg, &bank, memory);
             let probe = Config { max_voices: n, ..cfg.clone() };
-            // [149]
+            // [164]
             let usable = memory - memory / 8;
             assert!(est.fixed + est.per_slot * probe.pool_slots() as u64 <= usable, "{gib} GiB: {n}");
             let over = Config { max_voices: n + 2, ..cfg.clone() };
@@ -2847,7 +3048,7 @@ mod tests {
         assert!(max_voices_in_memory(&wide, &bank, 8 << 30) < max_voices_in_memory(&cfg, &bank, 8 << 30));
     }
 
-    /// The reason the split costs a stock render nothing: its largest block is \[150\]
+    /// The reason the split costs a stock render nothing: its largest block is \[165\]
     #[test]
     fn a_block_at_stock_settings_is_never_split() {
         let cfg = crate::config::Config::default();

@@ -1,0 +1,96 @@
+# Comments extracted from src/bin/kestrel/tui/merlin/flow.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/bin/kestrel/tui/merlin/flow.rs:5
+//! Merlin's home and the steps of a render in it.
+//!
+//! The steps are Kestrel's, where Kestrel's do what Merlin needs, and Merlin's
+//! where they do not: one MIDI that Merlin will take (31-EDO files and files
+//! past its limit are turned back here, before anything is loaded), one
+//! soundfont, a read-only look at what the render will ask of the disk in place
+//! of the voices, and the typed flags with the ones that mean nothing to
+//! Merlin refused. No checkpoint is ever asked for: a merlin render cannot be
+//! resumed.
+//!
+//! The render screen (`progress`) and the end screen (`end`) are Merlin's own.
+
+[2] src/bin/kestrel/tui/merlin/flow.rs:45
+/// A typed flag that means nothing to Merlin, or that it will not do, with why.
+/// `tokens` are the words typed at the last step.
+
+[3] src/bin/kestrel/tui/merlin/flow.rs:67
+/// Why Merlin will not take this MIDI, if it will not. `limit` is Merlin's
+/// limit on a file's bytes.
+
+[4] src/bin/kestrel/tui/merlin/flow.rs:81
+/// What the key store asks of the disk for a file of `size` bytes, and what the
+/// temporary folder has, as the lines of step 3.
+
+[5] src/bin/kestrel/tui/merlin/flow.rs:106
+/// What step 5 says of where the key store will go, once the folder is chosen:
+/// nothing when it is the temporary folder, the folder when it is that, and a
+/// warning when it is neither. `need` is the store's size.
+
+[6] src/bin/kestrel/tui/merlin/flow.rs:176
+/// Merlin's third step, in place of the voices: what the render will ask of the
+/// disk, and a moment to read it.
+
+[7] src/bin/kestrel/tui/merlin/flow.rs:306
+    // Nothing is kept of a render that did not finish: no checkpoint was asked
+    // for, so what is there is a header and no more.
+
+[8] src/bin/kestrel/tui/merlin/flow.rs:367
+/// What the window says when it fails: in red, and held, since a window opened
+/// by Kestrel closes the moment this returns and takes the message with it.
+
+[9] src/bin/kestrel/tui/merlin/flow.rs:399
+    /// What means nothing to Merlin, or that it will not do, is refused by name,
+    /// in either spelling of a value, with a reason; what is left to type is not.
+
+[10] src/bin/kestrel/tui/merlin/flow.rs:427
+    /// 31-EDO files and files at or past the limit are turned back, by their
+    /// own reasons, and a file under it goes on.
+
+[11] src/bin/kestrel/tui/merlin/flow.rs:455
+    /// The disk lines say the file, the store and the room, and add the warning
+    /// only when the temporary folder cannot hold the store.
+
+[12] src/bin/kestrel/tui/merlin/flow.rs:474
+    /// Step 5 says nothing when the store is in the temporary folder, where it
+    /// goes when it is not, and warns when there is no room anywhere.
+
+[13] src/bin/kestrel/tui/merlin/flow.rs:505
+    /// What the machine has, as the environment check would say it, without
+    /// the ffmpeg and update checks a test has no use for.
+
+[14] src/bin/kestrel/tui/merlin/flow.rs:531
+    /// The guided renderer's promise, for Merlin: every step and the render
+    /// write what the same command writes. And what Merlin does not take is
+    /// turned back where it is asked for: a second soundfont at step 2, and a
+    /// flag that means nothing to it at step 6, which ends the flow here, with
+    /// nothing written, because the script has no answer to give after it.
+    ///
+    /// One test, since the two renders are on the one GPU.
+
+[15] src/bin/kestrel/tui/merlin/flow.rs:568
+            // MIDI; the two soundfonts, which are turned back, then one;
+            // Enter at "before you start"; WAV; no flags; then Home.
+
+[16] src/bin/kestrel/tui/merlin/flow.rs:587
+        // A flag that means nothing to Merlin is refused, and with no answer
+        // left to give the flow ends where it asked.
+
+[17] src/bin/kestrel/tui/merlin/flow.rs:598
+        // "Before you start" is a step of its own: 0 there is home, and nothing
+        // after it is asked, no folder and no render.
+
+[18] src/bin/kestrel/tui/merlin/flow.rs:612
+    /// The typed-flags step, in Merlin's window: the render it makes is
+    /// Merlin's per-key render, on the adapter it names, with no voices flag
+    /// and no checkpoint, which a merlin render cannot use and would only warn
+    /// about.

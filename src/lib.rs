@@ -6,6 +6,7 @@
 
 pub mod backend;
 pub mod bank;
+pub(crate) mod coalesce;
 pub mod batch;
 pub mod config;
 pub mod cpu;
@@ -16,6 +17,7 @@ pub mod ffmpeg;
 pub mod fixed;
 pub mod gpu;
 pub mod limiter;
+pub mod merlin;
 pub mod midi;
 pub(crate) mod mix;
 pub mod mts;
@@ -28,6 +30,7 @@ pub mod session;
 pub mod sf2;
 pub mod sfz;
 pub(crate) mod single;
+pub mod slice;
 pub mod snap;
 pub(crate) mod stems;
 pub mod testkit;

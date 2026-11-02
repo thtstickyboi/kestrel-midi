@@ -160,6 +160,6 @@
     /// `jobs` jobs, the first of which is job `first_job` (from 0). Not called
     /// for a set that was preloaded.
 
-[23] src/batch.rs:593
+[23] src/batch.rs:610
         // Loaded with the settings the plan settled, as `session::run` would
         // load it for this job alone.

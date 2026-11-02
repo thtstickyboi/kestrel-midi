@@ -1,0 +1,45 @@
+# Comments extracted from src/bin/kestrel/tui/merlin/end.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/bin/kestrel/tui/merlin/end.rs:5
+//! What Merlin says when a render ends, in the three ways it can.
+//!
+//! Done: where the file is and how big, how long the audio and the render
+//! took, the notes, the adapter and the flags, and anything the render had to
+//! say on the way (a feature the key parser does not build yet, a key store
+//! that fell back to reading the file). Stopped: said so, and that nothing was
+//! kept, since a merlin render cannot be resumed. Failed: the message as it
+//! came, which for a limit says which one and by how much, and where the log is.
+//!
+//! None of Kestrel's voice rows: Merlin has no voices, and its peak level
+//! counter is not fed on this path, so it is not shown.
+
+[2] src/bin/kestrel/tui/merlin/end.rs:22
+/// The panel for a render's end, `inner` columns wide. `problems` are what the
+/// render logged at warning level or above, which a person is told in the
+/// panel and not left to find in a log.
+
+[3] src/bin/kestrel/tui/merlin/end.rs:92
+/// Seconds as `12.3 s` under a minute, then `m:ss`, then `h:mm:ss`: a render of
+/// the largest file is most of an hour.
+
+[4] src/bin/kestrel/tui/merlin/end.rs:157
+    /// Done says what was written, how long the audio and the render took, and
+    /// the notes, and none of a voice renderer's rows.
+
+[5] src/bin/kestrel/tui/merlin/end.rs:173
+    /// What the render noted is in the panel, wrapped, under its own heading,
+    /// and not when there was nothing.
+
+[6] src/bin/kestrel/tui/merlin/end.rs:188
+    /// A failure's own words are not said twice; anything else the render
+    /// logged is.
+
+[7] src/bin/kestrel/tui/merlin/end.rs:209
+    /// Failed gives the message as it came, so a limit's words (which one, and
+    /// by how much) are the person's, and says there is no resume.

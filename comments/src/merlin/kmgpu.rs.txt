@@ -1,0 +1,362 @@
+# Comments extracted from src/merlin/kmgpu.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/merlin/kmgpu.rs:5
+//! Key-major merlin on the device: a window of the song at a time, every key's
+//! groups convolved into per-filter buses, their heads gathered onto them, the
+//! buses filtered and mixed, and only the window's master read back. The
+//! passes are `shaders/kmconv.wgsl`.
+//!
+//! ## The loop
+//!
+//! [`KmGpu::begin`] sizes the buses. For each window, [`KmGpu::key`] takes one
+//! key's kernels, its groups' impulses and its head pieces, in key order, and
+//! [`KmGpu::end_window`] runs the biquads, mixes and hands the window back.
+//! Everything a key adds to a bus lands in key order and, within a key, in a
+//! fixed order -- the convolution chunk by chunk, then the heads gathered page
+//! by page -- so the bytes are a pure function of the input.
+//!
+//! ## Buses, as time-major has them
+//!
+//! A note reaches the output through its velocity's biquad, so the groups of a
+//! key are by filter and the buses are one per filter the key uses,
+//! `[filters][window + carry]` frames of `left, right`. The biquad then runs once per bus over the
+//! song, serially as a biquad must, its state carried from window to window --
+//! which is cheap because a bus is one song long, where filtering each (key,
+//! filter) group on its own runs the song once per group (9,813 groups on the
+//! 44.75 M-note file, 2026-10-22).
+//!
+//! A block's tail runs up to `n` frames past its window, into the carry, which
+//! the next window starts with. A head is clipped to its window
+//! (`HeadNote::clip`), so it needs no carry.
+//!
+//! ## The transform
+//!
+//! `merlin::fft::Fft` does one transform per workgroup and so stops at 2048
+//! points. The large one is the four-step: `n = N1 * n2`, a batched
+//! `n2`-point transform down the columns, a twiddle, a batched `N1`-point
+//! transform along the rows, with tiled transposes between
+//! (`examples/conv_bench.rs` measured it and checked it against a direct
+//! convolution). The twiddles come from an f64 table rounded once, as
+//! `fft.rs`'s do. The spectrum stays in the four-step's own order: the
+//! kernels' are in the same order and the inverse undoes it.
+//!
+//! Every transform goes through `Fft::encode_exact`, whose batch is the
+//! dispatch size, so a chunk can hold transforms of several batch counts in
+//! one submit -- `Fft::encode`'s per-direction uniform would give them all the
+//! last count written.
+
+[2] src/merlin/kmgpu.rs:58
+/// Signals one column-pass dispatch holds: it runs `signals * N1` transforms
+/// and a dispatch dimension stops at 65,535.
+
+[3] src/merlin/kmgpu.rs:65
+/// A (block, entry) pair with fewer impulses than this is added in the time
+/// domain (`kmconv.wgsl`'s `direct`) rather than transformed. Swept on the
+/// filter grid, 2026-10-31: flat from 256 to 512, slower either side.
+
+[4] src/merlin/kmgpu.rs:73
+/// Windows a bus goes on being filtered and mixed after the last one that
+/// wrote to it: one drains its carry, which reaches less than a window, and
+/// one rings out its filter, `RING_OUT` being well under a window.
+
+[5] src/merlin/kmgpu.rs:81
+/// The device's own time per kind of work, with `--profile`, from timestamps
+/// at each submission's start and end. `secs`, by kind: kernel spectra, direct,
+/// convolution, heads, the master's growth, key starts, sustains, and filters,
+/// mix and carry.
+
+[6] src/merlin/kmgpu.rs:95
+/// Sustains the kernel builder renders a chunk, and the bytes of rows a
+/// chunk lands in before they are copied into the pool.
+
+[7] src/merlin/kmgpu.rs:100
+/// A params table for the kernel builder, its jobs' commands and frames, and
+/// each job's word in the pool.
+
+[8] src/merlin/kmgpu.rs:111
+/// One group's impulses, `(entry, frame from the window's start, [left,
+/// right] with the weight in)`, in the order they were planned, and its bus.
+
+[9] src/merlin/kmgpu.rs:116
+    /// Impulses a CC120 cuts in their tails, always added in the time domain,
+    /// with the frames from each to its cut: a transform has no way to stop a
+    /// kernel part way.
+
+[10] src/merlin/kmgpu.rs:186
+    /// A subset of the entries' kernels, `(offset, length)` in the kernel
+    /// pool, to transform at `n`.
+
+[11] src/merlin/kmgpu.rs:198
+/// A kernel as the device cuts it from the pool (`kmconv.wgsl`'s
+/// `load_kernels`): `len` frames from `at`, of which `valid` exist, the first
+/// `plain` as they are and each after scaled by `r^(rel0 + f - plain)`.
+
+[12] src/merlin/kmgpu.rs:226
+/// A pair's entry in `mac` with this bit set has panned impulses on a stereo
+/// kernel, so it takes the full product.
+
+[13] src/merlin/kmgpu.rs:230
+/// Kernels laid end to end onto the end of `pool`, and each one's descriptor,
+/// in their order.
+
+[14] src/merlin/kmgpu.rs:242
+/// A sparse impulse: its frame from the window's start, its entry, its gain,
+/// and where a CC120 stops it.
+
+[15] src/merlin/kmgpu.rs:246
+/// One group's impulses sorted once by `(block, entry, offset, planned
+/// order)` and parted by how many share their (block, entry) pair: the dense
+/// pairs for the transform, the rest for `direct`. Impulses that share a frame
+/// of an entry are merged in planned order, in f64.
+
+[16] src/merlin/kmgpu.rs:264
+        // A key's impulses are mostly in one or two groups, so a large group
+        // sorts on every thread. The keys are distinct (the planned index is
+        // in them), so the order is the same either way.
+
+[17] src/merlin/kmgpu.rs:314
+/// Frames in one chunk of the block-parallel recurrence. `kmconv.wgsl`'s
+/// `CHUNK`; a window's frames are a multiple of it.
+
+[18] src/merlin/kmgpu.rs:318
+/// Each filter's powers of its state matrix `A = [[-a1, 1], [-a2, 0]]`, in
+/// f64 and rounded once: the first row of `A^k` for `k < BQ_CHUNK`, then
+/// both rows of `A^BQ_CHUNK`, `BQ_CHUNK + 2` pairs a filter. A filter that
+/// is off gets zeros, which nothing reads.
+
+[19] src/merlin/kmgpu.rs:344
+/// Chunks each filter's state takes to fall a billion times over, from its
+/// state matrix `A = [[-a1, 1], [-a2, 0]]`: how long a bus goes on being
+/// filtered past its last input. Zero for a filter that is off, and
+/// `u32::MAX` for one that does not settle inside `RING_OUT`.
+
+[20] src/merlin/kmgpu.rs:378
+    /// `(rows, cols, mode)`: `(n2, N1, 0)`, `(N1, n2, 1)`, `(n2, N1, 2)`,
+    /// `(N1, n2, 0)`.
+
+[21] src/merlin/kmgpu.rs:478
+    /// The kernel builder on this device, which renders a key's sustains
+    /// straight into its pool; with the bank's sample pool it reads.
+
+[22] src/merlin/kmgpu.rs:506
+    /// The song's master, every key added in at its windows' frames, and
+    /// how many frames it holds.
+
+[23] src/merlin/kmgpu.rs:509
+    /// While a channel's bent notes render, what the windows add into in place
+    /// of the master, in `tau`, and the frames it has; and the runs of the
+    /// clock that reads it back.
+
+[24] src/merlin/kmgpu.rs:516
+    /// `kmconv.wgsl`'s powers of each filter's state matrix, and the
+    /// chunks' states for the block-parallel recurrence.
+
+[25] src/merlin/kmgpu.rs:522
+    /// Which pages of each bus hold anything, `[buses][stride / PAGE]`, the
+    /// carry's included: what a window's end walks, so a bus costs what was
+    /// written on it and not its window's length. A bus's window is mostly
+    /// silence on sparse files: 21% of it is written on one, 26% on another.
+
+[26] src/merlin/kmgpu.rs:527
+    /// Chunks each bus's filter rings for past its last input (`ring_chunks`),
+    /// and how many of those each still has as the next window starts.
+
+[27] src/merlin/kmgpu.rs:531
+    /// A window's end's lists: the cells to filter, the cells a start state
+    /// reaches, the buses to mix by page, and the pages to move and to clear.
+
+[28] src/merlin/kmgpu.rs:568
+/// One entry point's shader: everything before the first `//#section` line --
+/// the structs every pass shares -- and that entry point's own section. Each
+/// pass gets a module of its own because the passes reuse binding numbers for
+/// different variables.
+
+[29] src/merlin/kmgpu.rs:740
+    /// The transform size for kernels up to `lmax` frames: a power of two at
+    /// least twice as long, so a block's hop is at least half of it.
+
+[30] src/merlin/kmgpu.rs:751
+    /// Frames a window can hold with `filters` buses inside `bytes`, `carry`
+    /// past each: a whole number of pages, and at least the carry.
+
+[31] src/merlin/kmgpu.rs:794
+    /// The four-step forward (or inverse) transform of `count` signals of `n`
+    /// points in `data`, using `scratch` as the other half of each transpose.
+
+[32] src/merlin/kmgpu.rs:837
+    /// Size the buses for `filters` filters with these coefficients (`None`
+    /// passes through), `frames` a window and `carry` past each, all zero.
+
+[33] src/merlin/kmgpu.rs:903
+    /// More filters than the buses were made for, between two windows: the
+    /// buses there are keep what they carry into the next window and their
+    /// filters' state, and the new ones start empty. In place when the buses'
+    /// buffer has the room, as a streamed key's does.
+
+[34] src/merlin/kmgpu.rs:983
+    /// A new key whose buses are its own filters, `coefs` in the order its
+    /// pieces name them (`None` passes through): the last key's buses and
+    /// every filter's state cleared, then buses, coefficients and state for
+    /// these alone. So the buses are bounded by the filters one key uses,
+    /// however many the file makes.
+
+[35] src/merlin/kmgpu.rs:992
+    /// `start_key_with`, the buses' buffer holding `room` filters however few
+    /// the key starts with, so `grow` adds the rest in place.
+
+[36] src/merlin/kmgpu.rs:1002
+        // Laid out at another stride, so what the last key left anywhere in
+        // them is cleared, not only its own buses.
+
+[37] src/merlin/kmgpu.rs:1054
+    /// Count `bytes` handed to the queue, and once more than `STAGING_BYTES`
+    /// are waiting, wait for the device: `write_buffer`'s staging is given back
+    /// only as the work that reads it finishes, so without this a dense
+    /// window's whole upload sits in host memory until the window ends.
+
+[38] src/merlin/kmgpu.rs:1064
+            // Wait for what was handed over up to the last time, not for
+            // everything: the device works on this period's while the host
+            // makes the next, and at most two periods' staging are held.
+
+[39] src/merlin/kmgpu.rs:1084
+    /// One key's part of the window: its groups' convolutions onto their
+    /// buses, then its heads. `kernels` are the key's entries in id order;
+    /// `sustains` its waveforms, which the heads' `base` and `cap` already
+    /// point into as if laid end to end in this order.
+
+[40] src/merlin/kmgpu.rs:1165
+    /// Render the next keys' sustains here, on the device, with `bank`'s
+    /// sample pool uploaded beside the convolution's buffers.
+
+[41] src/merlin/kmgpu.rs:1184
+    /// The pool the next windows read, rendered here: job `j`'s sustain at
+    /// word `at[j]`, `total` words in all, through `params`.
+
+[42] src/merlin/kmgpu.rs:1197
+        // A bigger pool only once the device is done with the smaller one, so
+        // the two are never held at once.
+
+[43] src/merlin/kmgpu.rs:1223
+    /// The pool the next windows read by offset: the sustains the heads'
+    /// `base` and `cap` name, which the kernel table cuts kernels from too, and
+    /// any kernels laid in whole.
+
+[44] src/merlin/kmgpu.rs:1236
+    /// `key`'s host work, on any thread: everything the device is handed,
+    /// sorted, merged, laid out and checked, in the order `put` hands it over.
+
+[45] src/merlin/kmgpu.rs:1252
+        // What goes up: the impulses and the heads; the kernels and sustains
+        // are in the pools.
+
+[46] src/merlin/kmgpu.rs:1319
+    /// The spectra of the kernels `desc` names in the kernel pool (offset and
+    /// length each) into `k`, at `n`.
+
+[47] src/merlin/kmgpu.rs:1358
+        // Each group sorted, parted and merged once, the groups side by side:
+        // each one's result depends on its impulses alone.
+
+[48] src/merlin/kmgpu.rs:1362
+        // The key's entries in subsets that fit one buffer, in id order: each
+        // subset's spectra once, and every group's dense pairs on it, gathered
+        // in (group, block, entry) order.
+
+[49] src/merlin/kmgpu.rs:1400
+        // Short kernels apart from long ones: a page walks every impulse its
+        // list's longest kernel could reach it from, so a segment beside a
+        // release tail would be read for the tail's length.
+
+[50] src/merlin/kmgpu.rs:1433
+    /// The sparse pairs' impulses added onto their buses in the time domain,
+    /// after the key's transforms: each group's in (frame, entry) order, merged
+    /// (`Prepped::sparse`), and every page they reach given one item naming the
+    /// run of them that can reach it. `rec` makes an impulse's record from its
+    /// frame, kernel row, gain and stop; hands back the records, items and rows.
+
+[51] src/merlin/kmgpu.rs:1469
+            // An impulse can reach a page if it starts before the page ends
+            // and no more than the group's longest kernel before it begins.
+
+[52] src/merlin/kmgpu.rs:1524
+    /// Dense pairs of one subset of the key's entries, `(group, block, entry)`
+    /// in that order, and their impulses `(pair, offset, gain)` in pair order,
+    /// each group onto the bus that starts at its `bases` row: in chunks that
+    /// fill a buffer whatever group the pairs come from.
+
+[53] src/merlin/kmgpu.rs:1553
+            // A stereo kernel is `left + i * right`, so its impulses go up as
+            // mid and side, and only a pair with any side takes the full
+            // product. See `mac`.
+
+[54] src/merlin/kmgpu.rs:1570
+            // Overlap-add, even blocks then odd: only neighbouring blocks of a
+            // group overlap, and groups are on different buses, so neither pass
+            // has two blocks writing one frame.
+
+[55] src/merlin/kmgpu.rs:1650
+    /// A key's heads onto their buses: filed by (page, bus), in their order
+    /// within each, and gathered one workgroup an item. Pages in order, buses
+    /// in order, heads in their planned order: the order each frame is summed
+    /// in. A count and a fill, since the cells are few and the heads many: a
+    /// sort of every (page, bus, head) was over half of this on the densest
+    /// file.
+
+[56] src/merlin/kmgpu.rs:1726
+    /// A new key: the buses the last one wrote, and every filter's state, back
+    /// to zero. The rest of the buses were never written since the last time.
+
+[57] src/merlin/kmgpu.rs:1745
+    /// The master at `need` frames at least, grown by half again so a song
+    /// is not copied once a window.
+
+[58] src/merlin/kmgpu.rs:1783
+    /// Back to the song's master, and what the windows added since `warp_begin`
+    /// read into it at the clock `w`, from `tau` `lo` to `hi`.
+
+[59] src/merlin/kmgpu.rs:1813
+    /// The window's end for the current key, the window starting at frame
+    /// `at` of the song: its buses through their filters, mixed and added into
+    /// the song's master there, and their carry moved on to the key's next
+    /// window. Only the cells of its buses that hold anything: those written,
+    /// and those a filter still rings into, so a key costs its notes. Nothing
+    /// is read back.
+
+[60] src/merlin/kmgpu.rs:1831
+        // The cells to filter, written in this window; and every cell with
+        // anything in it after that, which a start state reaches. Past a
+        // filter's ring a state is a billionth of what it was and stops.
+
+[61] src/merlin/kmgpu.rs:1867
+        // What the window leaves: its cells cleared, and the carry's moved to
+        // the next window's start, where they count as written.
+
+[62] src/merlin/kmgpu.rs:1973
+        // A bus with nothing new for `QUIET_WINDOWS` has drained its carry and
+        // rung out: it goes quiet, costing nothing until it is written again,
+        // so a sparse key costs its notes and not the song's length.
+
+[63] src/merlin/kmgpu.rs:1983
+        // The window's work counts toward the throttle, as uploads do: a
+        // sparse key uploads next to nothing and would otherwise queue windows
+        // without limit.
+
+[64] src/merlin/kmgpu.rs:1989
+    /// The song's master, its first `frames`, back as interleaved stereo:
+    /// the one readback of a render.
+
+[65] src/merlin/kmgpu.rs:2036
+    /// A biquad's state with nothing going in, `frames` on from each of the
+    /// two unit states: the largest of what is left.
+
+[66] src/merlin/kmgpu.rs:2058
+    /// A filter's ring is long enough and not much more, from a low resonant
+    /// one to one near the top; off, it has none; and a filter that would ring
+    /// past `RING_OUT` is never treated as settled.

@@ -1,0 +1,427 @@
+# Comments extracted from src/merlin/plan.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/merlin/plan.rs:5
+//! Turning note-ons into impulses.
+//!
+//! This is the host side of the development notes section 2. A note stops being a voice
+//! and becomes three numbers -- which cached waveform, which frame, how loud --
+//! and the backend's cost stops depending on how many of them there are.
+//!
+//! Two jobs, and they are separate on purpose:
+//!
+//! * [`EntryTable`] interns `(region, variant, bend, release bucket)` into the
+//!   dense entry ids the kernel cache is indexed by. This is where section 3b
+//!   earns its keep: **duration is not in the key**, it is a gain.
+//! * [`BlockPlan`] assembles one block's impulses into the three arrays
+//!   `Fdl::encode_block` wants. Fiddlier than it looks, because the firing list
+//!   is grouped by bus, ascending within each group, and the impulses index
+//!   *rows of that list* rather than entry ids.
+//!
+//! Nothing here talks to the GPU or to the driver. It is the piece that decides
+//! what the backend is asked to render, and it is worth being able to test that
+//! without either.
+
+[2] src/merlin/plan.rs:29
+/// What makes two notes share a cached **waveform**.
+///
+/// Deliberately *not* the region, and deliberately **without the filter**.
+///
+/// The reference bank is 128 velocity groups that are byte-identical apart
+/// from `lovel`/`hivel`, all including the same 88-region keymap -- so key and
+/// velocity select 22,528 different *regions* that between them play 88
+/// samples. Keying on the region therefore multiplies the cache by 128 for
+/// nothing, which is what the first real-material run measured: one new
+/// waveform every 6.3 notes.
+///
+/// the development notes section 3(c) is the fix: velocity's amplitude folds into
+/// the impulse gain, and its cutoff is an LTI filter that moves to a per-bus
+/// biquad. So this hashes what the sample and the envelope are, by value, and
+/// omits `b0/b1/a1/a2` and `RP_FILTER`.
+///
+/// **Why moving the filter off the note is sound**, since section 3(c)'s stated
+/// reason is not quite the operative one. `cpu.rs` applies the filter to the
+/// *enveloped* signal (`x = s * g`, then the biquad), so linearity does not let
+/// the filter be pulled out of one note's envelope. What makes it work is that
+/// each voice's input is zero before its own note-on, so a filter reset per
+/// voice at onset and a single bus filter running continuously produce the same
+/// output -- provided every note on the bus shares the coefficients, which is
+/// what the bus *is*.
+
+[3] src/merlin/plan.rs:56
+    /// The right half of a stereo sample, `smp_base` for a mono waveform. See
+    /// `keyrec::merge_stereo`.
+
+[4] src/merlin/plan.rs:66
+    /// Envelope and LFO, **by value**: attack, decay, sustain, release and the
+    /// four LFO words. By value rather than by params index, because two rows
+    /// that differ only in their filter have to collapse to one waveform, and
+    /// that is the entire point.
+
+[5] src/merlin/plan.rs:71
+    /// The modulation envelope, also by value, and zero when the region drives
+    /// none.
+    ///
+    /// `env` above does not cover it: the modulation envelope is a second
+    /// envelope with its own times, and `modEnvToPitch` puts it *inside* the
+    /// waveform. Two params rows with identical amplitude envelopes and
+    /// different modulation envelopes are two waveforms, and without this they
+    /// hashed to one -- the row index is deliberately not in this key, so
+    /// nothing else would have separated them.
+    ///
+    /// Reachable through a bank whose modulation envelope varies where its
+    /// amplitude envelope does not -- and only through that. CC71-CC75 do
+    /// *not* widen it: `make_menv` moves only the cutoff terms with a
+    /// `ParamMod`, never the times or `modEnvToPitch`, so a variant and its
+    /// base share this half of the key.
+    ///
+    /// Zeroed rather than omitted when the bank drives no modulation envelope,
+    /// which is the reference bank, so this costs those banks nothing.
+    ///
+    /// The times and `modEnvToPitch` only. The cutoff terms beside them --
+    /// `fc_cents`, `q_gain`, `q_inv_2q` -- move a filter, and merlin renders a
+    /// note's filter statically on its bus, so keying on them would split
+    /// waveforms over a difference the cached waveform does not carry. What
+    /// merlin does *not* render there is a `modEnvToFilter` sweep, and that is
+    /// a limitation to record rather than a key to widen. See the development notes.
+
+[6] src/merlin/plan.rs:100
+    /// `menv` is the region's modulation-envelope row, or `None` when the bank
+    /// drives none or the config has it off -- the two cases where it cannot
+    /// reach the waveform.
+
+[7] src/merlin/plan.rs:156
+            // Zeroed when the filter is off, so every unfiltered region lands
+            // on one bus instead of one per stale coefficient set.
+
+[8] src/merlin/plan.rs:175
+/// The biquad the per-key render runs a region's bus through, `None` with its
+/// filter off: the region's own, or with `cents` above zero the nearest on a
+/// grid of that many cents. See `Config::merlin_filter_cents`.
+
+[9] src/merlin/plan.rs:189
+/// `c` with its cutoff on a `cents` grid of `log2(w)`, its resonance on
+/// `Q_GRID_CB`. Read back from the coefficients, so a cutoff a controller moved
+/// lands on the grid the same as a bank's own. Anything that does not read back
+/// as `bank::biquad_lowpass` built it is left alone.
+
+[10] src/merlin/plan.rs:220
+/// Interns keys into dense ids, in first-seen order.
+///
+/// First-seen rather than hash order so two runs over one file build the same
+/// table -- which byte-identity needs and `HashMap` iteration would not give.
+
+[11] src/merlin/plan.rs:276
+    /// The id for `key`, assigning a new one if this is the first sighting.
+    ///
+    /// Ids are handed out in first-seen order, which makes them a function of
+    /// the event stream rather than of hashing. Two runs over the same file
+    /// therefore build the same table, which the byte-identity requirement
+    /// needs and a `HashMap` iteration order would not give.
+
+[12] src/merlin/plan.rs:309
+/// How a note's duration becomes a release bucket and a gain.
+///
+/// `width` is the bucket size in frames. The dev notes section 3b derives it from
+/// the release's dynamic range: cap a bucket at ~10 dB of a ~100 dB release and
+/// that is ten buckets over the release, i.e. `tail / 10`, which is 182 ms on
+/// the reference bank. `entry_probe --post-3b` measures with the same width, so
+/// the entry counts it reports are the ones this produces.
+
+[13] src/merlin/plan.rs:322
+    /// From a release tail in seconds and the count section 3b's dynamic-range
+    /// cap allows.
+
+[14] src/merlin/plan.rs:329
+    /// The bucket a note of duration `d` frames belongs to, and that bucket's
+    /// reference point `Dj`.
+    ///
+    /// `Dj` is the bucket's **start**, so `Dj <= d` always. That keeps the head
+    /// correction over `[0, d)` -- the region the cost model assumes -- at the
+    /// price of the gain scalar amplifying rather than attenuating. See
+    /// the development notes section 4.
+
+[15] src/merlin/plan.rs:341
+    /// The same, with the reference point held back to where the region's
+    /// amplitude envelope has actually settled.
+    ///
+    /// Bucket 0's start is frame 0, which is inside the attack of every region
+    /// that has one -- and there is no exponential to reference until the
+    /// envelope stops moving, so `Kernel::at_release` refuses it. Clamping to
+    /// `flat_from` is what makes the first bucket usable at all.
+    ///
+    /// The bucket index is *not* clamped, only the reference point: `j` is what
+    /// the entry key carries, and two regions with different `flat_from` are
+    /// already different entries because the region is in the key.
+    ///
+    /// One consequence: for a note shorter than `flat_from`, `Dj > D`, and the
+    /// head correction's region grows from `[0, D)` to `[0, Dj)`. Such a note is
+    /// shorter than its own attack, so it is degenerate either way.
+
+[16] src/merlin/plan.rs:361
+    /// Section 3b's collapse: `env(D) / env(Dj) * r^(Dj - D)`.
+    ///
+    /// Computed in f64, and signed both ways. `Dj < D` is the ordinary case and
+    /// amplifies, because a kernel released earlier is quieter in the tail;
+    /// `Dj > D` happens only for a note shorter than its region's attack, via
+    /// [`Self::reference`], and attenuates.
+    ///
+    /// **`env_ratio` was missing until 2026-09-10, and it was merlin's loudest
+    /// defect.** Writing the two out for `n` past both release points:
+    ///
+    /// ```text
+    ///   truth[n]    = sample[n] * env(D)  * r^(n-D+1)
+    ///   kernel_j[n] = sample[n] * env(Dj) * r^(n-Dj+1)
+    /// ```
+    ///
+    /// so the ratio carries `env(D) / env(Dj)` as well as the exponential. For
+    /// `D >= flat_from` both envelopes are the sustain level and the ratio is
+    /// one, which is every note on a bank whose attack is a millisecond -- so
+    /// the reference bank never showed it. For a note that ends inside its
+    /// attack it is well below one, and leaving it out **plays the note out at
+    /// the level it would have reached had it been held** rather than the level
+    /// it actually got to. Measured against `cpu.rs` before the fix: **+10.4 dB
+    /// on a 40-frame note** against a 188-frame attack.
+    ///
+    /// The energy is in the tail, not in `[D, Dj)`: that window is 148 frames
+    /// against a release of 12,000. An earlier attempt corrected the window and
+    /// left the scalar alone, and measured *worse* -- see the entry in TODO.
+    ///
+    /// Callers pass the ratio rather than the params because this type knows
+    /// nothing about a bank; `MerlinSynth::plan_note` reads it from the same
+    /// params table the kernel was rendered with, which is the one that has the
+    /// controller variant applied.
+
+[17] src/merlin/plan.rs:395
+            // An instant release. Every duration in the bucket is the same
+            // silence after `Dj`, so there is nothing to scale.
+
+[18] src/merlin/plan.rs:404
+/// One note, already resolved to an entry and a filter bus.
+///
+/// **16 bytes, and it was 24 until 2026-09-09.** These are bucketed by the
+/// partition step they fire in and held until it comes round, so the list is as
+/// long as everything planned and not yet emitted: 84.8 M records, 1,941 MiB,
+/// on the largest test file. Two of the three fields below are narrowed on that
+/// account, and the reasoning is on each.
+
+[19] src/merlin/plan.rs:414
+    /// Frame of the note-on **within its step**, not an absolute frame.
+    ///
+    /// The ring slot a note is filed in is `start / p`, so the step already
+    /// says everything the absolute frame did except this offset, and the
+    /// offset is under `p`, which `MerlinSynth::new` fixes at 2048 or less.
+    /// `BlockPlan::build` is handed one slot and the frame it starts at, so it
+    /// adds the two back rather than subtracting them -- and the filter it used
+    /// to apply, `start` inside the block, is now true by construction.
+
+[20] src/merlin/plan.rs:423
+    /// Which filter this note's velocity selected. Its two output buses are
+    /// `filter * 2` and `filter * 2 + 1`, and `MerlinSynth::new` refuses a
+    /// filter count whose buses would not fit 16 bits.
+
+[21] src/merlin/plan.rs:429
+    /// Identical notes this impulse stands for (THE PLAN, Phase 1: per run, not
+    /// per note): copies struck together and released together. The scatter
+    /// multiplies the rounded fixed-point value by it, so a run fires exactly
+    /// what that many notes of one did. Cut at `u16::MAX`.
+
+[22] src/merlin/plan.rs:447
+/// A planned note with its sort key built, which is what `rebuild` sorts.
+///
+/// 16 bytes: the key, then both channels' gains with a dropped channel (zero
+/// gain, or a bus past `buses`) already zeroed, so the later passes need only
+/// ask `gain != 0.0`.
+
+[23] src/merlin/plan.rs:468
+/// One bus that has something on it: which run and channel, and how many rows
+/// and impulses it holds.
+
+[24] src/merlin/plan.rs:485
+/// Buffers `BlockPlan::rebuild` reuses from one step to the next.
+///
+/// A dense step holds hundreds of thousands to millions of planned notes, and
+/// building a plan used to allocate a 20-byte tuple per note-channel, then an
+/// output `Vec` grown by pushes, every step. Those are tens of megabytes of
+/// fresh pages each time on the steps that matter, which Windows hands out
+/// zeroed and faults in one 4 KiB page at a time.
+
+[25] src/merlin/plan.rs:500
+/// What the caller knows about the largest values in a step without looking:
+/// the highest entry id the table can hold and the deepest kernel the ring can.
+///
+/// These size the packed sort key, and they are bounds rather than measurements
+/// on purpose. Measuring them was a parallel reduction over every note before
+/// anything else could start, and the first rayon region of a step is the one
+/// that pays to wake the pool: 115 us of a 397 us build at 28,000 notes in a
+/// microbenchmark, and 1.77 s of the 44.75 M-note test file on a loaded
+/// machine, for numbers the entry table and the ring already have. A note that
+/// exceeds them is not mis-sorted: see `rebuild`.
+
+[26] src/merlin/plan.rs:517
+    /// The tightest bounds for these notes, by looking. For callers that are not
+    /// in a hot loop -- tests, mainly.
+
+[27] src/merlin/plan.rs:529
+/// Key for a note that has nothing to play, and for a note that is out of
+/// `PlanBounds`. Both sort after every real key, and `INVALID` before `DROPPED`.
+
+[28] src/merlin/plan.rs:534
+/// Bit widths for the packed sort key. `None` when they do not fit in 62 bits,
+/// which no planner in this tree reaches (11 + 20 + 8 + 10 bits at the defaults)
+/// and which has an answer anyway.
+
+[29] src/merlin/plan.rs:539
+    /// Left-shift of each field. Frame is the lowest, then the entry, then the
+    /// inverted depth, then the filter.
+
+[30] src/merlin/plan.rs:554
+        // 62 rather than 64, so that the two keys above are ones no note can
+        // have.
+
+[31] src/merlin/plan.rs:571
+    /// Assemble the notes starting in `[block_start, block_start + frames)`.
+    ///
+    /// A note feeds two buses -- `filter * 2` for left and `+ 1` for right --
+    /// so `buses` is twice the distinct filter count.
+    ///
+    /// **Bucketed, not scanned per bus.** The first version looped over buses
+    /// and filtered the whole note list each time, which is fine at two buses
+    /// and quadratic at the 256 that section 3(c)'s per-velocity biquads need:
+    /// 256 passes over thousands of notes, every block. This sorts once
+    /// instead.
+    ///
+    /// `depth` is the entry's cached partition count. It leads the sort,
+    /// descending, because entries have their own kernel lengths: sorted that
+    /// way the rows alive at lag `k` are a prefix of the bus's range, and the
+    /// multiply-accumulate stops at the first one that is not rather than
+    /// testing every row against every lag. The entry id is the tiebreak, so
+    /// the order is still a total one fixed by the input.
+    ///
+    /// Allocates its buffers fresh; the render loop keeps a [`PlanScratch`]
+    /// and a plan of its own and calls [`Self::rebuild`] instead.
+
+[32] src/merlin/plan.rs:604
+    /// [`Self::build`] into `self`, reusing its buffers and `scratch`'s.
+    ///
+    /// **Sorts notes, not note-channels.** A note feeds a bus pair, and within
+    /// one bus the order is (depth descending, entry, frame) -- the same for
+    /// the left bus and the right. So the notes are sorted once, by
+    /// (filter, depth descending, entry, frame), and each bus is that order
+    /// with the notes that are silent on it skipped. That is half the items the
+    /// sort used to take (81.1 M notes against 119.1 M note-channels over the
+    /// 44.75 M-note test file), and it makes a filter's notes one contiguous
+    /// run, which is what lets the output be written run by run in parallel.
+    /// The key is packed into a `u64` -- a field is only as wide as `bounds`
+    /// and the partition say it can be -- so the sort compares one integer
+    /// where it compared a four-field tuple with a `Reverse` in it. A note that
+    /// does not fit its bounds is marked as it is keyed and the step is built
+    /// again by the unpacked path, so the bounds are a speed and never a
+    /// limit.
+    ///
+    /// The order is the one the sort of note-channels produced: bus ascending,
+    /// then depth descending, entry, frame. What neither version defines is the
+    /// order of two impulses with the same bus, entry *and* frame, which differ
+    /// only in gain and which an unstable sort may put either way round. That
+    /// is harmless for the reason it always was -- they land in the same row
+    /// and the scatter is integer-atomic (section 5), so their sum does not
+    /// depend on which went first -- and `tests::` in this file checks the two
+    /// agree on everything else.
+
+[33] src/merlin/plan.rs:640
+        // `block_start` is now only used to check the caller handed over the
+        // slot it said it did: every note in one slot fires inside that step by
+        // construction, so the filter this used to apply is a debug assertion
+        // rather than a pass over the list.
+
+[34] src/merlin/plan.rs:656
+        // Filters past the buses are dropped below, so the largest a key holds
+        // is the last bus pair's.
+
+[35] src/merlin/plan.rs:666
+        // One item per note, in parallel and indexed, so rayon writes each
+        // straight into place: `flat_map_iter` is not indexed and went through
+        // a list of per-task vectors that were then copied into one.
+        //
+        // A note with nothing to play on either of its buses gets `DROPPED`
+        // and sorts to the end, where it is cut off. One that is out of
+        // `bounds` gets `INVALID` just before it, and finding one throws the
+        // whole attempt away.
+
+[36] src/merlin/plan.rs:697
+        // By (filter, depth descending, entry, frame). The multiply-accumulate
+        // walks one bus's range in this order, so it is what makes the
+        // summation a pure function of the input rather than of arrival
+        // (section 6) *and* what lets the loop stop early -- see `Fdl::depths`.
+
+[37] src/merlin/plan.rs:724
+        // What one bus of one run holds. A row is a stretch of notes with the
+        // same (depth, entry) -- `key >> kb.entry` less the filter, which a run
+        // shares -- among the notes that are not silent on that bus. They are
+        // adjacent in the sorted list because the entry decides the depth, and
+        // skipping a silent note does not separate two that remain.
+
+[38] src/merlin/plan.rs:750
+        // Walk the buses in order, which fixes where each run's rows and
+        // impulses begin -- the output is bus-major -- and so how long both
+        // arrays are. `streams` is the buses that have anything, in order.
+
+[39] src/merlin/plan.rs:774
+        // Sized in parallel as well: a serial `resize` over a million 16-byte
+        // impulses is a memset on one core in front of everything else.
+
+[40] src/merlin/plan.rs:817
+    /// `rebuild` for a step whose values do not pack into a `u64`, or go past
+    /// its bounds: the original sort of one tuple per note-channel on the whole
+    /// key, kept because it has no limit. In-process on 28,000 synthetic notes
+    /// it took 766 us against 397 for `rebuild`, and it is not a path any
+    /// render reaches.
+
+[41] src/merlin/plan.rs:828
+        // (bus, depth, entry, frame, gain), one per note per channel.
+        //
+        // Built in parallel and sorted in parallel. Both are safe here for
+        // reasons worth stating, because "it is only a sort" is how a
+        // reproducible renderer stops being one:
+        //
+        // * The expansion is a pure function of each note, and `depth` is a
+        //   lookup into a table this pass does not write. Rayon's `collect`
+        //   preserves the order of the underlying iterator, so `flat` comes out
+        //   exactly as the serial loop left it.
+        // * The sort is by a key that is *not* a total order -- two impulses of
+        //   one entry can share `(bus, depth, entry, frame)` and differ only in
+        //   gain -- so an unstable sort may order those two either way. That is
+        //   already true single-threaded, and it is harmless for the same
+        //   reason: they land in the same row and the scatter is integer-atomic
+        //   (section 5), so their sum does not depend on which went first.
+        //   Anything that made the *rows* order-dependent would not be.
+
+[42] src/merlin/plan.rs:925
+            // Up to 4.8 kHz: past that, three times the cutoff nears the zero
+            // at Nyquist, where any two lowpasses differ by a lot above 20 kHz.
+
+[43] src/merlin/plan.rs:930
+                // The response at a tenth of the cutoff and the slope well past
+                // it, which is what the bus changes.
+
+[44] src/merlin/plan.rs:987
+    /// The plan written the plain way, one bus at a time: no packing, no
+    /// parallelism, nothing shared with `rebuild`. Its impulses are fully
+    /// ordered, gain included, where `rebuild` leaves ties in gain unordered.
+
+[45] src/merlin/plan.rs:1035
+        // One scratch for every case, in a deliberately awkward order: what a
+        // large step left in it must not reach the next.
+
+[46] src/merlin/plan.rs:1057
+    /// Fields too wide to pack into 63 bits go to the unpacked sort, which has
+    /// to give the same plan.
+
+[47] src/merlin/plan.rs:1075
+    /// The bounds are only a speed: a note past them sends the step to the
+    /// unpacked sort and the plan is the same.

@@ -1,0 +1,2123 @@
+# Comments extracted from src/merlin/synth.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/merlin/synth.rs:5
+//! Merlin as a [`Backend`], so the existing driver can render through it.
+//!
+//! The pieces all exist by now -- the FFT, the FDL, the kernel builder, the
+//! planner, the horizon. This is what wires them to the trait `cpu.rs` and
+//! `gpu/` already implement, and it is where the one structural mismatch has to
+//! be dealt with.
+//!
+//! ## The trait is push-per-block; Merlin needs to look ahead
+//!
+//! `spawn` hands over a block's note-ons and `render` immediately asks for that
+//! block's audio. But the impulse sits at the note-*on* frame and carries
+//! `r^(Dj-D)`, so Merlin cannot place it until the note-*off* has been seen --
+//! and that arrives in a later `set_gates`.
+//!
+//! So **`render` returns the block `latency_blocks` behind the one just
+//! spawned**, and the driver compensates by running that lead off the front --
+//! [`Backend::output_latency_frames`]. Its existing tail handling covers the
+//! other end, because [`Backend::stats`] reports work outstanding until the
+//! buffer drains.
+//!
+//! The lag is set by the **release bucket width**, not by the note length: an
+//! impulse sits at the note's release reference `Dj`, which is the bucket's
+//! start and so at most one width before the note-off that resolves it.
+//!
+//! ## A long note is not held back; it is emitted while it is still open
+//!
+//! Waiting for the note-off would mean waiting for a note that may run sixteen
+//! seconds, and the blocks it belongs in would be long gone. It does not have
+//! to: a note that has not been released is still sustaining, so what it owes
+//! the output is `A[n]` -- no release, no `r^(Dj-D)`, nothing that depends on
+//! `D`. `render` emits that block by block from the head cache while the note
+//! is open, and `plan_note` picks up from where that left off when the note-off
+//! finally arrives. `HeadNote::from` is the seam.
+//!
+//! *Nothing did this before, and the impulse sat at the note-**on** rather than
+//! at `Dj`, so a note outliving one block lost its delay-line contribution
+//! outright and kept only whatever of its head fell after its own note-off. On
+//! material whose mean note is 1.11 ms that is rare. One test file has 533,063
+//! notes over half a second.*
+//!
+//! ## Channel controllers, and why they are resolved at the note-on
+//!
+//! the development notes section 6 sorts them into four classes. Three of them are
+//! here:
+//!
+//! * **Folds into the note's gain** -- CC7 volume, CC11 expression and CC10 pan
+//!   are read from the channel row current at the note's *own* frame and
+//!   multiplied into `gain_l`/`gain_r`. From there they ride the impulse and
+//!   the head correction, both of which already carry a per-note gain, so this
+//!   costs nothing.
+//! * **Widens the cache key** -- channel bend scales the note's 32.32 step, and
+//!   the step is already in [`WaveKey`], so a bent note is simply a different
+//!   waveform. CC71-CC75 arrive as a params variant, which
+//!   [`Backend::set_params_variant`] now stores and which reaches the kernel
+//!   through [`Kernel::from_cmd`]'s params table.
+//! * **Falls back to the per-voice backend** -- swept bend, portamento, legato.
+//!   Not implemented; merlin renders swept bend as the bend at the note-on.
+//!
+//! The one class that is *not* here is section 6's second row, **the
+//! per-channel bus**, which would make channel gain and pan sample-accurate for
+//! a note still ringing when its channel moves. Merlin's bus is already the
+//! per-velocity biquad of section 3(c), so a per-channel bus is a cross
+//! product: sixteen times the ring (752 MiB becomes 12 GiB at the bus ceiling),
+//! and sixteen times the *firing rows*, which is the one quantity the whole
+//! cost model is about. Section 6 lists both rows as legitimate; merlin takes
+//! the free one. What it costs is stated in the design's handout.
+//!
+//! ## What is not here yet
+//!
+//! Residency scheduling (every entry stays resident), the per-voice fallback
+//! for swept bend, and CC120's hard cut -- a channel silenced by All Sound Off
+//! releases normally here instead of being damped over the steal window.
+
+[2] src/merlin/synth.rs:101
+/// Where merlin's wall clock goes, cumulative seconds.
+///
+/// Coarse on purpose: one `Instant::now` per phase per *block* or per partition
+/// step, never per note. A file with 89.5 M note-ons would spend more time
+/// reading the clock than doing the work.
+///
+/// It exists because the first real profile of this backend was a surprise:
+/// `entry_probe` puts the mean firing at 204 entries a block, which is 0.35 ms
+/// of kernel traffic against an 85 ms budget -- a **134x realtime** ceiling --
+/// and the renderer was managing 1.29x with the GPU under 25% busy. Two orders
+/// of magnitude of that is not in the convolution, and guessing which of these
+/// rows holds it was how the last three sessions would have gone.
+
+[3] src/merlin/synth.rs:115
+    /// `resolve`, i.e. pairing note-offs and planning every note. Includes the
+    /// two rows below, which are broken out because they are the rare paths.
+
+[4] src/merlin/synth.rs:120
+    /// `ensure_kernels`: allocating a missing entry's pages, assembling every
+    /// missing kernel of a step into the staging buffer, and recording and
+    /// submitting its one batched transform and the copies into the cache. The
+    /// submit does not wait for the device. Not the `CpuSynth` renders, which
+    /// are `build`.
+
+[5] src/merlin/synth.rs:130
+    /// `Fdl::encode_block`, host side -- the ordering check, the uniform and
+    /// staging writes, the bind groups and the pass recording.
+
+[6] src/merlin/synth.rs:133
+    /// `head_pass`, host side: clipping every live head to the step, sorting by
+    /// waveform, and staging it.
+
+[7] src/merlin/synth.rs:136
+    /// `bus_pass` and `queue.submit`. Submission is asynchronous, so this is
+    /// command-buffer assembly rather than execution.
+
+[8] src/merlin/synth.rs:139
+    /// `read_mixed`: the copy, the `poll(wait)`, the map and the copy out.
+    /// **This is the one that blocks**, so the GPU's whole execution time lands
+    /// here along with the stall.
+
+[9] src/merlin/synth.rs:143
+    /// The per-voice fallback's whole `render`, which is a second backend's
+    /// dispatch and its own blocking readback. Broken out because it is the
+    /// price of the promotion threshold and the number to read against what
+    /// the threshold saves.
+
+[10] src/merlin/synth.rs:148
+    /// `set_params_variant`, merlin's side: taking a CC71-CC75 params table
+    /// and dropping the voice memo rows it invalidates. The fallback's upload
+    /// of the same table is in `fallback`.
+
+[11] src/merlin/synth.rs:152
+    /// `spawn`'s routing loop: resolving each command's channel, counting its
+    /// voice key towards promotion, and opening it or batching it for the
+    /// fallback. Outside every other row until 2026-09-19, when it measured
+    /// 7.3 s of the 44.75 M-note test file's render thread.
+
+[12] src/merlin/synth.rs:189
+/// One block's mixed output on its way back from the device.
+///
+/// Two of these alternate, so a block's convolution is submitted and then left
+/// to run while the host prepares the next one, instead of being waited on
+/// immediately. The first profile measured what that was costing: the same
+/// render with the readback skipped entirely took **77.04 s against 96.45 s**,
+/// with `submit` still at 0.53 s -- the queue never backed up, so the GPU was
+/// keeping up easily and its ~19 s was simply serialised behind the host's ~77
+/// rather than hiding under it. 19/77 is the 25% utilisation that was observed
+/// on the card.
+///
+/// The wait is on **this** readback's submission index rather than on the
+/// device, because `poll` with no index waits for the most recent submission --
+/// which would be the block just queued, and would put the stall straight back.
+
+[13] src/merlin/synth.rs:214
+    /// The note's own gains -- velocity, region pan, layer -- *before* the
+    /// channel's were folded in.
+    ///
+    /// Kept rather than recovered. The first version of this held the channel
+    /// factor and divided `cmd.gain` by it to get back here, which is exact
+    /// right up until a note is struck while CC7 is at or near zero: the
+    /// division then explodes, and on one real track that produced a handful of
+    /// seconds where merlin's error was the size of the whole file's peak while
+    /// the other 190 sounding seconds were clean. A silent channel is not a
+    /// corner in this repertoire -- it is how a part is muted.
+
+[14] src/merlin/synth.rs:225
+    /// Filled once the note is old enough that the emit block has reached it.
+    /// Most notes are released long before that and never need it.
+
+[15] src/merlin/synth.rs:228
+    /// THE PLAN, Phase 1 -- per run, not per note. How many identical copies
+    /// this entry stands for: note-ons on one slot, in one block, at one frame,
+    /// whose commands differ only in note id and ordinal, struck one after
+    /// another on the slot (`cmd.ordinal` is the first's, and the others follow
+    /// it by one each). A slot's note-offs pair with its note-ons in order, so
+    /// a run is released from its front, and `resolve` plans what a block
+    /// releases of it a frame at a time, weighted. A run is cut at `u16::MAX`.
+    ///
+    /// **Exact, not approximately so.** Every impulse and head correction is
+    /// added in 32-bit fixed point, and the weight multiplies the *rounded*
+    /// value, with the scale taken from the total weight -- so a run of N adds
+    /// exactly what N notes did. Before this every copy held a whole `Open`
+    /// (~150 bytes) until its note-off, which is what took the 2.12 G-note test
+    /// file's burst past the machine's free memory (2026-10-16).
+
+[16] src/merlin/synth.rs:255
+/// Whether two commands build the same note but for which note it is: equal in
+/// every byte except the note id and the slot ordinal (and the glide byte above
+/// the id, which merlin has already flattened or sent to the fallback).
+
+[17] src/merlin/synth.rs:269
+/// What a still-open note needs in order to sound: no part of it depends on the
+/// note's duration, which is the whole reason it can be emitted early.
+
+[18] src/merlin/synth.rs:275
+    /// The note's own gain, without the channel's, so the block being emitted
+    /// can multiply its own in.
+    ///
+    /// An open note is one that outlived the emit lag, and the lag is about
+    /// 0.17 s while one real track's mean note is 547 ms -- so most of a held
+    /// note's body goes out through this path, and freezing its gain at the
+    /// note-on freezes most of the note.
+
+[19] src/merlin/synth.rs:285
+/// The waveform-determining words of a spawn command, and nothing else.
+///
+/// 36 bytes against `WaveKey`'s ~96, and hashed **once** per note where the old
+/// path hashed four keys: a `FilterKey`, a `WaveKey` for the sustain render, a
+/// `WaveKey` again for the head row, and an `EntryKey`. The first profile of
+/// this backend put that at 20.7 s of a 96 s render -- 89.5 M note-ons is
+/// enough that the hashing was the single largest line in it.
+///
+/// Finer than `WaveKey`, deliberately: two params rows with identical envelopes
+/// are two `VoiceKey`s and one `WaveKey`, so they still share a cached
+/// waveform. Coarser would be wrong; finer only costs a duplicate memo row.
+
+[20] src/merlin/synth.rs:325
+/// A channel table with nothing happening in it: unity gains, no bend, variant
+/// zero, no cut. What `voice::ChannelTable::new` starts from -- one MIDI port's
+/// sixteen channels -- and what merlin has to assume until a `set_channels`
+/// says otherwise.
+
+[21] src/merlin/synth.rs:340
+/// What it takes to rebuild one entry's kernel from nothing.
+///
+/// Small on purpose -- 40 bytes against an entry ceiling that is now in the
+/// millions, because a kernel cache that evicts makes the *entry* count cheap
+/// and only the resident bytes expensive.
+
+[22] src/merlin/synth.rs:347
+    /// The dense waveform id the sustain render is held under, which is the
+    /// same one the head cache interns. Was the `WaveKey` itself, back when
+    /// the store was a map keyed on it.
+
+[23] src/merlin/synth.rs:351
+    /// The release reference, and the frames of it the delay line does not hold
+    /// because the impulse is fired that late instead. `Kernel::segment`.
+
+[24] src/merlin/synth.rs:359
+/// One installed copy of the params table, as `set_params_variant` left it.
+///
+/// Held behind an `Arc` so `kernel_for` can hand the table to `Kernel::from_cmd`
+/// without borrowing `self` across the build, which also mutates the memo.
+
+[25] src/merlin/synth.rs:364
+    /// What the driver installed, filters and all. This is what `FilterKey` and
+    /// `WaveKey` are read from.
+
+[26] src/merlin/synth.rs:367
+    /// The same with `RP_FILTER` cleared, which is what a kernel is rendered
+    /// through. Built on first use rather than at install: a variant that only
+    /// ever selects a bus never needs one.
+
+[27] src/merlin/synth.rs:374
+/// Everything about a voice that does not depend on how long its note is held,
+/// resolved once and looked up after. See [`VoiceKey`].
+
+[28] src/merlin/synth.rs:377
+    /// The biquad bus, the head-cache row, and the key `built` holds the
+    /// sustain render under.
+
+[29] src/merlin/synth.rs:382
+    /// The region's release tail and the frame its envelope settles, both of
+    /// which cost a logarithm to derive and are constant per row.
+
+[30] src/merlin/synth.rs:386
+    /// The region's release, as a per-frame factor: what section 3b's scalar
+    /// is a power of, and what decides whether a note can take the kernel path
+    /// at all. See `plan_note`'s `MAX_KERNEL_GAIN`.
+
+[31] src/merlin/synth.rs:390
+    /// Release bucket to entry id, in first-seen order. Linear, because a
+    /// waveform has a handful of buckets -- median 5 and max 9 on one test
+    /// file -- and a hash map of that size is slower than the scan.
+
+[32] src/merlin/synth.rs:396
+/// What rebuilding one host sustain render needs, kept for the whole run.
+///
+/// Tens of bytes against the hundreds of kilobytes of the render itself, which
+/// is the whole reason the split is worth making.
+
+[33] src/merlin/synth.rs:402
+    /// The filterless params table this waveform was built under, **captured
+    /// rather than looked up**. `set_params_variant` recycles slots, so
+    /// `nofilter_of(cmd.variant)` can name a different table by the time a
+    /// rebuild happens -- and a kernel rebuilt under the wrong envelope is
+    /// exactly the class of bug that passes a determinism test and fails a
+    /// null.
+
+[34] src/merlin/synth.rs:409
+    /// The exact length last held, and what a rebuild reproduces.
+    ///
+    /// Not "whatever this note needs". `Kernel::segment` zero-pads past the end
+    /// of the render and `Head::bind` fills `min(want, sustain.len())`, so a
+    /// rebuild shorter than the original moves the audio. Growth doubles off
+    /// this rather than off what is resident, so the length sequence is the
+    /// same whether or not anything was ever evicted.
+
+[35] src/merlin/synth.rs:419
+/// Host-side sustain renders under a byte budget.
+///
+/// **Merlin's two device caches evicted from 2026-09-07 and this one did not**,
+/// which is where 21.5 GiB of host RAM went on the largest test file: one
+/// `f32` per frame per waveform, 76,912 waveforms, nothing ever dropped, and
+/// three separate `Arc` holders so that emptying any one of them freed nothing.
+/// This is the single owner.
+///
+/// Eviction is safe here for the same reason it is safe on the device:
+/// `Kernel::from_cmd` is a deterministic render of a fixed command, so a
+/// rebuild is bit-identical to what was thrown away. It is *not* free -- a
+/// rebuild is a `CpuSynth` render rather than an FFT -- but a host entry is
+/// several times smaller than the kernel spectra it produces, so a budget of
+/// the same order holds several times as many and evicts far less often.
+
+[36] src/merlin/synth.rs:487
+    /// Drop least-recently-used renders until the budget is met.
+    ///
+    /// Returns the number dropped, or `None` when everything still held is
+    /// pinned to the step being encoded -- which is the caller's cue to say the
+    /// budget cannot hold one step rather than to spin.
+
+[37] src/merlin/synth.rs:509
+/// Prices the design's option 2 for CC7 without changing a sample.
+///
+/// **What option 2 is.** A released kernel is a pure exponential, so truncating
+/// it at `t_j` and restarting is exact up to `r^(t_j - f)`. That makes a step
+/// in channel gain correctable by one extra impulse -- and crucially by one per
+/// `(entry, channel)` rather than one per note, because every note of an entry
+/// on a channel shares the kernel and their combined tail is
+/// `SUM_i g_i * kernel(t - t_i)`. One running scalar per pair carries it.
+///
+/// **What is unknown is the count**, and it is the whole question: an impulse
+/// has to be fired for every pair that is still live when its channel's gain
+/// moves, so the cost is `live pairs on moving channels`, per gain change. This
+/// counts exactly that against a real render.
+///
+/// A pair is live from the step its entry fires until `depth` steps later,
+/// which is the kernel's own length -- past that the tail has left the ring.
+/// Expiry is bucketed rather than scanned, so this is O(1) a step and the probe
+/// does not distort the timing it is measuring.
+
+[38] src/merlin/synth.rs:529
+    /// `(entry, channel)` packed, to the step its tail dies.
+    ///
+    /// The **floor**: what the correction would cost if one impulse per pair
+    /// were enough. It is not -- see `cells` -- but it is the number the first
+    /// measurement reported and keeping it makes the gap visible.
+
+[39] src/merlin/synth.rs:535
+    /// `(waveform, channel, fire epoch)` packed, to the step its tail dies.
+    ///
+    /// **The real cost.** Truncating a tail at age `j` yields the same
+    /// waveform's kernel at release reference `dj + j`, so a correction is one
+    /// impulse per *age bucket* rather than per pair. The occupied age buckets
+    /// of a `(waveform, channel)` are exactly its distinct fire epochs still
+    /// inside the tail -- ages all advance together, so two notes share a
+    /// bucket precisely when they were struck in the same epoch -- which makes
+    /// this the same sliding-window count on a wider key.
+
+[40] src/merlin/synth.rs:583
+    /// An entry fired on a channel at `step`, with a kernel `depth` steps long.
+    ///
+    /// `wave` and `epoch` carry the age-bucket dimension: `epoch` is the
+    /// release bucket the fire frame falls in, so two notes of one waveform
+    /// share a correction exactly when their epochs match.
+
+[41] src/merlin/synth.rs:633
+    /// Charge one block: `changes[ch]` gain moves, each correcting every pair
+    /// live on that channel.
+
+[42] src/merlin/synth.rs:657
+/// The most section 3b's scalar may amplify a kernel before the note is
+/// released on the head instead. See `plan_note`.
+///
+/// The delay line and the head cancel an amplified kernel between them, in
+/// fixed-point accumulators whose scale assumes impulses near unit magnitude,
+/// so this is headroom rather than precision. The reference bank's worst case
+/// across a release bucket is about 5.4; a one-millisecond release asks for
+/// 10^11 within a few hundred frames.
+
+[43] src/merlin/synth.rs:667
+/// Sustains the device's kernel builder renders a batch: rows of one block
+/// each in its output and its readback, so 16 MiB of both at 4096 frames.
+
+[44] src/merlin/synth.rs:671
+/// Host memory the kernel builder's batches in flight may hold in their
+/// readbacks before the oldest is waited on to make room.
+
+[45] src/merlin/synth.rs:675
+/// A batch of sustain renders on the device, not yet read: its jobs in
+/// waveform order, and its batches -- one per filterless table -- with the jobs
+/// each holds.
+
+[46] src/merlin/synth.rs:685
+/// The smallest kernel cache [`fit_video_memory`] will shrink to before it
+/// refuses instead. Below this a dense step's kernels stop fitting at once and
+/// the render fails part-way, which is worse than failing at the start.
+
+[47] src/merlin/synth.rs:690
+/// Room left for what the estimate in [`fit_video_memory`] does not count: the
+/// staging lists that grow with the material, the head and impulse buffers, the
+/// readbacks, and the driver's own allocations.
+
+[48] src/merlin/synth.rs:695
+/// The kernel cache, shrunk if merlin would otherwise ask for more video memory
+/// than the OS lets this process use **now**, or an error if even a small one
+/// would not fit.
+///
+/// *Added 2026-10-16, after a render with the cache raised to 3.5 GiB, beside a
+/// video player and a browser, filled the 8 GiB card, spilled into shared
+/// memory, and with the 4 GiB host sustain store took the machine to 97% of its
+/// 31.6 GB of RAM. Nothing checked: the per-voice backend's `memory_note` only
+/// warns, and merlin had no check at all.*
+///
+/// **The kernel cache is the one thing this may move, because it cannot change
+/// a sample.** An evicted kernel is rebuilt from the same sustain render
+/// through the same transform, so a smaller cache costs rebuild time and
+/// nothing else. The head cache is left alone: its page eviction has been seen
+/// to move output at -88 dB (`head_pass`), and an output that depended on what
+/// else was running on the machine would break `CLAUDE.md`'s rule that one
+/// command gives one machine the same bytes.
+///
+/// The estimate: the kernel cache and the ring (`Fdl`), the head cache, and the
+/// fallback's sample pool and voice pool when there is a fallback, plus
+/// [`VRAM_SLACK`]. On a platform with no budget figure (anything but Windows
+/// today) the cache is returned as asked.
+
+[49] src/merlin/synth.rs:732
+    // The sample pool is on the device whenever the fallback or the kernel
+    // builder is, once for both; the fallback's voices only with a fallback.
+    // The builder's own pool is `GPU_BUILD_ROWS` voices and its rows, which the
+    // slack covers.
+
+[50] src/merlin/synth.rs:771
+/// The host sustain store's budget, capped at a quarter of the RAM that is free
+/// when the render starts.
+///
+/// Like the kernel cache, the store cannot change a sample -- a sustain render
+/// it evicted is made again identically -- so it may follow the machine. Not
+/// capped when `--merlin-host-mb 0` asks for no budget at all, or where the
+/// figure is not known.
+
+[51] src/merlin/synth.rs:800
+/// Partitions one batched kernel transform takes at most, and so the size of
+/// its two persistent buffers: 32 MiB of input and 32 MiB of spectra at 2048
+/// points. A step that is missing more goes up as several batches.
+///
+/// Sized by the VRAM the render can spare rather than by speed. A full render
+/// of the 44.75 M-note test file holds ~6.3 GiB of the 8 GiB card, and a batch
+/// is a couple of dispatches and a submit however full it is, so a larger one
+/// buys nothing a step's few dozen new kernels would use.
+
+[52] src/merlin/synth.rs:824
+    /// The adapter's name and PCI vendor and device id, for the front ends'
+    /// device line and `gpu::vram`. See [`MerlinSynth::adapter_name`].
+
+[53] src/merlin/synth.rs:828
+    /// The real transform the kernel cache is built with, and the buffers it
+    /// stages through. Not the FDL's own: that one runs the per-step forward
+    /// and inverse transforms with its own uniforms.
+
+[54] src/merlin/synth.rs:840
+    /// Distinct biquads, each owning two output buses. Section 3(c)'s
+    /// per-velocity filter buses.
+
+[55] src/merlin/synth.rs:846
+    /// The most `buses` may reach: what one storage binding holds at `lags`.
+    /// Equal to `buses` when pinned.
+
+[56] src/merlin/synth.rs:853
+    /// Set for the lifetime of a step's command encoder. `grow_buses` swaps
+    /// buffers that encoder has bound, so it refuses while this is set rather
+    /// than trusting every caller to know that.
+
+[57] src/merlin/synth.rs:859
+    /// Copies of the params table beyond the bank's own, as `set_params_variant`
+    /// installs them. Index 0 is the bank's and is never stored here; entry `i`
+    /// holds variant `i + 1`, exactly as `cpu.rs` arranges it.
+
+[58] src/merlin/synth.rs:864
+    /// This block's channel rows, as `set_channels` published them, and whether
+    /// either control is doing anything.
+    ///
+    /// `(tiles + 1) * chan_count * CHAN_FIELDS` words -- the extra row past
+    /// the last tile is what `SpawnCmd::row_bias` selects, and a note-on with a
+    /// controller on its own tick reads it. See `voice::ChannelTable`.
+
+[59] src/merlin/synth.rs:871
+    /// Channels a row of `chan_rows` covers: sixteen per MIDI port the file
+    /// has reached, read off the rows' length in `set_channels`.
+
+[60] src/merlin/synth.rs:882
+    /// Raw 8.24 bend factor to the quantised one, per channel.
+    ///
+    /// A channel's bend is constant for long stretches, so a one-slot memo per
+    /// channel hits almost every time and the logarithm quantisation costs
+    /// nothing. See `Config::merlin_bend_cents`.
+
+[61] src/merlin/synth.rs:888
+    /// Distinct voices whose release ran past `tail_cap` and was cut there, and
+    /// the longest release seen. See the clamp in `voice_index`.
+
+[62] src/merlin/synth.rs:891
+    /// Prices the head-correction split. See the report at the end of `render`.
+    ///
+    /// A note is *collapsible* when nothing under it moves -- no CC7/CC11/pan
+    /// ramp, no CC120 damp -- so its correction is one buffer times one gain.
+    /// The spans say how much shorter the record would get: `[from, D)` today
+    /// against `[Dj, D)` once a body kernel supplies everything before `Dj`.
+
+[63] src/merlin/synth.rs:901
+    /// Kernels the ring could not hold in full, and the deepest one asked for.
+    /// Should stay zero: `new` sizes the ring for the deepest a bank can ask.
+
+[64] src/merlin/synth.rs:906
+    /// Note-ons whose channel was bent, and how many of those became a
+    /// distinct waveform. Reported at the end, because bend is what decides
+    /// whether the entry ceiling is reachable on a given file.
+
+[65] src/merlin/synth.rs:911
+    /// Sustain renders, under a byte budget, indexed by the same dense
+    /// waveform id the head cache interns.
+    ///
+    /// *Was a `HashMap<EntryKey, Arc<Kernel>>` beside a `Vec<Arc<Kernel>>` and
+    /// a third copy on every memo row, none of which ever dropped anything.
+    /// The key and the id are one-to-one -- both come from the same `EntryKey`
+    /// -- so the map was an index onto the vector and the vector is enough.*
+
+[66] src/merlin/synth.rs:919
+    /// Everything a kernel needs to be **re**built, indexed by entry id.
+    ///
+    /// The kernel cache evicts now, so an entry's kernel can be gone by the
+    /// time the entry fires and has to be reconstructible from an id alone.
+    /// `depth == 0` marks an id that has been handed out but not planned
+    /// against yet, which cannot happen on the render path and is what the
+    /// vector is initialised to.
+    ///
+    /// *This replaces `uploaded: Vec<bool>`, which only had to say whether a
+    /// kernel had ever been built because nothing was ever thrown away.*
+
+[67] src/merlin/synth.rs:930
+    /// Which kernels are on the card, and which one goes when the room runs
+    /// out. See `residency.rs`.
+
+[68] src/merlin/synth.rs:933
+    /// The per-voice backend that renders waveforms merlin has not promoted.
+    ///
+    /// **The per-voice fallback, as promotion.** A waveform heard too few times
+    /// never repays the `CpuSynth` render and the FFT a kernel costs, and the
+    /// measured distribution is a power law -- median 18 uses, p95 424, max
+    /// 707,522 on the 44.75 M-note file -- so the tail is most of the *entries*
+    /// and almost none of the *notes*. Merlin is streaming and cannot know a
+    /// use count in advance, so every waveform starts here and the
+    /// `merlin_promote_after`th note to ask for one moves it onto the
+    /// convolution path. See `Config::merlin_promote_after`.
+    ///
+    /// A whole second backend rather than `CpuSynth`: this has to render a few
+    /// percent of a file that the per-voice GPU path does in full in 193 s, and
+    /// the single-threaded reference synth would cost more than the convolution
+    /// saves.
+
+[69] src/merlin/synth.rs:951
+    /// The device's kernel builder, or `None` when sustains are rendered on
+    /// the CPU (`Config::merlin_gpu_build`). See `merlin::gpubuild`.
+
+[70] src/merlin/synth.rs:954
+    /// Sustain renders asked for since the last `start_builds`, by waveform:
+    /// the command, the filterless table and the frames to render. Built as
+    /// one batch on the device before anything reads them.
+
+[71] src/merlin/synth.rs:958
+    /// A block's commands are arriving in parts (`Backend::spawn_part`) and
+    /// the block has been opened.
+
+[72] src/merlin/synth.rs:961
+    /// Batches queued on the device and not yet read, oldest first, and for
+    /// each waveform the newest batch that renders it and the frames it asked
+    /// for. See `start_builds`.
+
+[73] src/merlin/synth.rs:968
+    /// The bank's modulation envelopes, shared, for the kernel builder: what
+    /// `Kernel::from_cmd`'s `CpuSynth` reads too, since only its params table
+    /// is replaced.
+
+[74] src/merlin/synth.rs:972
+    /// The fallback's output, delayed into merlin's frame.
+    ///
+    /// A per-voice backend answers `render` with the block it was just given
+    /// and merlin answers with one `latency_blocks + 1` behind, so the two
+    /// cannot simply be summed. This holds the fallback's blocks until merlin's
+    /// clock catches up with them.
+
+[75] src/merlin/synth.rs:984
+    /// Gliding notes (CC5/CC65/CC84) sent to the fallback because a kernel
+    /// cannot glide, and -- with no fallback -- convolved with the glide
+    /// stripped. See `spawn`.
+
+[76] src/merlin/synth.rs:989
+    /// Notes whose kernel would have needed more than `MAX_KERNEL_GAIN`, and
+    /// which the head released instead.
+
+[77] src/merlin/synth.rs:992
+    /// High-water marks for the two lists that scale with how many notes are
+    /// *sounding* rather than with the waveform count.
+    ///
+    /// Sampled once a block, which is free, and kept because the exit values
+    /// are all zero -- a render that has finished is holding nothing, so the
+    /// first version of this breakdown could not explain a peak at all. Merlin
+    /// has no voice pool, so these are the two that grow without a ceiling.
+
+[78] src/merlin/synth.rs:1000
+    /// Head records held at the peak, counted once per partition step they are
+    /// filed under: the number of `HeadNote`s in memory, which is what the
+    /// report prices. It is not the number of notes -- see [`HeadSteps`].
+
+[79] src/merlin/synth.rs:1006
+    /// What `plan_note` was handed, copy by copy, with `--merlin-digest`: the
+    /// bucket pass's gate. See `merlin::bucket::NoteDigest`.
+
+[80] src/merlin/synth.rs:1009
+    /// Partition steps encoded, which is the clock every residency table ages
+    /// against.
+
+[81] src/merlin/synth.rs:1028
+    /// Records this device can bind at once, which is the hard ceiling on one
+    /// scatter dispatch, and how many steps have needed more than one. See
+    /// `head_pass`.
+
+[82] src/merlin/synth.rs:1033
+    /// The workgroup size both head pipelines were compiled at. Was assumed to
+    /// be 256 at the dispatch site while the module clamps it to the adapter's
+    /// `max_compute_invocations_per_workgroup`; the two agree on every adapter
+    /// this has run on, and `merge` would silently cover a fraction of the
+    /// block if one ever reported less.
+
+[83] src/merlin/synth.rs:1039
+    /// The notes awaiting their correction, filed under each partition step
+    /// they reach. See [`HeadSteps`] for why this is not one list.
+
+[84] src/merlin/synth.rs:1058
+    /// Each open note's correction in this step, if it has one, before they
+    /// are sorted. See `head_pass`.
+
+[85] src/merlin/synth.rs:1061
+    /// Where each correction of the step comes from -- `2 * record + piece` in
+    /// the step's list, or past that its place in `head_open`.
+
+[86] src/merlin/synth.rs:1065
+    /// The sort key per clipped record -- its waveform's number among this
+    /// step's, in first-sighting order -- and the logical-waveform to
+    /// per-step-index map the key comes from. Stamped rather than cleared: the
+    /// map is as wide as every waveform the render has seen and a step touches
+    /// a few hundred of them.
+
+[87] src/merlin/synth.rs:1073
+    /// This step's distinct waveforms, in first-sighting order, and the
+    /// `(frame offset, frames held)` that `HeadCache::bind` gave each.
+
+[88] src/merlin/synth.rs:1077
+    /// Index into `head_keys` and `head_srcs` of each correction, in the order
+    /// the counting sort puts them.
+
+[89] src/merlin/synth.rs:1087
+    /// Impulses waiting to fire, bucketed by the partition step they land in.
+    ///
+    /// A ring rather than one list, because the list was rescanned in full on
+    /// every step to find the handful of notes belonging to it -- and it holds
+    /// everything planned but not yet emitted, which at 29,000 note-ons a block
+    /// and a four-block lag is six figures. The first profile put that at 8.5 s
+    /// of a 64 s render.
+    ///
+    /// An impulse sits at `Dj`, which is never past its note-off, and a note is
+    /// planned during the spawn of the block its note-off falls in -- so it can
+    /// be at most `latency_blocks + 2` blocks ahead of the block being encoded.
+    /// The ring is that plus one, and `plan_note` refuses anything further out
+    /// rather than letting it wrap onto a live slot.
+
+[90] src/merlin/synth.rs:1106
+    /// Per-channel gains at the start and end of each recent block, ringed.
+    ///
+    /// `set_channels` publishes the rows for the block being *spawned*, and
+    /// `render` emits one `latency_blocks` earlier -- so by the time an open
+    /// note's body is written out, the rows that describe it are gone. This is
+    /// the little of them that the open-note path needs: `[l0, r0, l1, r1]` per
+    /// channel per block, which is enough to ramp across it.
+
+[91] src/merlin/synth.rs:1114
+    /// Most recent gate table, as published for the block being spawned: the
+    /// per-slot `[base, run]` table and the `[cumulative count, frame]` runs
+    /// behind it. See `voice::off_frame`.
+
+[92] src/merlin/synth.rs:1121
+    /// Notes held longer than the head cache and clamped to it. They sound and
+    /// release normally, they just stop early. Never dropped.
+
+[93] src/merlin/synth.rs:1124
+    /// THE PLAN, Phase 1. The runs this block has opened, by the one note-on
+    /// that could join each: `slot << 32 | ordinal` of the next copy, to the
+    /// run's index in `open`. A copy's run can only be the one whose last copy
+    /// is the note-on before it on its slot, so this is a lookup, not a search.
+    /// Cleared each block; `resolve` renumbers it when it rebuilds `open`.
+
+[94] src/merlin/synth.rs:1130
+    /// Channels a CC120 cut lands on anywhere in this block. Their note-ons do
+    /// not join runs: a cut applies below a note id, and copies on either side
+    /// of one would sound different. A cut in a later block comes after every
+    /// copy, so it treats a run's copies alike.
+
+[95] src/merlin/synth.rs:1137
+    /// Longest kernel any entry may hold, in frames: the bank's longest release
+    /// after `--merlin-kernel-ms`. A region whose release exceeds it is
+    /// truncated, which `new` warns about once rather than per note.
+
+[96] src/merlin/synth.rs:1143
+    /// Impulses that resolved to a frame already emitted and were nudged
+    /// forward. Should be zero on any ordinary bank; see `plan_note`.
+
+[97] src/merlin/synth.rs:1146
+    /// Wall time spent rendering kernels on the CPU, and how many.
+    ///
+    /// Every distinct waveform costs one `CpuSynth` render of the full kernel
+    /// length, single-threaded. On material with poor entry reuse that is the
+    /// render, not the convolution, so it is worth knowing rather than
+    /// inferring.
+
+[98] src/merlin/synth.rs:1155
+    /// Frame past which nothing can still be sounding.
+    ///
+    /// The driver stops once `stats` reports no work, but an empty impulse list
+    /// does not mean silence -- the ring holds each entry's tail for `lags`
+    /// steps after its last impulse. Without this the render is cut off exactly
+    /// one kernel short.
+
+[99] src/merlin/synth.rs:1170
+        // The transform needs `2P` complex of workgroup ping-pong, so P is
+        // capped by the adapter rather than by the block size. 2048 is what
+        // the dev notes section 5 settles on; a smaller driver block just uses one
+        // step instead of several.
+
+[100] src/merlin/synth.rs:1181
+        // Hoisted above the ring sizing below, which needs the bin count and the
+        // bus count to work out how many partitions one storage binding holds.
+
+[101] src/merlin/synth.rs:1184
+        // Two output buses per distinct biquad -- left and right. Section 3(c)
+        // puts one biquad per velocity.
+        //
+        // **Automatic unless pinned.** It starts at the bank's own distinct
+        // filters -- what a render reaches with no controller moving -- and the
+        // ring's depth is decided against that below. A file that interns more,
+        // which a CC71/CC74 sweep does one biquad per combination, widens it in
+        // `grow_buses` up to `max_buses`. See `Config::merlin_max_filters`.
+        //
+        // Starting at the bank's count is safe because the count is small.
+        // Measured 2026-09-12 with `examples/merlin_flat.rs`: the reference bank
+        // has 125 across 22,528 regions -- velocity, not key tracking -- and four
+        // General MIDI banks have 1, 27, 227 and 341.
+
+[102] src/merlin/synth.rs:1207
+        // Kernel length, from the **bank** rather than from a constant.
+        //
+        // A kernel holds a note's release tail: its body is the head
+        // correction's and the impulse is delayed to meet the tail, so the
+        // length is the region's and not the note's. The ring therefore has to
+        // be as deep as the bank's longest release plus the one partition a
+        // reference point can sit part-way into.
+        //
+        // *This replaces `merlin_kernel_frames` as one constant for every
+        // entry. At 88,064 frames it was shorter than the release of 34 of the
+        // reference bank's 88 keys, so those notes stopped mid-decay -- the
+        // "cut off abruptly" of the first full render.*
+
+[103] src/merlin/synth.rs:1225
+        // A release that never reaches the floor returns `usize::MAX`, and a
+        // bank can hold one. 30 s is far past anything a sampled instrument
+        // uses and keeps the arithmetic below finite.
+
+[104] src/merlin/synth.rs:1229
+        // **Non-zero sets the length outright, up as well as down.** It used to
+        // only clamp, so there was no way to buy headroom above the bank -- and
+        // the bank is not the whole story: **CC72 adds seconds to a region's
+        // release**, up to 15.0 s at 127 against a bank whose longest may be a
+        // quarter of one. The ring is allocated once at `lags` partitions, so
+        // that headroom cannot be found later; a variant past it is truncated
+        // and counted instead (`release_truncated`).
+        //
+        // Sizing for the worst case unconditionally is not the answer: 15 s of
+        // ring at 512 buses is 2.95 GiB on an 8 GB card, charged to every file
+        // whether or not it sends CC72.
+
+[105] src/merlin/synth.rs:1253
+        // **Plus the attack, which is not decoration.** A kernel is `dj + tail`
+        // long and the impulse is fired `skip` frames late to cancel the `dj`
+        // -- but `skip` is zero for a note shorter than where its envelope
+        // settles, because there the delay line has to supply `[0, Dj)` too.
+        // `ReleaseBuckets::reference` holds `dj` back to `flat_from` exactly in
+        // that case, so such a kernel is `flat_from + tail` long and the ring
+        // has to hold it.
+        //
+        // **Sizing this off `tail_cap` alone was a hard failure, not a rounding
+        // error** (2026-09-09, a GM bank): `kernel 254 is 124 partitions but
+        // the ring holds 118`. And it is unreachable by the flag the message
+        // suggested -- for any region whose release is at or above the cap,
+        // `tail` clamps to `tail_cap` and the kernel stays `flat_from` past the
+        // ring however high the cap goes. The reference bank hid it because its
+        // `flat_from` is 49 frames, about 1 ms; a bank with slow attacks has
+        // notes shorter than one in every bar.
+        //
+        // Per region rather than `flat_max + tail_cap`, which would charge a
+        // slow pad's attack against a percussion release that never meets it.
+
+[106] src/merlin/synth.rs:1284
+        // **And bounded by what the device will bind, rather than refused.**
+        //
+        // `flat_from` has no ceiling of its own -- it is where a region's
+        // envelope settles, and a region with a slow decay to sustain may not
+        // settle for minutes. One GM bank asks for **443 s of ring, 121.70
+        // GiB**, off a single such region: every note on it is shorter than its
+        // own attack, so `skip` is zero and the kernel is `flat_from + tail`
+        // long. That is not a setting anyone can fix, and refusing to start is
+        // the wrong answer to it -- one pathological preset out of 134 stopped
+        // a bank that is otherwise ordinary.
+        //
+        // So the ring takes what fits and `plan_note` clamps against it,
+        // counting what it truncates. The regions that lose are exactly the
+        // ones whose envelope never settles, which section 3b's collapse could
+        // not represent anyway; they belong on the per-voice fallback, and
+        // routing them there is the real fix. See TODO.
+
+[107] src/merlin/synth.rs:1322
+        // **How far a file may widen it**: whatever one binding holds at the
+        // depth just settled. The ring's stride per bus is `lags * bins` and
+        // `lags` does not move after this, so this is the one number growth is
+        // bounded by. Pinned, it is the pinned count and nothing grows.
+        //
+        // `HeadNote` carries the bus in `u16`, because that list reaches a
+        // hundred million records on real material and every byte of it is
+        // 98 MiB -- so clamped to that, which no binding reaches at a real
+        // depth anyway.
+
+[108] src/merlin/synth.rs:1340
+        // The same record carries the CC120 ramp, and a pinned count is checked
+        // for the same reason -- a silent truncation would put a note on the
+        // wrong biquad or damp it over the wrong span.
+
+[109] src/merlin/synth.rs:1359
+        // The cache budget. Ragged entries mean `entries * lags` no longer
+        // describes it -- the deepest entry is the bank's longest release and
+        // the typical one is its *mean*, so sizing on the deepest would
+        // overcharge by 3.2x on the reference bank. This is the entry ceiling
+        // at the bank's own mean tail, plus a partition of slack.
+        //
+        // From the bank rather than from `merlin_release_tail`: that constant
+        // is for the bucket width, it happens to be near this bank's mean, and
+        // two numbers that agree by coincidence should not be one number.
+        //
+        // **Capped, since the cache evicts.** The entry ceiling and the byte
+        // budget used to be the same statement, because an entry seen once was
+        // resident for the whole render. They are not any more: an entry costs
+        // 16 bytes of `kmeta` whether or not it is on the card, so the ceiling
+        // can be in the millions while the budget stays a real VRAM decision.
+        // Without the cap, raising `--merlin-entries` to fit a bent file would
+        // silently ask for tens of GiB of cache and fail somewhere else.
+
+[110] src/merlin/synth.rs:1387
+            // 2 GiB, which is what the measured peak block asks for on the
+            // largest test file (3,428 distinct entries, 2.55 GiB) minus the
+            // headroom the rest of merlin needs on an 8 GB card. A run that
+            // wants more says so.
+
+[111] src/merlin/synth.rs:1394
+        // What one storage binding holds, which two of merlin's staging lists
+        // are chunked against -- see `head_pass` and `Fdl::encode_block`.
+        // `--merlin-max-binding-kb` shrinks it so that path is reachable on
+        // material a test can build; a render leaves it at the adapter's.
+
+[112] src/merlin/synth.rs:1415
+        // Where the kernels a step is missing are assembled and transformed
+        // together, in `ensure_kernels`. Its two buffers grow with the step, up
+        // to `KERNEL_BATCH_ROWS` partitions (32 MiB each at 2048 points) or
+        // what a storage binding holds of them, whichever is less -- and never
+        // below one full-depth kernel, which has to go up whole. A step that
+        // needs more goes up as several batches, which changes no result: each
+        // partition is its own workgroup in the transform.
+
+[113] src/merlin/synth.rs:1427
+        // The head correction. One row per waveform rather than per entry:
+        // release buckets share a sustain.
+
+[114] src/merlin/synth.rs:1500
+        // COPY_SRC on all three because `grow_buses` copies them into wider ones:
+        // the coefficients so a filter already uploaded keeps its bus, and the
+        // state because a biquad's `z1, z2` is the one part of this that carries
+        // from block to block.
+
+[115] src/merlin/synth.rs:1519
+        // The head cache is now the only length limit merlin has -- see
+        // `HeadCache::frames` -- and it is sized by *waveforms*, which is where
+        // its rows are keyed. Sizing it by the entry ceiling was a 4x
+        // overcharge: both test files come to 512 waveforms against 2,718 and
+        // 2,924 entries.
+
+[116] src/merlin/synth.rs:1538
+        // Both of these used to be one number -- `merlin_kernel_frames` -- and
+        // they are not the same quantity at all. The first is the bank's; the
+        // second is the material's. Worth printing rather than inferring from
+        // a config that no longer states either.
+
+[117] src/merlin/synth.rs:1551
+        // The filter count used to be a flag whose right value depended on the
+        // soundfont. Printed, so the number merlin chose and the room it left
+        // are read off the log rather than inferred.
+
+[118] src/merlin/synth.rs:1572
+        // **How many corrections one dispatch may see**, and the reason
+        // `head_pass` has a loop in it.
+        //
+        // A storage binding is capped at `max_storage_buffer_binding_size`, and
+        // on the primary target that is 2047 MiB -- 2,147,483,647 bytes, i32's
+        // range, which is a Vulkan/D3D12 ceiling and not a driver setting.
+        // `open_device` already asks for the adapter's own limits, so there is
+        // nothing left to raise. At 76 bytes a `Head` that is 28,256,363
+        // records, and one step of a merged black MIDI reached past it: the
+        // buffer grew to 33,554,432 and `create_bind_group` refused 2.375 GiB
+        // against the 2 GiB limit, 830 seconds into a render.
+        //
+        // Rounded down to the workgroup size purely so the last chunk is the
+        // only ragged one.
+
+[119] src/merlin/synth.rs:1589
+        // `--merlin-impulses` sets the starting capacity and is a flag, so it
+        // can name more than the device will bind. Clamped rather than checked:
+        // the loop makes a smaller buffer correct, only slower.
+
+[120] src/merlin/synth.rs:1608
+        // The emit block trails the spawn block by this much, and one block is
+        // no longer enough.
+        //
+        // The impulse sits at the note's release reference `Dj`, which is the
+        // bucket's *start* and so can be up to one bucket width before the
+        // note-off that resolves the note. `resolve` runs during the spawn of
+        // the note-off's block, so anything nearer than that has already been
+        // emitted and the impulse is silently lost.
+        //
+        // *This was wrong before the impulse moved, not because of it. The
+        // impulse used to sit at the note-**on**, which can be arbitrarily far
+        // back, so every note spanning more than one block lost its delay-line
+        // contribution entirely and kept only its head -- its body sounded and
+        // its release did not. On material whose mean note is 1.11 ms that is
+        // rare; one test file has 533,063 notes over half a second.*
+
+[121] src/merlin/synth.rs:1624
+        // The bucket width decides two things that pull against each other, and
+        // neither is obvious from the flags: a narrower bucket is a shorter
+        // emit lag -- so fewer notes held in flight, and `head_notes` is
+        // roughly `note rate * lag` -- and more distinct entries, so more
+        // kernel cache. Printed because a sweep of `--merlin-release-buckets`
+        // is the only way to see the trade and there was nothing to read it by.
+
+[122] src/merlin/synth.rs:1639
+        // One sample pool on the device for the fallback and the kernel
+        // builder, uploaded once. Merlin's own passes never read it: they work
+        // from sustain renders.
+
+[123] src/merlin/synth.rs:1685
+            // One row past the last tile; see `voice::ChannelTable::row_bias`.
+            //
+            // **Neutral, not zero.** A zeroed table reads as a bend factor of
+            // zero and a gain of zero, and `spawn` samples the gains into
+            // `chan_hist` whether or not anything has been published -- so a
+            // caller driving the trait directly, which every harness test does
+            // and `set_channels` need not precede, rendered silence. Mirrors
+            // what `ChannelTable::new` leaves its own rows at.
+
+[124] src/merlin/synth.rs:1713
+                // Its own device and its own sample pool. Sharing merlin's
+                // would save 757 MiB of VRAM on the reference bank and is worth
+                // doing, but it means threading one `Bank` upload through two
+                // pipeline sets and that is not what this change is.
+
+[125] src/merlin/synth.rs:1718
+                // The pool the per-voice backend would have, not half of it.
+                //
+                // *This was capped at 2^19 on the reasoning that only the
+                // unpromoted tail lands here -- 2.47% of one test file's notes.
+                // Measured 2026-10-12 on the 44.75 M-note test file it is 18%
+                // of them, 8.23 M notes peaking at 473,176 live, and the cap
+                // dropped 291,736 note-ons in two blocks at 101.5 s and stole
+                // 234,900 voices at 120.8 s -- audible, the reference peaking at
+                // 7.78 where merlin played 1.62 -- while the driver reported
+                // none of it, because `stats` carried only merlin's own counts.*
+                // It costs VRAM by the slot, not GPU time: the render pass runs
+                // over the live voices, and these are voices the file asks for.
+
+[126] src/merlin/synth.rs:1831
+    /// Frames of leading output the caller must discard.
+    ///
+    /// The same count of extra blocks has to be rendered at the end. See the
+    /// module docs.
+    /// The `+ 1` is the readback: a block is encoded and handed back on the
+    /// *next* call, so the device has somewhere to run. See [`Readback`].
+
+[127] src/merlin/synth.rs:1851
+    /// Notes clamped to the head cache because they were held longer than it.
+    ///
+    /// *Was `dropped_long`, and dropping is what it did: 350 notes on one test
+    /// file and 18,814 on another went unrendered because they outlived a
+    /// kernel length that was one constant for every entry. Nothing is dropped
+    /// now -- a note past this ceiling sounds and releases, it just stops
+    /// early -- and the ceiling itself moved from 1.83 s to eight seconds.*
+
+[128] src/merlin/synth.rs:1871
+    /// The frame this note's slot releases it, if this block's gate table says
+    /// so. Resolved by `voice::off_frame`, the one `cpu.rs` and `render.wgsl`
+    /// use, apart from the `base` rule below.
+    ///
+    /// For the `k`-th copy of a run: its ordinal is the run's first plus `k`.
+
+[129] src/merlin/synth.rs:1884
+            // Released before this block began. It cannot be *this* block's
+            // note-off, so the length is whatever the earlier block recorded;
+            // that path is handled when it happens. `off_frame` answers
+            // `Some(0)` here, which would read as this block's first frame.
+
+[130] src/merlin/synth.rs:1898
+        // `run_next` points into `open` by index, and a block that arrives in
+        // parts is resolved after each: renumber it to where each run lands.
+
+[131] src/merlin/synth.rs:1902
+            // A run's copies have consecutive ordinals on one slot, and a
+            // slot's note-offs pair with its note-ons in order, so what this
+            // block releases of a run is its front. Plan it a release frame at
+            // a time, weighted, and keep the rest open.
+
+[132] src/merlin/synth.rs:1914
+                // The note-off's frame inside *this* block, which is where the
+                // channel rows for the release are read: the gain the delay
+                // line's tail is fired at, and whether a CC120 damped this note
+                // rather than releasing it.
+
+[133] src/merlin/synth.rs:1928
+            // Not released yet. Once it outruns the head cache its body has
+            // nowhere left to come from, so release it there rather than
+            // waiting: it sounds for the ceiling and releases normally.
+            //
+            // *This used to `continue` -- the note was discarded outright, 350
+            // of them on one test file and 18,814 on another. The ceiling is
+            // also eight seconds now instead of 1.83, and it is a note-length
+            // ceiling rather than a kernel one; `horizon.rs`'s note that the
+            // two are the same bound no longer holds.*
+
+[134] src/merlin/synth.rs:1940
+                // No note-off frame: this one was never released, it ran out
+                // of head cache. The rows of this block say nothing about it.
+
+[135] src/merlin/synth.rs:1961
+    /// The params row a command reads, from its own variant.
+    ///
+    /// Mirrors `CpuSynth::params_of`, including the fallback: a variant the
+    /// driver named but never installed reads the bank's. That happens for a
+    /// slot the driver rebuilt after this note was queued, and rendering it
+    /// with the base table is what the per-voice backend does too.
+
+[136] src/merlin/synth.rs:1979
+    /// The modulation-envelope row beside it, or `None` when nothing can read
+    /// one -- the bank drives none, the config has it off, or this region does
+    /// not use it. `WaveKey` takes that `None` as "not part of the waveform".
+
+[137] src/merlin/synth.rs:1998
+    /// The filterless params table a kernel for `variant` is rendered through,
+    /// built on first use.
+
+[138] src/merlin/synth.rs:2014
+    /// The 8.24 bend factor rounded to the configured grid.
+    ///
+    /// Identity when `merlin_bend_cents` is zero, which is the default and what
+    /// a null test needs: quantising to a `w`-cent grid puts a bent note up to
+    /// `w/2` cents off pitch, and half a cent of error decorrelates a sustained
+    /// note within a second. So this is a **residency** lever traded directly
+    /// against fidelity, and the two cannot be measured in the same run.
+
+[139] src/merlin/synth.rs:2036
+    /// Fold this block's channel controllers into one note-on's command.
+    ///
+    /// **At the note's own frame, not at its tile's start.** `row_bias` is the
+    /// driver's answer to `../CLAUDE.md`'s "a controller applies from its own
+    /// frame": a channel row carries the state at the start of its tile, which
+    /// is stale for a note struck later in that tile, and the bias names the
+    /// row that is not. Reading the wrong one here would reproduce the defect
+    /// that record was written about -- 55% of one file's note-ons.
+    ///
+    /// Bend scales the step, which is part of [`WaveKey`], so a bent note gets
+    /// its own waveform and its own entries. Gain multiplies the note's own,
+    /// which already carries the region's pan and the velocity.
+
+[140] src/merlin/synth.rs:2054
+        // A delayed layer can start past the block, and the caller clamps
+        // nothing; the last tile's row is the right answer for it either way.
+
+[141] src/merlin/synth.rs:2076
+    /// The channel gains in force at `frame`, which must be inside the block
+    /// whose rows are loaded.
+    ///
+    /// No `row_bias` here, unlike [`Self::apply_channel`]: the bias exists for a
+    /// note *born* in a tile a controller has already written to, and this is
+    /// asked about a note-off, which reads the state the tile carries.
+
+[142] src/merlin/synth.rs:2095
+    /// Whether a CC120 in this block silenced this note, and at which frame.
+    ///
+    /// **All Sound Off is not a note-off**, even though the gate table
+    /// publishes one at the same frame: the reference damps the channel over
+    /// `steal_fade_frames` and merlin used to let those notes run out a full
+    /// release tail instead. On one test file's track that is worth **-18.2 dB
+    /// against the CPU reference** all by itself -- chords that should be cut
+    /// dead ringing on into the next phrase.
+    ///
+    /// Which notes a cut silences is decided by **note id, not by frame**, for
+    /// the reason `voice::CHAN_CUT_ID_LO` gives: a file using CC120 as a choke
+    /// puts the cut and the restrike on the same tick, and only the id
+    /// separates them.
+
+[143] src/merlin/synth.rs:2123
+    /// The filter bus a command's velocity selects, interning it on first sight
+    /// and widening the bus dimension when it does not fit.
+    ///
+    /// **Grow first, then upload.** The coefficients used to be written before
+    /// the bus check, and silently skipped for a filter past `bus_uploaded` --
+    /// harmless only while running out was always fatal.
+
+[144] src/merlin/synth.rs:2143
+            // **Not rescued by a shorter kernel, measured 2026-09-12.** Filters
+            // are interned for the whole render and never released, so this is
+            // the file's *cumulative* CC71-CC75 combinations times velocity
+            // cutoffs, not what sounds at once. A controller-heavy file on the
+            // reference bank ran out at 697 filters with 4.0 s kernels and at 713
+            // with 3.9 s: the 16 that 0.1 s of tail bought were consumed and it
+            // failed one past the new ceiling, as it had at every pinned count.
+            // Releasing a bus once its ring has drained is the real fix, and is
+            // not built; see TODO.
+
+[145] src/merlin/synth.rs:2182
+    /// Widen every buffer with a bus dimension to `buses`, keeping its contents.
+    ///
+    /// Exact for the reason `Fdl::grow_buses` gives: each of these is bus-major
+    /// with a fixed stride, so the old contents are a prefix of the new buffer at
+    /// the same offsets, and a new bus starts at zero -- the state of a filter
+    /// nothing has been heard through. `tests/merlin_controllers.rs` renders one
+    /// controller sweep growing and pinned and requires the two bit-identical.
+    ///
+    /// Doubling, from `filter_of`, so a sweep costs a handful of these rather
+    /// than one per filter. A pending `write_buffer` to an old buffer is flushed
+    /// ahead of the copy by the submit that carries it, so it is not lost.
+
+[146] src/merlin/synth.rs:2234
+        // Drained to zero by the merge at the end of every step, so between
+        // steps there is nothing in it to keep -- only the room.
+
+[147] src/merlin/synth.rs:2248
+    /// Distinct filters interned, buses allocated, and how many times the bus
+    /// dimension grew.
+
+[148] src/merlin/synth.rs:2254
+    /// The sustain render for a command's waveform, at least `need` frames of it.
+    ///
+    /// Grown by doubling rather than rendered at the ceiling: a waveform only
+    /// ever heard in short notes never gets past its release tail, which is
+    /// what keeps the build cost at the 0.66 s it was measured at instead of
+    /// putting merlin's whole eight-second note ceiling into it.
+    /// Also **where an evicted render is made again**, which is why the length
+    /// it reaches is `max(need, what it was last held at)` rather than `need`:
+    /// growth has to double off the high-water mark, or a kernel that was
+    /// evicted and asked for again would come back shorter than the one the
+    /// head cache and `segment` were reading, and the audio would move.
+
+[149] src/merlin/synth.rs:2267
+        // `touch`, not `pin`. This runs while a block is being planned, where
+        // the renders are not needed simultaneously -- pinning them would make
+        // a block that plans more waveforms than the budget holds fail when it
+        // could simply have evicted. The step-critical path is `host_kernel`,
+        // which does pin. See `Residency::touch`.
+
+[150] src/merlin/synth.rs:2282
+        // The variant's own filterless table, so a kernel built under CC71-CC75
+        // carries that variant's envelope. `Kernel::from_cmd` reads the release
+        // and `flat_from` from it as well, which is why it is the table and not
+        // just a flag. Taken from the descriptor when there is one, because
+        // variant slots are recycled and the index may name a different table
+        // now than it did when this waveform was first built.
+
+[151] src/merlin/synth.rs:2292
+        // **On the device, later, in a batch**, when there is a builder: the
+        // render is recorded here and queued by `start_builds` with everything
+        // else this block asked for, before anything reads it. Asked again
+        // before then, the larger length wins. The miss is counted here, where
+        // the CPU path counts it.
+
+[152] src/merlin/synth.rs:2319
+        // A render that had to be made again after eviction is the budget's
+        // price and is counted apart from a first build, which is work the
+        // render was always going to do.
+
+[153] src/merlin/synth.rs:2345
+    /// Queue every sustain asked for since the last call on the device, as one
+    /// batch per filterless table, and return without waiting for them.
+    ///
+    /// Called at the end of `spawn`, so a block's planning has its renders on
+    /// the way at once, and from `host_kernel` for one asked for since. Nothing
+    /// reads a render until the delay line reaches its notes, `latency_blocks`
+    /// later for the planned ones, so by the time `host_kernel` waits on a
+    /// batch the device has usually finished it: its latency hides behind the
+    /// host's work instead of stopping it.
+    ///
+    /// In waveform order, so what is built, and later stored, is a function of
+    /// the input.
+
+[154] src/merlin/synth.rs:2395
+        // Bounded: the oldest batches are read to make room, which is the
+        // order they would be read in anyway.
+
+[155] src/merlin/synth.rs:2438
+    /// The sustain render for waveform `id`, made again if it was evicted.
+    ///
+    /// Separate from [`Self::kernel_for`] because the head pass reaches a
+    /// waveform by id alone -- it has no `SpawnCmd` to hand, which is exactly
+    /// what `HostDesc` is for.
+
+[156] src/merlin/synth.rs:2444
+        // A render asked for and not yet queued goes up now, with everything
+        // else asked for since; one on its way is waited for, with every batch
+        // before it, in the order they were queued.
+
+[157] src/merlin/synth.rs:2495
+    /// Everything a note that is still **open** needs in order to sound.
+    ///
+    /// A note's body is `A[n]` whatever its duration turns out to be, so it can
+    /// be emitted before the note-off arrives -- and it has to be, because the
+    /// note-off can be seconds away and the blocks it would cover are long
+    /// gone by then. This is what makes that possible: the waveform row, the
+    /// bus and the gain, none of which depend on `D`.
+    ///
+    /// *Nothing did this before, so a note outliving the emit lag kept only
+    /// whatever of it fell after its own note-off. On a file whose mean note is
+    /// 17.5 ms that is rare and on one whose mean is 1.11 ms rarer still, but
+    /// it is 533,063 notes of the first one.*
+    /// The memo row for a spawn command, resolving it on first sight.
+    ///
+    /// The slow path here is the whole of what `plan_note` used to do per note:
+    /// the params lookup, the filter interning, the waveform key, the two
+    /// logarithms and the first sustain render. Everything after is a lookup.
+
+[158] src/merlin/synth.rs:2523
+        // The region's own release, clamped to what the ring was allocated for.
+        //
+        // The clamp is not dead weight now that CC71-CC75 reach merlin: `p` is
+        // the *variant's* row, and CC72 adds up to 15.0 s to a release the ring
+        // was sized for at a quarter of a second. A truncated release stops
+        // mid-decay, which is audible, so it is counted and reported rather
+        // than absorbed.
+
+[159] src/merlin/synth.rs:2537
+        // The shortest render any note of this voice can need: its own release,
+        // rounded up to whole partitions, plus the one a reference point can
+        // sit part-way into. `plan_note` grows it from there.
+        //
+        // Interned *before* the render, because the id is what the store is
+        // indexed by. Several memo rows can share one waveform -- that is the
+        // point of `WaveKey` being coarser than `VoiceKey` -- and `kernel_for`
+        // only ever grows what the id already holds, so a second row arriving
+        // with a shorter minimum cannot take the render back below what an
+        // earlier, longer note has already asked the head cache for.
+
+[160] src/merlin/synth.rs:2569
+    /// Keep an already-interned open note's waveform ahead of where it is being
+    /// read. Cheap when nothing has to move: the render only grows on demand
+    /// and `want_frames` is a compare.
+
+[161] src/merlin/synth.rs:2598
+        // One hash, over 36 bytes, for everything that does not depend on how
+        // long the note was held: the bus, the waveform row, the release tail
+        // and where the envelope settles. See `VoiceKey`.
+
+[162] src/merlin/synth.rs:2606
+        // Where the channel's gain has got to by the note-off. The tail is
+        // fired at *this* rather than at the note-on's, because the tail begins
+        // at the note-off; the head then ramps to meet it and there is no step
+        // at the seam. Falls back to the note-on's gain when there is no
+        // note-off to read -- a note clamped to the head cache rather than
+        // released.
+
+[163] src/merlin/synth.rs:2620
+        // **CC120 damps rather than releases.** The gate table publishes a
+        // note-off at the cut frame like any other, so nothing below here can
+        // tell the difference -- and the difference is a 1.8 s release tail
+        // that should not exist. A damped note fires no impulse at all and its
+        // head carries the linear ramp instead; see `HeadNote::fade`.
+
+[164] src/merlin/synth.rs:2636
+        // **A note held too far past its release reference is released on the
+        // head instead.** Section 3b's scalar is `r^(Dj-D)`, which for
+        // `Dj < D` *amplifies* the kernel, and the head subtracts the same
+        // amplified kernel back over `[Dj, D)`. On a release of seconds that is
+        // a factor of five at most across a bucket; on a one-millisecond
+        // release (r ~ 0.78 a frame) a note held 200 frames past `Dj` needs
+        // 10^11, and the two halves meet in fixed-point accumulators sized for
+        // magnitudes near one. They overflow, and what comes out is loud and
+        // independent of the note's gain: 28,507 against the reference's 0.8 on
+        // one test file, 2026-09-19, whatever `--volume` said.
+        //
+        // Nothing can be cancelled that is never added. Past this gain the
+        // note fires no impulse and the head plays the body and then the
+        // region's own release, `A[n] * r^(n-D+1)` -- exact, because `Dj <= D`
+        // puts the note past `flat_from`, where `A` is the settled sustain.
+        // The reference bank's slowest-decaying worst case is about 5.4, so it
+        // never comes here.
+        //
+        // Exponential releases only: under `--release-curve linear` the
+        // coefficient is a per-frame step rather than a factor, and neither
+        // section 3b's scalar nor the head's `1 - r^k` describes it.
+
+[165] src/merlin/synth.rs:2668
+        // What the delay line caches: the release tail, starting at `Dj`, with
+        // the impulse fired `Dj` frames after the note-on to match.
+        // `Kernel::segment` carries the derivation. The length is then the
+        // *region's* release and nothing else -- not the note's duration plus
+        // it -- which is what stopped a 16.2 s note needing a 20 s kernel in
+        // every ring slot of every bus, and what makes every bucket of a
+        // waveform the same depth.
+        //
+        // Not applied when the reference point is past the note's own end,
+        // which happens only for a note shorter than its region's attack: the
+        // correction runs over `[0, D)` there and would leave `[D, Dj)` with
+        // nothing in it. `flat_from` is 49 frames on the reference bank, so
+        // this is a corner rather than a cost.
+
+[166] src/merlin/synth.rs:2682
+        // Clamped at the ring, and counted if it bites. `new` sizes the ring
+        // from `max(flat + tail)` over the bank, so this should never fire --
+        // but the arithmetic there and the arithmetic here are two expressions
+        // of one rule, and when they disagreed the render *bailed* rather than
+        // degraded, hundreds of seconds in. Truncating a tail is the same
+        // trade `release_truncated` already makes.
+
+[167] src/merlin/synth.rs:2695
+        // **The branch above has to be part of the entry key.**
+        //
+        // `skip` and `depth` are properties of *this note* -- they turn on
+        // whether the release reference lands past its end -- but `entry_info`
+        // is written once, when the entry is first interned, and a release
+        // bucket holds notes of both kinds. So whichever note arrived first
+        // decided `skip` for every later note sharing the bucket, and the
+        // kernel the delay line cached stopped matching the delay the impulse
+        // was fired with.
+        //
+        // Measured 2026-09-09, one key and two notes: a 100-frame note nulls
+        // against the per-voice backend at **-121.3 dB** when it comes first
+        // and **+2.7 dB** when a 5-frame note precedes it. As a musical figure
+        // that is **6.5 dB too loud**, and it is what has been wrong with this
+        // backend on real material since bend went in -- audible, and invisible
+        // to the determinism test, which renders one file twice and so shares
+        // the order both times.
+        //
+        // `dj <= duration` is exactly `duration >= flat_from`, because `dj` is
+        // `max(bucket start, flat_from)` and the bucket start never exceeds the
+        // duration. So the two cases are "shorter than its own attack" and
+        // "not", and giving the first its own bucket makes `skip` and `depth`
+        // pure functions of the key again. A waveform has a handful of real
+        // buckets -- median 5, max 9 -- so `u16::MAX` cannot collide with one.
+
+[168] src/merlin/synth.rs:2721
+        // Enough waveform for the deepest of the two readers: the head
+        // correction wants `[0, D)`, and the kernel wants the whole of what
+        // `segment` reads -- `[Dj, Dj + depth * P)`, **not** `[Dj, Dj + tail)`.
+        //
+        // The partition count rounds the tail up, so the last partition runs
+        // past it by up to `P - 1` frames. Asking only for `tail` left those
+        // frames to `segment`'s zero padding *if* the render happened to be
+        // that short, and to real samples if some earlier, longer note had
+        // already grown it -- so an entry's cached kernel depended on the order
+        // notes arrived in. Two runs of one file agree, which is why the
+        // determinism test never saw it; two different files sharing a waveform
+        // would not.
+
+[169] src/merlin/synth.rs:2737
+        // The bucket-to-entry map lives on the memo row, so the common note
+        // does not hash an `EntryKey` either -- a waveform has a handful of
+        // buckets and the scan beats a map at that size.
+
+[170] src/merlin/synth.rs:2756
+                // What a rebuild needs, and nothing more. The kernel itself is
+                // **not** built here: it is built when the entry first fires,
+                // several blocks from now, and it may be evicted and rebuilt
+                // more than once before the render is done. Building it here
+                // would be building something the cache has no room to keep.
+                // See `ensure_kernels`.
+
+[171] src/merlin/synth.rs:2768
+        // One planned impulse against this entry, which is the whole of the
+        // future the eviction policy can see. See `residency.rs`.
+
+[172] src/merlin/synth.rs:2772
+        // `env(D) / env(Dj)`, the half of section 3b's scalar that was missing
+        // until 2026-09-10. One for every note that outlives its own attack,
+        // which is why a bank with a millisecond attack never showed it; well
+        // below one for a note that ends inside it, and leaving it out plays
+        // such a note out at the level it *would* have reached had it been
+        // held. See `ReleaseBuckets::gain`.
+        //
+        // From the same params table the kernel was rendered with -- the
+        // variant's, not the bank's -- because CC71-CC75 move the envelope and
+        // a ratio read off the wrong table would not match the waveform it
+        // scales.
+
+[173] src/merlin/synth.rs:2787
+            // **`D - 1`, not `D`.** The envelope advances before the sample is
+            // scaled, so on the note-off frame `cpu.rs` is already in
+            // `ENV_RELEASE` and multiplies the level it reached on the frame
+            // *before*. Reading `env(D)` instead leaves a flat 2.5% across the
+            // whole release tail on a 40-frame note -- **-32 dB, uniform**,
+            // which is what found it: a constant offset over an entire decay is
+            // a scalar, not a shape.
+            //
+            // `Dj` needs no such care. The kernel is released out of the
+            // *sustaining* waveform, which is flat by `flat_from`, so `env(Dj)`
+            // and `env(Dj - 1)` are the same number there.
+
+[174] src/merlin/synth.rs:2805
+            // `Dj <= D` means both points are at or past `flat_from`, where the
+            // envelope has settled, so the two levels are the same number.
+
+[175] src/merlin/synth.rs:2809
+        // The memo row's release, which is the kernel's: both come from the
+        // variant's params, the kernel's through the filterless copy of them,
+        // and clearing the filter does not touch the release.
+
+[176] src/merlin/synth.rs:2815
+        // Fired `skip` frames after the note-on, which is the other half of
+        // caching the kernel from `skip`.
+        //
+        // Clamped into the future, because an impulse landing in a block that
+        // has already gone out is simply lost, and losing it silently is what
+        // this whole change is against. The clamp only ever fires in one
+        // corner -- a note shorter than its own region's attack, so that `Dj`
+        // was held back to `flat_from` and `skip` fell to zero -- and it costs
+        // that note a few frames of timing rather than its release.
+
+[177] src/merlin/synth.rs:2843
+            // Relative to the step this slot is, which is where `slot` came
+            // from: `p` is 2048 or less, so this is a `u16` and the record is
+            // 16 bytes rather than 24.
+
+[178] src/merlin/synth.rs:2857
+                // Which release bucket this note's own start falls in. Two
+                // notes of a waveform share one correction exactly when this
+                // matches, because their tails are then the same age.
+
+[179] src/merlin/synth.rs:2867
+        // The head correction runs over `[from, D)`. Everything before `from`
+        // has already gone out through the open-note path in `render`, which
+        // is what lets a note longer than the emit lag sound at all.
+        //
+        // Its gain is the note's own, *without* the section 3b scalar, because
+        // the correction is `A[n] - kernel*scalar` and the scalar is already
+        // inside `f`.
+
+[180] src/merlin/synth.rs:2890
+            // Both narrowed to `u16` on 2026-09-09: this list reached 102.7 M
+            // records on the largest test file, where every byte is 98 MiB.
+            // `fade` is zero or `steal_fade_frames`, which `Config::validate`
+            // holds below `block_frames`; `bus` is twice a filter index and
+            // `new` refuses a filter count that would not fit.
+
+[181] src/merlin/synth.rs:2913
+        // A damped note stops at the end of its ramp; only a released one rings
+        // for its kernel's depth.
+
+[182] src/merlin/synth.rs:2921
+    /// The rest of `plan_note` for a note released on the head: no impulse, no
+    /// entry, and a head record that plays the body and then the region's own
+    /// release. See the comment above the call, and `HeadNote::release`.
+
+[183] src/merlin/synth.rs:2937
+        // The sustain render and the head row both have to reach the end of
+        // the release now, not just the note-off.
+
+[184] src/merlin/synth.rs:2977
+    /// First frame of the block `render` will emit next.
+    ///
+    /// `spawn` increments `block` after `resolve`, so during planning this is
+    /// `block - latency`, and during `render` it is the same frame by a
+    /// different route. Everything a note contributes has to land at or after
+    /// it; anything earlier has already been written out.
+
+[185] src/merlin/synth.rs:2987
+    /// Put every kernel this step fires on the card, building and evicting as
+    /// far as it takes.
+    ///
+    /// **This is where kernels are built now.** They used to be built and
+    /// uploaded in `plan_note`, which is the only thing a cache that never
+    /// evicted allowed: an entry seen once was resident for the whole render.
+    /// With eviction the build has to happen where the demand is, which is the
+    /// step being encoded -- the dev notes section 7, and `residency.rs` for why
+    /// throwing a kernel away is safe.
+    ///
+    /// Two passes on purpose. **Everything is pinned before anything is
+    /// evicted**, because the firing list is exactly the set that must be
+    /// resident simultaneously, and evicting one member of it to make room for
+    /// another would be a loop that never finishes.
+    ///
+    /// **And the missing entries are built as one batch, not one at a time.**
+    /// The first pass over `fired` makes every decision the one-at-a-time loop
+    /// made, in the same order -- the host render, then allocate, evict a victim
+    /// and allocate again until it fits, then admit -- so the evictions, the
+    /// page placement and the residency counts are what they were. What it no
+    /// longer does is build the kernel then: it only reserves the pages, and
+    /// [`Self::build_kernels`] fills them all afterwards. Built one at a time
+    /// this cost 1.1 ms an entry (5.1 s for a few thousand on a 45 M-note test
+    /// file, and 0.43 ms an entry when every waveform was convolved), nearly all
+    /// of it a submit and a blocking readback per kernel and the spectra's round
+    /// trip through the host. Batched it is 0.25 s for the same kernels.
+
+[186] src/merlin/synth.rs:3034
+            // Remade if the host budget threw it away, rather than treated as
+            // a hard error. That error was only correct while the host cache
+            // grew without limit.
+
+[187] src/merlin/synth.rs:3039
+            // Evict until it fits. Coalescing in the allocator is what lets a
+            // long kernel be made out of several short evictions.
+
+[188] src/merlin/synth.rs:3085
+        // Counted after the fact rather than as a separate first sighting: an
+        // entry built once is a build, and one built again is the price of the
+        // policy. `Drop` reports the two apart by comparing against the entry
+        // count.
+
+[189] src/merlin/synth.rs:3092
+    /// Fill the pages `ensure_kernels` reserved: assemble every kernel in
+    /// parallel into one staging buffer, transform them all with one dispatch,
+    /// and copy each one's spectra into the cache pages it was given. The
+    /// spectra never reach the host.
+    ///
+    /// **Submitted on its own, before the step's encoder exists.** The batch
+    /// writes its input with a queued write and the step's forward transform
+    /// writes its own uniform with another, and a queued write lands at the next
+    /// `submit` rather than where it was issued -- the bug the dev notes section 8
+    /// records for the FDL (M1''', bug 2). The batch's transform reads a uniform
+    /// nothing writes (`Fft::bind_real_exact`), and being its own submission it
+    /// is ahead of the step's on the queue, so it has completed by the time the
+    /// multiply-accumulate reads the cache. No host wait is needed for that.
+    ///
+    /// **Output does not depend on how this is cut.** Each kernel is assembled
+    /// by a pure function of its waveform and `(dj, skip, depth)`, each
+    /// partition is transformed by a workgroup that reads and writes only its
+    /// own row, and each spectrum is copied whole; so neither the rayon fan-out
+    /// nor where the entries are split into batches reaches a bit.
+
+[190] src/merlin/synth.rs:3129
+                // One slice per kernel, handed out in order, then built on
+                // rayon's pool. The closure borrows `chunk` and `p` and no
+                // part of `self`, which is not `Sync`.
+
+[191] src/merlin/synth.rs:3165
+    /// Record the head correction for one partition step.
+    ///
+    /// Two dispatches: the corrections scatter into a fixed-point accumulator
+    /// with integer atomics -- heads overlap, and `CLAUDE.md` bans float
+    /// atomics for anything that has to be reproducible -- and then a merge
+    /// folds the accumulator into the block the FDL just produced.
+    /// Steps that needed more than one scatter pass, `(head, impulse)`, and
+    /// what this device binds at once, `(corrections, impulses)`.
+    ///
+    /// Public so a test can prove it reached that path rather than asserting
+    /// two identical renders that both took the single-pass one.
+
+[192] src/merlin/synth.rs:3189
+        // Reused rather than collected fresh: a dense block clips ~29,000
+        // corrections of 76 bytes each, and allocating that twice a step for
+        // 3,072 steps is gigabytes of churn for a list that is the same size
+        // every time.
+
+[193] src/merlin/synth.rs:3195
+        // In parallel, and **in the same order**. `clip` is a pure function of
+        // one record and the step, and an indexed parallel `extend` lays the
+        // results down in the order of the underlying iterator -- so the list
+        // that comes out of this is byte-for-byte the one the serial loop
+        // produced.
+        //
+        // The order is not cosmetic. It sets the first-sighting numbering the
+        // counting sort below is dense over, and the sequence `Heads::bind`
+        // evicts pages in. The audio would survive a reordering, since the
+        // scatter is integer-atomic, but the *page eviction* would not be
+        // identical, and eviction on this backend has already been shown to
+        // move the output at -88 dB. Preserving order costs nothing here, so
+        // there is no reason to find out.
+        //
+        // **Only the records that reach this step**, which `head_steps` has
+        // already sorted out in the order they were pushed. This used to clip
+        // every live record in one list and keep the ones that overlapped:
+        // 812.6 M visited for 85.8 M kept over the 44.75 M-note test file, 3.0 s.
+        // Everything in the list overlaps, so `clip` here is the arithmetic and
+        // not the test. A record filed under a step it does not reach would
+        // clip to nothing, harmlessly; one *missing* from a step it does reach
+        // is a note that goes silent there, which is why `HeadNote::steps` is
+        // built from the same `reach` as `clip` and pinned to it by the
+        // `steps_agree_with_clip` test.
+        //
+        // **Clipped where it lands, not into a list of its own first.** The scan
+        // below needs to know which records give a correction and how many, and
+        // `HeadNote::pieces` says so without building one, so the records are
+        // clipped exactly once, in the gather that puts them in their sorted
+        // place. A record clips to two pieces only when it was released on the
+        // head, so the flattened list is not the same length as the records and
+        // `flat_map_iter` into a `Vec` -- which is what this did, through a list
+        // of per-task vectors that were then copied into one -- measured 730 us
+        // at best and 1,700 us median for a 28,000-record step, where an indexed
+        // map measured 195 and 300.
+
+[194] src/merlin/synth.rs:3232
+        // The channel gain of the block being *emitted*, ramped across it, so a
+        // held note follows CC7 instead of wearing whatever it was struck under.
+
+[195] src/merlin/synth.rs:3235
+        // Hoisted out of the loop rather than read through `self` inside it.
+        // Two reasons, and the second is the one that mattered: `MerlinSynth`
+        // holds a readback `Receiver` and so is not `Sync`, which a closure
+        // running on rayon's pool may not borrow -- and there are at most 256
+        // channels, sixteen per MIDI port, so calling `chan_span` per *note*
+        // was redundant work on a list that reaches tens of thousands.
+
+[196] src/merlin/synth.rs:3246
+        // The still-open notes, after the records in the list's order. One
+        // `Option` per note, because a note that does not reach this step gives
+        // nothing and `filter_map` into a `Vec` is not an indexed iterator --
+        // see the comment on the records above.
+
+[197] src/merlin/synth.rs:3275
+        // Give every waveform this step reads somewhere to live, taking pages
+        // off the ones it does not, and rewrite the records to point at it.
+        //
+        // **`Head::base` is a frame offset from here on, not a waveform id.**
+        // The two used to be the same number times a fixed row stride, which
+        // held while a waveform meant a (sample, envelope, step) triple and one
+        // file used 512 of them. Bend joined the key on 2026-09-07, the same
+        // file passed 768 waveforms in six seconds of audio, and one step of it
+        // reads 806 distinct ones -- so rows became pages and the stride became
+        // a per-record offset.
+        //
+        // Pinned in one pass before any is bound, for the same reason
+        // `ensure_kernels` does it: this list is what the step needs *at once*,
+        // so taking pages off one member of it for another would not terminate.
+        //
+        // **Once per distinct waveform, not once per record.** Over the
+        // 44.75 M-note test file a step reads 271 waveforms on average (806 at
+        // most) and carries 28,000 corrections: 830,758 waveform-steps for
+        // 85.8 M corrections. This loop used to fetch the host render and call
+        // `bind` for every one of the corrections -- an `Arc` clone, hash lookups
+        // and the residency bookkeeping each time, 3.1 s with the pin. The
+        // second and later bind of a waveform inside one step can decide
+        // nothing the first did not: its pages are pinned so they cannot be
+        // taken, `want` and the render's length do not move within a step, so
+        // `bind` finds the pages it left, has them filled to `want` already and
+        // returns the same `(base, cap)` as a hit. Binding in first-sighting
+        // order is the same sequence of decisions with the repeats left out.
+        //
+        // The residency counters are the one thing that does see the
+        // difference: each skipped call used to count a hit, and they are still
+        // counted (below) so the report's hit rates read as they did.
+
+[198] src/merlin/synth.rs:3307
+        // This step's own waveforms numbered from zero in first-sighting order,
+        // which is what keeps the counting sort below dense: numbering over
+        // every waveform the render has ever seen would make the histogram the
+        // pass's cost on a bent file, and there is no fixed row count to use
+        // instead any more. `keys` is each correction's number and `counts` the
+        // histogram over them, built in the same pass; `srcs` says where each
+        // correction comes from -- `2 * record + piece` in `due`, or past those,
+        // its place in `open_heads` -- so that the unsorted list never has to be
+        // built, only the sorted one.
+
+[199] src/merlin/synth.rs:3358
+                // The second piece of a note released on the head, whose first
+                // piece is in the same step: the pair counts once. See
+                // `Head::split`.
+
+[200] src/merlin/synth.rs:3377
+            // Fetched one at a time rather than made resident up front. The
+            // `Arc` keeps this render alive for exactly the `bind` that reads
+            // it, so the *store* never has to hold more than one of them on
+            // this account -- which is the difference between a budget that
+            // can be met and one that cannot. Pinning the whole step's set
+            // here, copied from how the device caches work, asked for 4 GiB at
+            // once on the largest test file and made the budget unenforceable.
+
+[201] src/merlin/synth.rs:3407
+        // Grouped by waveform: M0 measured this access pattern at 77.9 G
+        // frame-ops/s with the reads sorted against 37.7 unsorted, so the order
+        // this list is built in is worth 2x on the device.
+        //
+        // **Counted, not compared.** The keys are dense by construction, so
+        // this is a two-pass bucket placement rather than `n log n`. The
+        // comparison sort it replaces was ~430,000 comparisons a step against a
+        // 3,072-step render, and the first profile put the whole pass at 10.0 s.
+        // Dropping the grouping altogether would have been cheaper still and is
+        // the wrong trade: it buys the device 2x on a pass whose cost is now
+        // hidden under the host's anyway, and this keeps it for almost nothing.
+        // Stable, so the order stays a function of the input.
+        //
+        // **Placed as a permutation, then gathered in parallel.** The serial
+        // placement moved every 76-byte record into a freshly zeroed buffer and
+        // took 1.43 s of the 44.75 M-note test file, most of it the memset and
+        // the scattered 76-byte writes. The scatter that has to be serial is
+        // only the counting -- which correction lands in which slot -- and that
+        // is four bytes each. The corrections then move once, as a gather over
+        // `order`, which is an indexed parallel iterator and so writes each
+        // result straight into its place in the output; the new `(base, cap)`
+        // is applied there, in the same move.
+
+[202] src/merlin/synth.rs:3466
+        // Grows rather than refuses, for the same reason the delay line's
+        // staging does: how many corrections land in one step is the material's
+        // to decide, not a flag's. Nothing here survives the step.
+        //
+        // **Growth stops at `head_chunk`**, which is what the device will bind
+        // at once. Past that the buffer is reused and the dispatch repeated --
+        // see the loop below.
+
+[203] src/merlin/synth.rs:3489
+        // Headroom: the worst case is every correction landing on one frame at
+        // unit gain, so scale by the count.
+        //
+        // **The step's count, not a chunk's.** `merge` divides by this once,
+        // after every chunk has scattered into the same accumulator, so all
+        // chunks have to agree on it -- and the overflow bound is over the
+        // whole step's overlap anyway.
+        //
+        // **Notes, not pieces.** A note released on the head can be two
+        // pieces in one step, either side of its note-off, and they never
+        // write the same output frame -- so they share one unit of headroom.
+        // Counting both halved the scale on material where most notes split.
+        // **In notes, so in weight** (THE PLAN, Phase 1): a run's record
+        // stands for `weight` notes and writes what they did, so the count it
+        // replaces is its weight, and an unweighted step gives the same scale.
+
+[204] src/merlin/synth.rs:3531
+            // The path every step takes but a handful, recorded into the
+            // caller's encoder exactly as it always was.
+
+[205] src/merlin/synth.rs:3545
+            // More corrections than one binding holds, so scatter them in
+            // pieces through the same buffer.
+            //
+            // **This is bit-exact, and that is the whole reason it is allowed.**
+            // The scatter accumulates through *integer* atomics into
+            // `head_acc`, so it is associative and commutative -- `head.wgsl`
+            // says so where it explains why the atomics are integer at all, and
+            // `../../CLAUDE.md` requires it of the mixdown. Splitting one
+            // dispatch into several changes the order the adds land in, which
+            // was never defined, and changes nothing else. `merge` runs once
+            // afterwards over the same accumulator with the same `scale`.
+            //
+            // **One buffer, not one per chunk.** A chunk is up to 2 GiB and
+            // there may be several; allocating them all would trade a crash for
+            // an out-of-memory on an 8 GiB card. Reuse is safe because the
+            // queue is a single ordered timeline: chunk i+1's upload is a copy
+            // submitted after chunk i's command buffer, so it cannot overtake
+            // the dispatch still reading the previous contents.
+            //
+            // **Submitted here rather than recorded into `enc`**, because a
+            // `Queue::write_buffer` is applied at the next submit and not where
+            // it was issued -- so recording every chunk into one encoder would
+            // hand all of them the *last* chunk's records. Running ahead of the
+            // caller's encoder is safe: this pass reads the head cache, its own
+            // records and the accumulator, and writes only the accumulator. It
+            // touches nothing `enc` produces -- `outbuf` is bound but only
+            // `merge` writes it -- and the accumulator was zeroed by the
+            // previous step's `merge`, in a submission that has already gone.
+
+[206] src/merlin/synth.rs:3601
+            // `merge` below reads `frames`, `buses` and `scale`, which every
+            // chunk wrote identically. `count` is the last chunk's, and merge
+            // does not read it.
+
+[207] src/merlin/synth.rs:3619
+    /// Filter each bus, then sum the buses to stereo.
+    ///
+    /// After the head correction, because a note's head is part of the note and
+    /// has to go through the same biquad.
+
+[208] src/merlin/synth.rs:3624
+        // Only the filters actually seen. The rest are silent, and running a
+        // biquad over silence still costs a dispatch's worth of loop.
+
+[209] src/merlin/synth.rs:3659
+    /// Collect the readback started a block ago, if there is one.
+    ///
+    /// `steps` chunks of `[left P][right P]`, one per partition step.
+
+[210] src/merlin/synth.rs:3692
+    /// What the two device caches had to throw away: kernel evictions, kernels
+    /// rebuilt after one, and head-row evictions.
+    ///
+    /// Public so a test can assert that eviction *happened*. A residency test
+    /// that only checks the output is byte-identical would also pass with the
+    /// cache large enough never to evict, which is the thing it is meant to
+    /// rule out.
+
+[211] src/merlin/synth.rs:3707
+        // Keep this block's channel gains before the rows are replaced: the
+        // open-note path needs them `latency_blocks` from now. See `chan_hist`.
+
+[212] src/merlin/synth.rs:3740
+    /// Route commands to the fallback or open them for convolving. A block's
+    /// commands may come in several calls; each appends, in order.
+    /// THE PLAN, Phase 1: if `m` is an exact copy of a note-on this block has
+    /// already opened on its slot -- same frame, same command but for the note,
+    /// same base gains, the next ordinal on the slot -- count it into that run
+    /// and say so.
+
+[213] src/merlin/synth.rs:3773
+        // Route before anything else touches the note. The decision has to be
+        // made at the note-*on*: a note's body reaches the output through the
+        // head correction from the frame it starts, so a note moved to the
+        // fallback later would already have been counted once here.
+
+[214] src/merlin/synth.rs:3781
+            // **Counted on the resolved command, not the raw one.**
+            // `apply_channel` folds the channel's bend into the phase step, and
+            // the step is part of `VoiceKey` -- so the raw command collapses
+            // every bend variant of a note onto one counter, promotes them
+            // together on the 256th note between them, and then hands merlin a
+            // separate waveform for each. Measured before the fix: 736
+            // promotions producing 24,050 interned waveforms, which is the
+            // arithmetic saying it plainly.
+
+[215] src/merlin/synth.rs:3790
+            // **A gliding note never convolves.** Its pitch moves under it, and
+            // a kernel is one fixed waveform shared by every note that maps to
+            // its entry -- `Kernel::from_cmd` would bake this note's glide into
+            // all of them. So it goes to the fallback whatever its count, the
+            // way everything section 3b cannot represent should.
+
+[216] src/merlin/synth.rs:3802
+                // No fallback (`--merlin-promote-after 0`), so it is convolved
+                // at its own pitch with the glide stripped, and counted: that
+                // is audibly not the note it was.
+
+[217] src/merlin/synth.rs:3814
+                    // The *raw* command goes to the fallback: the per-voice
+                    // backend resolves the channel itself from the rows it was
+                    // given, and merlin's rewritten one would apply it twice.
+
+[218] src/merlin/synth.rs:3837
+    /// **And started at once.** The fallback has everything its block needs
+    /// -- the driver published the gates, channels, variants and glide
+    /// before calling this -- so its block goes to the device here and runs
+    /// under the planning, kernel builds and transforms below, which are
+    /// host work and most of a dense block. Started in `submit` instead, it
+    /// had nothing but `finish` behind it once the driver's own preparation
+    /// moved to another thread: 5.8 s of fallback became 15.0 s on the
+    /// 44.75 M-note test file, 2026-09-19. The fallback still sees its
+    /// calls in the order it always did.
+
+[219] src/merlin/synth.rs:3859
+        // `build` and `transform` happen inside `resolve` and are counted
+        // separately, so `plan` is what is left: the pairing, the interning and
+        // the per-note hashing.
+
+[220] src/merlin/synth.rs:3871
+    /// The end of a block's `spawn`: its renders on their way and the block
+    /// counted.
+
+[221] src/merlin/synth.rs:3874
+        // What this block's planning asked to be rendered goes to the device
+        // now, to be ready by the time the delay line reaches those notes.
+
+[222] src/merlin/synth.rs:3888
+        // The fallback holds real voices and needs the note-offs to release
+        // them. Forwarded verbatim: both backends are looking at the same
+        // block of the same file.
+
+[223] src/merlin/synth.rs:3897
+    /// Forwarded, and only that: a gliding note never reaches the convolution
+    /// path (see `spawn`), so the fallback is the only half that has a glide
+    /// path to switch on.
+
+[224] src/merlin/synth.rs:3907
+    /// Take this block's channel rows. `spawn` reads them per note-on; see
+    /// [`MerlinSynth::apply_channel`].
+    ///
+    /// The variant flag is not kept: a command carries its own variant and
+    /// merlin resolves it at the note-on, so there is no per-tile variant path
+    /// to switch on. Nor is the cut flag -- CC120 already reaches merlin as a
+    /// note-off through the gate table, so those notes release rather than
+    /// being damped. That is the residual, and it is recorded in the development notes
+    /// rather than silently accepted.
+
+[225] src/merlin/synth.rs:3923
+        // Forwarded with every flag intact. The fallback is an ordinary
+        // per-voice backend and applies bend, gain, the variant and CC120 the
+        // way it always has -- which is also why its notes get the controller
+        // handling merlin approximates, and why a note is worth routing there
+        // for correctness as well as for cost.
+
+[226] src/merlin/synth.rs:3934
+    /// Install one copy of the params table.
+    ///
+    /// **Slots are recycled**, which is the trap here: `Driver::select_variant`
+    /// rebuilds the least recently used slot when a file asks for more distinct
+    /// controller states than there are slots, so index `i` can mean different
+    /// DSP in two different blocks. Every memo keyed on the index therefore has
+    /// to be dropped -- `voice_of` is, below. `built` and `entries` are keyed on
+    /// the params *by value*, so they separate the two states on their own and
+    /// are left alone.
+
+[227] src/merlin/synth.rs:3967
+        // Kept as handed over: the driver built it for this and nothing else
+        // holds it, so there is nothing to copy.
+
+[228] src/merlin/synth.rs:3975
+            // Orphaning the `voices` rows rather than compacting them: they are
+            // reached only through this map, ids are handed out by push, and a
+            // rebuild is already paying for a 22,528-row table build on the
+            // driver side.
+
+[229] src/merlin/synth.rs:3993
+    /// Yes: a part is routed and its released notes planned, and the order in
+    /// which notes are planned -- the open list's, older notes first and then
+    /// this block's in command order -- is the order one `spawn` would plan
+    /// them in, so the output is the same. What moves is only when the
+    /// fallback's block starts: after the last part rather than before the
+    /// planning, since it needs every part's notes.
+
+[230] src/merlin/synth.rs:4021
+    /// Nothing left to start. The fallback's block went to the device in
+    /// `spawn`, as soon as it had its notes, so that it runs under merlin's
+    /// host passes; merlin's own passes are encoded in `finish`, where they
+    /// already run a block behind their readback. See [`Readback`].
+
+[231] src/merlin/synth.rs:4034
+        // The fallback runs on merlin's block clock but answers a block ahead
+        // of what merlin is about to return, so its output is held and summed
+        // in later. `spawn` has already advanced `self.block`, so the block it
+        // was just given -- and the one it answers with here -- is
+        // `self.block - 1`, while merlin returns `self.block - 2 -
+        // latency_blocks` below. See `fb_ring`.
+
+[232] src/merlin/synth.rs:4054
+        // Hand back the block encoded *last* call, then encode this one. The
+        // two are a block apart, which is the whole point: the device gets a
+        // block's worth of host work to run underneath instead of being waited
+        // on the moment it is handed something. See [`Readback`].
+
+[233] src/merlin/synth.rs:4074
+        // Price option 2 against the rows this block published: a correction
+        // fires per tile-to-tile gain move per channel, once for every pair
+        // still live on it. The rows are the *spawning* block's rather than the
+        // emitted one's, which is the wrong block by the emit lag and the right
+        // statistics -- this is a price, not a signal path.
+
+[234] src/merlin/synth.rs:4101
+        // The fallback block for the frame merlin just returned. Summed rather
+        // than mixed: both halves are the same file's notes at the same gains,
+        // partitioned by which of them earned a kernel.
+
+[235] src/merlin/synth.rs:4114
+        // `spawn` has already advanced past this block, so the block just
+        // spawned is `self.block - 1` and the one being *encoded* is
+        // `latency_blocks` before that. What was returned above is the block
+        // before that again.
+
+[236] src/merlin/synth.rs:4126
+        // Notes still open when the emit block has caught up with them. Their
+        // bodies go out now, unreleased; `plan_note` picks up from where this
+        // leaves off when the note-off finally arrives, which is what `from`
+        // on a `HeadNote` is.
+        //
+        // Interned here rather than at note-on because almost nothing reaches
+        // this point: a note has to outlive the emit lag, and the mean note in
+        // this repertoire is a thousandth of it.
+
+[237] src/merlin/synth.rs:4145
+                    // The cache has to keep up with the note: it is being read
+                    // further into the waveform every block.
+
+[238] src/merlin/synth.rs:4167
+            // Depths from the host's own table, not from the cache's `kmeta`.
+            // The plan is built *before* residency is settled, so an entry that
+            // is about to be rebuilt has no `kmeta` row yet -- and the whole
+            // firing list is sorted by depth, so reading zero for one of them
+            // would silently mis-order it and break the multiply-accumulate's
+            // early exit.
+
+[239] src/merlin/synth.rs:4174
+            // What a sort key can hold: entry ids are below the table's size and
+            // a kernel is never deeper than the ring. `rebuild` checks every
+            // note against them rather than trusting them.
+
+[240] src/merlin/synth.rs:4181
+            // Taken out of `self` for the step and put back after the encode:
+            // the plan and its scratch keep their capacity from one step to the
+            // next, which is what a dense step would otherwise allocate and
+            // fault in afresh -- see `PlanScratch`.
+
+[241] src/merlin/synth.rs:4192
+            // Everything this step fires has to be on the card before the
+            // encode, and this is where a kernel is built at all.
+
+[242] src/merlin/synth.rs:4196
+            // Until the submit below: `grow_buses` refuses while this is set,
+            // because this encoder is about to bind the buffers it would swap.
+
+[243] src/merlin/synth.rs:4216
+            // Into this block's readback slot rather than a fresh buffer and a
+            // second submission, so the whole block leaves in one queue entry.
+
+[244] src/merlin/synth.rs:4228
+            // Consumed: the ring already carries this entry's tail, so the
+            // slot is free for a step `planned.len()` further on.
+            //
+            // And each of these notes stops being a *visible future use* of its
+            // entry, which is what the eviction policy ranks on -- an entry with
+            // nothing left planned is the first thing to go. See `residency.rs`.
+
+[245] src/merlin/synth.rs:4235
+            // Taken and put back rather than borrowed, to walk it while
+            // `self.res` is borrowed mutably -- and put back *after* `clear`
+            // so the slot keeps its capacity, which is the whole reason the
+            // ring exists instead of a fresh Vec per step.
+
+[246] src/merlin/synth.rs:4250
+        // Nothing to retire here any more: `head_pass` takes a step's list off
+        // `head_steps` whole, so a record is gone the moment the last step it
+        // reaches has been played. That used to be a `retain` over the one list
+        // after every block, with `done_before` as the cut -- a head lives
+        // longer than its impulse (it spans `D` frames, and its impulse is
+        // fired `skip` late, so the head is the *earlier* of the two), and it
+        // has to be `span` rather than `d`, because a damp or a release on the
+        // head plays past the note-off and dropping the record at `d` lost
+        // whatever of it crossed into the next step. `HeadNote::steps` is
+        // built from `span` for the same reason.
+
+[247] src/merlin/synth.rs:4261
+        // `active_voices` is the driver's admission input -- `admit_take(live,
+        // want)` reads it as pool occupancy and drops the excess. Merlin has no
+        // pool and never needs to drop, so reporting a real backlog here throws
+        // notes away for nothing: the first full render of one test file
+        // discarded **5.5 million** of its 44.75 million note-ons that way,
+        // which is the exact behaviour this backend exists to remove.
+        //
+        // So this is a flag, not a count: non-zero only while something is
+        // still outstanding, which is what the driver's tail check needs, and
+        // small enough that admission never throttles.
+        // `emit` is the block just *encoded*; what left the building this call
+        // is the one before it, so the drain has to run a block longer.
+
+[248] src/merlin/synth.rs:4281
+    /// Merlin's own counts plus the fallback's stolen and dropped. Merlin never
+    /// steals or drops, but the per-voice backend inside it has a pool and can,
+    /// and a summary that says "0 stolen, 0 dropped" over a render that lost
+    /// notes is worse than no summary.
+
+[249] src/merlin/synth.rs:4299
+    /// No pool, so no cap. Merlin renders every note-on it is given, and
+    /// `--max-voices` must not reach it.
+
+[250] src/merlin/synth.rs:4309
+    /// Never asked for: the driver steps over a block only for a backend with a
+    /// pool. Merlin's output arrives blocks after the input that made it and its
+    /// `active_voices` is a flag rather than a count, and nobody has shown that
+    /// it can leave itself exactly as rendering the block would have, which is
+    /// what `Backend::skip_block` requires. See `Driver::admit_block`.
+
+[251] src/merlin/synth.rs:4319
+        // Cumulative rather than per block, unlike the per-voice backends':
+        // merlin's question is where a whole render went, and a single block
+        // says nothing about the phases that only fire on a new entry.
+
+[252] src/merlin/synth.rs:4341
+        // Filters, because the count is chosen rather than given: what the file
+        // interned against what the bank alone has, and whether getting there
+        // took growing.
+
+[253] src/merlin/synth.rs:4354
+        // The host store, reported whether or not it evicted, because its size
+        // is the thing this backend was losing on: 21.5 GiB on the largest test
+        // file before it had a budget at all (2026-09-09). `peak` is what the
+        // process actually had to hold, and against `budget` it says whether
+        // the budget was ever the binding constraint.
+
+[254] src/merlin/synth.rs:4372
+        // The fallback, reported whenever it is on: the two numbers that say
+        // whether the threshold is set anywhere near right are how many notes
+        // went to the per-voice path and how many waveforms earned a kernel.
+
+[255] src/merlin/synth.rs:4425
+        // Steps whose corrections outgrew one storage binding. Nothing is wrong
+        // when this is non-zero -- the pass is bit-exact either way -- but it
+        // names the file as one that would have crashed before 2026-09-09, and
+        // it is the signal that a step is carrying tens of millions of
+        // simultaneous notes.
+
+[256] src/merlin/synth.rs:4441
+        // Where the rest of the host memory is, which is **not** obvious and was
+        // guessed wrong once: the sustain renders were assumed to be the whole
+        // of a 21.5 GiB peak (2026-09-09) when they are one term of it. Merlin
+        // has no voice pool, so `open` and `head_notes` scale with how many
+        // notes are *sounding* -- 2.7 M at once on the largest test file --
+        // rather than with the waveform count the caches are sized by.
+
+[257] src/merlin/synth.rs:4469
+        // Residency, which is only interesting once something has been thrown
+        // away: a render whose working set fits reports 100% and no evictions,
+        // and that is the answer to "did the policy cost me anything".
+        //
+        // The rebuild count against the entry count is the ratio that matters.
+        // Equal means every kernel was built once, which is what the cache used
+        // to guarantee by never evicting; well above means the working set does
+        // not fit and the render is paying a transform per miss.

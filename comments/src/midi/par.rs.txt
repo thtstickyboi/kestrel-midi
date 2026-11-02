@@ -1,0 +1,125 @@
+# Comments extracted from src/midi/par.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/midi/par.rs:5
+//! The MIDI merge on worker threads, `MidiStream::set_threads`
+//! (the development notes).
+//!
+//! # What runs where
+//!
+//! The tracks are split into `K` runs of neighbours, balanced by the bytes each
+//! has left to decode. A worker per run decodes its tracks and merges them --
+//! the same `Merge` the caller's thread runs when there are no workers -- into
+//! chunks of `(tick, event)`, and hands them over through a bounded queue. The
+//! caller merges the `K` workers' chunks: with one worker that is taking the
+//! next event of a chunk, and with more a heap of `K` keyed `(tick, run)`.
+//!
+//! So decoding, and the heap of `log2(tracks)` that is the parse's whole cost on
+//! a file of thousands of tracks, leave the caller's thread, which is the
+//! drain's. What is left on it is a few nanoseconds an event.
+//!
+//! # Why the order is exactly the one-thread order
+//!
+//! One merge over every track hands out its events by `(tick, track)`, a track's
+//! own events in their order. A worker's merge does the same over its run, so
+//! each worker's events are in that order already. The caller's heap breaks a
+//! tie on the run, and runs are neighbours: the earlier run's tracks all come
+//! before the later's, so a tie between two runs is decided as the tie between
+//! their two tracks would be. A merge of streams that are each in the order,
+//! by a key that agrees with it, is that order. `tests` checks it event for
+//! event on files with every kind of tie.
+//!
+//! # The checkpoint
+//!
+//! `MidiStream::save_state` writes where every track is *as the caller has
+//! taken them*, which is behind the workers. So every chunk begins with a
+//! snapshot of its worker's tracks -- each reader's position and the event it
+//! holds, the same thing a saved stream holds -- and a save reads each worker's
+//! tracks again from the snapshot of the chunk being taken, for as many events
+//! as the caller has taken from it (`Part::replay`). That gives the bytes a
+//! stream on one thread would have saved at the same event; the tests compare
+//! them at every chunk boundary and in between. The replay checks every event
+//! it reads against the chunk, and a difference is an error, never a guess.
+//!
+//! A snapshot is about 40 bytes a track, and a chunk holds at least 32 events
+//! (512 bytes) a track of its run and at least 16,384 in all, so snapshots add
+//! a few percent at most to the bytes that pass through -- on a file of
+//! thousands of tracks -- and next to nothing on one of a few hundred.
+//!
+//! Loading a saved state stops the workers and drops what they had read: the
+//! readers are set where the state says, and the merge goes back to the workers
+//! at the next event.
+//!
+//! # Memory
+//!
+//! Bounded per worker, never by the file: `DEPTH` chunks queued, one being
+//! filled and one being taken, of 16 bytes an event -- 4 x 256 KiB on a file of
+//! a few hundred tracks, 4 x 16 MiB at most. The readers' own windows are the
+//! stream's, its share of `READ_BUDGET` (`window_share`); they move to the
+//! workers and back, so the workers hold no window the stream did not.
+
+[2] src/midi/par.rs:73
+/// Events a chunk holds: at least this many, and at least `PER_TRACK` a track
+/// of its run, so the snapshot stays a small part of it; at most `CHUNK_MAX`.
+
+[3] src/midi/par.rs:78
+/// The window of a reader opened for a replay, which reads one chunk's events
+/// at most and may open every track of a run to do it.
+
+[4] src/midi/par.rs:102
+    /// The chunk being taken, and how far. Never used up while `!done`: the
+    /// next is fetched as the last event of this one is taken.
+
+[5] src/midi/par.rs:114
+    /// (tick of a part's next event, part) for each part not done. Empty, and
+    /// not used, with one part.
+
+[6] src/midi/par.rs:119
+/// How many tracks go to each of `k` runs of neighbours, balanced by `weights`:
+/// a run closes once it reaches its share of the whole, and never leaves fewer
+/// tracks than runs still to fill. `k` runs, each of one track at least, when
+/// there are that many tracks.
+
+[7] src/midi/par.rs:172
+    /// Share `merge`'s tracks among `threads` workers, and start them, with
+    /// chunks of `chunk` events, or of the default size when 0.
+
+[8] src/midi/par.rs:260
+    /// Every track as a merge on the caller's thread would hold it after the
+    /// events taken so far, in the stream's order. See the module notes.
+
+[9] src/midi/par.rs:270
+    /// Stop the workers and take their tracks back, as one merge in the
+    /// stream's order. They had read further than the caller had taken, so it
+    /// is fit only to be loaded over. `Err` holds a worker's panic.
+
+[10] src/midi/par.rs:296
+        // A worker that panicked has nothing left to say here: what owned the
+        // stream is going anyway.
+
+[11] src/midi/par.rs:305
+    /// The next event of the chunk being taken, which there must be, and the
+    /// next chunk fetched if that was its last.
+
+[12] src/midi/par.rs:330
+                // Gone without its last chunk: it panicked, and that is what
+                // to report.
+
+[13] src/midi/par.rs:338
+            // Back to be filled again, unless it is the empty one a part starts
+            // with. A worker that has finished needs it no more.
+
+[14] src/midi/par.rs:363
+    /// This run's tracks as a merge on the caller's thread would hold them
+    /// after the events taken: read again from the snapshot the chunk being
+    /// taken began with, as far as it has been taken, each event checked
+    /// against the chunk.
+
+[15] src/midi/par.rs:373
+        // Opened as a track is first needed: a chunk's events can be a few
+        // tracks' or every track's.

@@ -233,12 +233,14 @@ pub enum Phase {
     LoadingSoundfont,
     OpeningMidi,
     PreparingDevice,
+    /// Merlin's pre-pass over the whole file, before its first key. Not an \[12\]
+    Arming,
     Rendering,
-    /// The last block is written; the file is being closed, which for an \[12\]
+    /// The last block is written; the file is being closed, which for an \[13\]
     Finishing,
-    /// The file is complete. This and the two after it are reported by a \[13\]
+    /// The file is complete. This and the two after it are reported by a \[14\]
     Finished,
-    /// Stopped early through [`Observer::cancelled`]. The file is closed and \[14\]
+    /// Stopped early through [`Observer::cancelled`]. The file is closed and \[15\]
     Cancelled,
     /// Stopped by an error; [`Event::Failed`] carries it.
     Failed,
@@ -271,16 +273,16 @@ pub struct Tick<'a> {
     pub peak_voices: u64,
     /// When the first block started.
     pub start: Instant,
-    /// This is the last block: the file ran out or `Job::seconds` was reached. \[15\]
+    /// This is the last block: the file ran out or `Job::seconds` was reached. \[16\]
     pub last: bool,
-    /// Seconds of audio a resumed render had already rendered when this run \[16\]
+    /// Seconds of audio a resumed render had already rendered when this run \[17\]
     pub resumed_secs: f64,
 }
 
-/// The share of a per-track render's progress that is its notes read; the \[17\]
+/// The share of a per-track render's progress that is its notes read; the \[18\]
 pub const PER_TRACK_NOTE_SHARE: f64 = 0.55;
 
-/// A per-track render as it stands, which [`Observer::tracks`] is handed \[18\]
+/// A per-track render as it stands, which [`Observer::tracks`] is handed \[19\]
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct TrackProgress {
     /// Tracks the render has, has finished, and is rendering now.
@@ -289,16 +291,16 @@ pub struct TrackProgress {
     pub running: usize,
     /// Finished tracks that had to steal voices.
     pub stole: usize,
-    /// Blocks rendered over every track; those of them that were silent and \[19\]
+    /// Blocks rendered over every track; those of them that were silent and \[20\]
     pub blocks: u64,
     pub silent_blocks: u64,
     pub blocks_total: u64,
-    /// Blocks rendered inside each track's notes -- from the block its first \[20\]
+    /// Blocks rendered inside each track's notes -- from the block its first \[21\]
     pub span_blocks: u64,
     pub span_total: u64,
-    /// Note-ons the tracks hold in all, after `--min-velocity`: where `notes` \[21\]
+    /// Note-ons the tracks hold in all, after `--min-velocity`: where `notes` \[22\]
     pub notes_total: u64,
-    /// Seconds of audio each track renders: the file's length, or \[22\]
+    /// Seconds of audio each track renders: the file's length, or \[23\]
     pub length_secs: f64,
     /// Voices each track may hold: the total, split evenly.
     pub voices_each: u32,
@@ -309,9 +311,9 @@ pub struct TrackProgress {
     pub notes: u64,
     pub stolen: u64,
     pub dropped: u64,
-    /// The loudest track, before any limiter. Merged, the mix's own peak is \[23\]
+    /// The loudest track, before any limiter. Merged, the mix's own peak is \[24\]
     pub peak_level: f32,
-    /// Microseconds the longest batch of tracks took, from going up to the \[24\]
+    /// Microseconds the longest batch of tracks took, from going up to the \[25\]
     #[serde(skip)]
     pub longest_wait_us: u64,
     /// Up to three of the busiest tracks still rendering.
@@ -328,19 +330,21 @@ pub struct TrackNow {
     pub secs: f64,
 }
 
-/// A front end's view of a render. Every method has a default, so an observer \[25\]
+/// A front end's view of a render. Every method has a default, so an observer \[26\]
 pub trait Observer {
     fn phase(&mut self, _phase: Phase) {}
     fn setup(&mut self, _setup: &Setup) {}
-    /// Called after every block. Cheap counters only are in `Tick`; anything \[26\]
+    /// Called after every block. Cheap counters only are in `Tick`; anything \[27\]
     fn block(&mut self, _tick: &Tick) {}
     /// A per-track render's progress, from the thread `run` was called on.
     fn tracks(&mut self, _progress: &TrackProgress) {}
-    /// Polled during analytic preparation and once per block. True stops after \[27\]
+    /// A per-key merlin render is about to start. Its threads write `progress` \[28\]
+    fn merlin(&mut self, _progress: &Arc<crate::merlin::progress::MerlinProgress>) {}
+    /// Polled during analytic preparation and once per block. True stops after \[29\]
     fn cancelled(&self) -> bool {
         false
     }
-    /// With [`cancelled`](Observer::cancelled): the stop does not want its \[28\]
+    /// With [`cancelled`](Observer::cancelled): the stop does not want its \[30\]
     fn discard_progress(&self) -> bool {
         false
     }
@@ -364,39 +368,41 @@ pub struct Summary {
     pub clipped: u64,
     /// Stopped by the observer rather than by the end of the file.
     pub cancelled: bool,
-    /// Where a render that was stopped left its progress, the `.krsm` that \[29\]
+    /// Where a render that was stopped left its progress, the `.krsm` that \[31\]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<PathBuf>,
-    /// A stop that was asked to keep none of its progress \[30\]
+    /// A stop that was asked to keep none of its progress \[32\]
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub discarded: bool,
 }
 
-/// A render, described completely: what to read, what to write, and how. \[31\]
+/// A render, described completely: what to read, what to write, and how. \[33\]
 #[derive(Debug, Clone)]
 pub struct Job {
     pub midi: PathBuf,
+    /// `midi` is one note-slice stream written by `kestrel slice`, not a MIDI \[34\]
+    pub note_slice: bool,
     /// Layered in order, each merged on top of the ones before it.
     pub soundfonts: Vec<PathBuf>,
-    /// Programs of bank 0 the last soundfont takes over, spelled the way \[32\]
+    /// Programs of bank 0 the last soundfont takes over, spelled the way \[35\]
     pub sf_programs: Option<String>,
     /// The extension picks the container; see [`resolve_output_target`].
     pub out: PathBuf,
     /// An ffmpeg to encode with, instead of searching for one.
     pub ffmpeg: Option<PathBuf>,
-    /// The sample format of a WAV. Encoded containers take float and refuse \[33\]
+    /// The sample format of a WAV. Encoded containers take float and refuse \[36\]
     pub wav_format: wav::SampleFormat,
-    /// Brickwall ceiling in dBFS, when one was chosen. `None` keeps `cfg`'s \[34\]
+    /// Brickwall ceiling in dBFS, when one was chosen. `None` keeps `cfg`'s \[37\]
     pub ceiling_db: Option<f64>,
     /// Stop after this many seconds of audio.
     pub seconds: Option<f64>,
     /// Write one CSV row per block here: the admission diagnostic.
     pub block_csv: Option<PathBuf>,
-    /// Render this one track alone rather than the whole file: its own notes \[35\]
+    /// Render this one track alone rather than the whole file: its own notes \[38\]
     pub track: Option<crate::tracks::TrackPick>,
-    /// Render every track `stems.tracks` names, each alone and to a file of \[36\]
+    /// Render every track `stems.tracks` names, each alone and to a file of \[39\]
     pub stems: Option<crate::tracks::Stems>,
-    /// Checkpoints of a render of one file or one track: where, how often, and \[37\]
+    /// Checkpoints of a render of one file or one track: where, how often, and \[40\]
     pub checkpoint: Option<crate::resume::Spec>,
     pub backend: BackendKind,
     pub cfg: Config,
@@ -409,7 +415,7 @@ pub struct Plan {
     pub(crate) encoder: Option<(crate::ffmpeg::Ffmpeg, &'static crate::ffmpeg::Preset)>,
 }
 
-/// Validate a render and resolve its output, without loading anything. \[38\]
+/// Validate a render and resolve its output, without loading anything. \[41\]
 pub fn plan(job: &Job) -> Result<Plan> {
     let mut cfg = job.cfg.clone();
     if let Some(db) = job.ceiling_db {
@@ -418,7 +424,7 @@ pub fn plan(job: &Job) -> Result<Plan> {
     if job.track.is_some() && job.stems.is_some() {
         bail!("--track renders one track and --tracks renders stems; give one of them");
     }
-    // [39]
+    // [42]
     if (job.track.is_some() || job.stems.is_some())
         && cfg.phase != crate::phase::PhaseSettings::default()
     {
@@ -441,10 +447,10 @@ pub fn plan(job: &Job) -> Result<Plan> {
         );
         cfg.max_voices = crate::tracks::MAX_TOTAL_VOICES;
     }
-    // [40]
+    // [43]
     let stems = job.stems.as_ref().filter(|s| !s.merge);
     if let Some(pick) = job.track {
-        // [41]
+        // [44]
         let h = crate::midi::SmfHeader::read(&job.midi)?;
         if pick.index >= h.tracks.len() {
             bail!(
@@ -457,12 +463,24 @@ pub fn plan(job: &Job) -> Result<Plan> {
     }
     cfg.validate()?;
     let kind = job.backend;
-    // [42]
+    if kind == BackendKind::Merlin {
+        // [45]
+        if job.stems.is_some() || job.track.is_some() {
+            bail!(
+                "--track and --tracks are not available on --backend merlin. Its host memory is \
+                 bounded by splitting the note set instead: `kestrel slice`, then `render --note-slice`"
+            );
+        }
+        if cfg.phase.active() {
+            bail!("analytic phase rotation is not available on --backend merlin");
+        }
+    }
+    // [46]
     let target = match stems {
         Some(stems) => resolve_output_target(Path::new(&format!("stem.{}", stems.ext)))?,
         None => resolve_output_target(&job.out)?,
     };
-    // [43]
+    // [47]
     if stems.is_some()
         && matches!(target, Target::Wav)
         && job.wav_format == wav::SampleFormat::Float32
@@ -477,10 +495,63 @@ pub fn plan(job: &Job) -> Result<Plan> {
         cfg.clamp_output = false;
     }
 
+    // [48]
+    if job.note_slice {
+        // [49]
+        if job.track.is_some() || job.stems.is_some() {
+            bail!("--note-slice renders one slice stream, which has no tracks to pick from: it does not combine with --track or --tracks");
+        }
+        // [50]
+        if kind == BackendKind::Merlin && cfg.merlin_promote_after > 0 {
+            bail!(
+                "--note-slice needs --merlin-promote-after 0, and this run has {}.\n\
+                 \n\
+                 The fallback router promotes a waveform to the convolution path on \
+                 its {}th note. A slice holds a fraction of each waveform's notes, so \
+                 it promotes different waveforms at different points than the whole \
+                 file would -- and a note rendered on the per-voice fallback is not \
+                 the same samples as the same note convolved. The stems would look \
+                 fine individually and fail to sum.\n\
+                 \n\
+                 0 convolves every waveform, which is the only routing that does not \
+                 depend on which notes are present. It is slower, and it is the price \
+                 of a stem that adds up.",
+                cfg.merlin_promote_after,
+                cfg.merlin_promote_after
+            );
+        }
+        if kind != BackendKind::Merlin {
+            log::warn!(
+                target: TARGET,
+                "--note-slice is exact on --backend merlin only. The {} backend admits \
+                 and steals by which notes are present, so this slice will keep a \
+                 different set than it would have as part of the whole render, and the \
+                 stems will not sum to it.",
+                format!("{kind:?}").to_lowercase()
+            );
+        }
+        if cfg.clamp_output {
+            log::warn!(
+                target: TARGET,
+                "this stem will be clamped to +/-1.0, and a slice of a dense mix is \
+                 routinely above it -- the sum will be wrong wherever it clipped. \
+                 Render slices with --limiter off --format float32 and limit the sum \
+                 once, with examples/merge_stems.rs."
+            );
+        }
+    } else if crate::slice::is_slice_path(&job.midi) {
+        bail!(
+            "{} is a note-slice stream, not a MIDI file. Pass it with --note-slice, \
+             and render its siblings too -- one slice alone is part of a mix, not \
+             the mix.",
+            job.midi.display()
+        );
+    }
+
     let encoder = match &target {
         Target::Wav => None,
         Target::Encoded(preset) => {
-            // [44]
+            // [51]
             if cfg.limiter_mode == LimiterMode::Off || !cfg.limiter {
                 bail!(
                     "--limiter off cannot be used with .{}: encoding clamps anything \
@@ -490,7 +561,7 @@ pub fn plan(job: &Job) -> Result<Plan> {
                     preset.ext
                 );
             }
-            // [45]
+            // [52]
             if job.wav_format != wav::SampleFormat::Float32 {
                 bail!(
                     "--format pcm16 applies to .wav output only; .{} is encoded from \
@@ -498,7 +569,7 @@ pub fn plan(job: &Job) -> Result<Plan> {
                     preset.ext
                 );
             }
-            // [46]
+            // [53]
             if preset.lossy && job.ceiling_db.is_none() {
                 cfg.limiter_ceiling_db = crate::ffmpeg::LOSSY_CEILING_DB;
             }
@@ -539,7 +610,7 @@ pub fn plan(job: &Job) -> Result<Plan> {
     Ok(Plan { cfg, kind, encoder })
 }
 
-/// A soundfont that drives no LFO should not pay for the machinery. This turns \[47\]
+/// A soundfont that drives no LFO should not pay for the machinery. This turns \[54\]
 pub(crate) fn fit_to_bank(cfg: &mut Config, bank: &Bank) {
     if !bank.uses_lfo {
         cfg.lfo_enabled = false;
@@ -549,7 +620,7 @@ pub(crate) fn fit_to_bank(cfg: &mut Config, bank: &Bank) {
     }
 }
 
-/// Say what the soundfont holds once loaded: its sample pool is what goes to \[48\]
+/// Say what the soundfont holds once loaded: its sample pool is what goes to \[55\]
 pub(crate) fn log_bank(bank: &Bank, took: Option<std::time::Duration>) {
     match took {
         Some(t) => log::info!(target: TARGET, "loaded {} in {t:.2?}", bank.describe()),
@@ -557,7 +628,7 @@ pub(crate) fn log_bank(bank: &Bank, took: Option<std::time::Duration>) {
     }
 }
 
-/// Render `args` as `plan` settled it. \[49\]
+/// Render `args` as `plan` settled it. \[56\]
 pub fn run(
     job: &Job,
     plan: Plan,
@@ -578,7 +649,40 @@ pub fn run(
     result
 }
 
-/// A file written for the 31-EDO template says so by a note key over 127, which no \[50\]
+/// Merlin's limit on a file's size, here so a refusal costs nothing: every \[57\]
+pub fn merlin_takes(job: &Job, plan: &Plan) -> Result<()> {
+    if plan.kind != BackendKind::Merlin {
+        return Ok(());
+    }
+    // [58]
+    let cfg = &plan.cfg;
+    if cfg.merlin_key_major && cfg.merlin_key_parse {
+        if cfg.edo31 {
+            bail!("merlin does not render 31-EDO files yet; Kestrel does. Nothing was rendered");
+        }
+        if cfg.min_velocity > 1 {
+            bail!("merlin does not skip quiet notes yet (--min-velocity); Kestrel does. Nothing was rendered");
+        }
+    }
+    merlin_takes_size(&job.midi, std::fs::metadata(&job.midi).map_or(0, |m| m.len()), plan.cfg.merlin_max_file_bytes)
+}
+
+/// `merlin_takes` for a file of `bytes` under `limit`, which a front end asks \[59\]
+pub fn merlin_takes_size(midi: &Path, bytes: u64, limit: u64) -> Result<()> {
+    if bytes >= limit {
+        let gb = |b: u64| b as f64 / 1e9;
+        bail!(
+            "{} is {:.2} GB, and merlin takes files under {:.2} GB: {:.2} GB past the limit. Nothing was rendered",
+            midi.display(),
+            gb(bytes),
+            gb(limit),
+            gb(bytes - limit)
+        );
+    }
+    Ok(())
+}
+
+/// A file written for the 31-EDO template says so by a note key over 127, which no \[60\]
 pub(crate) fn detect_31edo(cfg: &mut Config, midi: &Path) {
     if !cfg.edo31 && crate::midi::uses_extended_keys(midi).unwrap_or(false) {
         cfg.edo31 = true;
@@ -596,6 +700,7 @@ fn run_inner(
     preloaded: Option<Arc<Bank>>,
     obs: &mut dyn Observer,
 ) -> Result<Summary> {
+    merlin_takes(job, &plan)?;
     if job.stems.is_some() {
         return crate::stems::run(job, plan, preloaded, obs);
     }
@@ -605,7 +710,7 @@ fn run_inner(
         encoder,
     } = plan;
 
-    // [51]
+    // [61]
     let mut ckpt_spec = job.checkpoint.clone();
     if let Some(why) = single::unsupported(job, &cfg) {
         if ckpt_spec.as_ref().is_some_and(|s| s.restore.is_some()) {
@@ -660,12 +765,29 @@ fn run_inner(
             phase.sample_count(), phase.cache_bytes() as f64 / 1048576.0, phase_started.elapsed());
     }
     obs.phase(Phase::OpeningMidi);
-    detect_31edo(&mut cfg, &job.midi);
-    // [52]
+    // [62]
+    if !job.note_slice {
+        detect_31edo(&mut cfg, &job.midi);
+    }
+    // [63]
     if job.track.is_some() {
         cfg.max_block_candidates = crate::tracks::candidates_each(&cfg);
     }
     let mut driver = match job.track {
+        // [64]
+        None if job.note_slice => {
+            let h = crate::slice::SliceReader::open(&job.midi)?.header;
+            log::info!(
+                target: TARGET,
+                "slice {} of {} from a {}-track file: {} notes, {} events",
+                h.slice,
+                h.slices,
+                h.tracks,
+                h.notes,
+                h.events
+            );
+            Driver::open_slice_prepared(&cfg, bank.clone(), &job.midi, phase.clone())?
+        }
         None => {
             let d = Driver::open_prepared(&cfg, bank.clone(), &job.midi, phase.clone())?;
             log::info!(target: TARGET, "{} has {} tracks", job.midi.display(), d.track_count());
@@ -697,7 +819,7 @@ fn run_inner(
         }
     };
 
-    // [53]
+    // [65]
     let mut out = match (&saver, &restore) {
         (Some(s), Some(cp)) => {
             let single = cp.header.single.as_ref().context("the checkpoint is not of a render of one file")?;
@@ -723,9 +845,54 @@ fn run_inner(
             let ids = g.adapter_ids();
             (Box::new(g), Some(name), Some(bytes), Some(ids))
         }
+        BackendKind::Merlin if cfg.merlin_bucket_pass => {
+            // [66]
+            log::warn!(target: TARGET, "--merlin-bucket-pass: filing notes by key, writing silence");
+            let b = crate::merlin::bucket::BucketPass::new(&cfg, bank.clone(), &std::env::temp_dir())?;
+            (Box::new(b), None, None, None)
+        }
+        BackendKind::Merlin if cfg.merlin_key_major => {
+            // [67]
+            if cfg.merlin_key_major_gpu {
+                log::info!(target: TARGET, "merlin: each key convolved over the whole song, on the device");
+            } else {
+                log::warn!(target: TARGET, "merlin: the CPU reference renderer, for short files");
+            }
+            // [68]
+            let dir = crate::merlin::keystore::filing_dir(&job.midi, &job.out, cfg.merlin_disk_floor);
+            let progress = crate::merlin::progress::MerlinProgress::new();
+            if cfg.merlin_key_major_gpu {
+                obs.merlin(&progress);
+            }
+            let k = crate::merlin::keymajor::KeyMajor::with_progress(&cfg, bank.clone(), &job.midi, &dir, progress)?;
+            (Box::new(k), None, None, None)
+        }
+        BackendKind::Merlin => {
+            // [69]
+            log::warn!(
+                target: TARGET,
+                "merlin is incomplete: on the notes it convolves, channel bend, \
+                 CC7/CC11/CC10 and CC71-CC75 are resolved at each note's own frame, so a \
+                 controller that moves *during* a note does not reach it -- CC7 is the \
+                 largest error left and on real material it is most of it, because a note's \
+                 release tail keeps the gain it was struck under. Notes below \
+                 --merlin-promote-after render on the per-voice backend instead and get \
+                 that handling in full, so 0 turns the fallback off and convolves \
+                 everything. Both device caches and the host store evict, so a file may \
+                 want far more waveforms than fit; what has to fit at once is one partition \
+                 step. Notes held past --merlin-head-ms are clamped to it and the count is \
+                 reported at the end -- it is not free to raise, but it is cheap: halving \
+                 --merlin-waves pays for doubling it."
+            );
+            let m = crate::merlin::synth::MerlinSynth::new(&cfg, bank.clone())?;
+            let name = m.adapter_name().to_string();
+            let ids = m.adapter_ids();
+            // [70]
+            (Box::new(m), Some(name), None, Some(ids))
+        }
     };
     log::info!(target: TARGET, "rendering with the {} backend", backend.name());
-    // [54]
+    // [71]
     let backend_id = match &adapter {
         Some(a) => format!("gpu: {a}"),
         None => "cpu".to_string(),
@@ -799,14 +966,23 @@ fn run_inner(
     };
 
     let mut cancelled = false;
-    // [55]
+    // [72]
     let mut discarded = false;
     loop {
-        // [56]
+        // [73]
         let done = driver.stats.blocks;
-        let (more, held) = match saver.as_ref() {
-            None => (driver.next_block(backend.as_mut(), &mut block)?, false),
-            Some(s) => driver.next_block_or_hold(backend.as_mut(), &mut block, || s.hold(obs.cancelled(), done))?,
+        let stepped = match saver.as_ref() {
+            None => driver.next_block(backend.as_mut(), &mut block).map(|more| (more, false)),
+            Some(s) => driver.next_block_or_hold(backend.as_mut(), &mut block, || s.hold(obs.cancelled(), done)),
+        };
+        let (more, held) = match stepped {
+            Ok(step) => step,
+            // [74]
+            Err(e) if e.downcast_ref::<crate::merlin::progress::Cancelled>().is_some() => {
+                cancelled = true;
+                break;
+            }
+            Err(e) => return Err(e),
         };
         out.write_block(&block)?;
 
@@ -862,7 +1038,7 @@ fn run_inner(
                 }
             }
             Some(s) => {
-                // [57]
+                // [75]
                 if obs.cancelled() && obs.discard_progress() {
                     cancelled = true;
                     discarded = true;
@@ -870,7 +1046,7 @@ fn run_inner(
                 }
                 let stopping = obs.cancelled() || s.stop_hook(driver.stats.blocks);
                 if held {
-                    // [58]
+                    // [76]
                     match out.checkpoint() {
                         Ok(audio) => {
                             s.save_or_warn(&driver, backend.as_mut(), audio, peak_voices, stopping);
@@ -886,14 +1062,14 @@ fn run_inner(
                         break;
                     }
                 }
-                // [59]
+                // [77]
             }
         }
     }
 
     obs.phase(Phase::Finishing);
     let bytes = out.finish()?;
-    // [60]
+    // [78]
     if let Some(s) = &saver {
         let partial = s.partial(&job.out);
         if cancelled {
@@ -901,7 +1077,7 @@ fn run_inner(
                 let _ = std::fs::remove_file(&partial);
             }
             if discarded {
-                // [61]
+                // [79]
                 s.discard();
                 log::warn!(
                     target: TARGET,
@@ -944,7 +1120,7 @@ fn run_inner(
         driver.stats.voices_spawned,
         peak_voices,
         st.stolen,
-        // [62]
+        // [80]
         driver.stats.dropped,
         driver.stats.peak
     );
@@ -954,6 +1130,14 @@ fn run_inner(
             "{} note-ons below velocity {} skipped, with their note-offs",
             driver.stats.notes_skipped,
             cfg.min_velocity
+        );
+    }
+    if cfg.coalesce {
+        log::info!(
+            target: TARGET,
+            "{} duplicate note-ons coalesced into the note-on they repeat, {} rendered unmerged past --coalesce-window",
+            driver.stats.coalesced,
+            driver.stats.coalesce_forced
         );
     }
     if driver.stats.silent_blocks > 0 {
@@ -973,26 +1157,42 @@ fn run_inner(
                 v as f64 * 100.0 / d.us_total as f64
             }
         };
-        let other = d
-            .us_total
-            .saturating_sub(d.us_drain + d.us_admit + d.us_spawn + d.us_render);
+        // [81]
+        let other = d.us_total.saturating_sub(
+            d.us_ctrl + d.us_admit + d.us_spawn + d.us_render + d.us_wait,
+        );
         log::info!(
             target: TARGET,
             "host/device split over {:.1}s inside next_block: \
-             drain {:.1}s ({:.0}%)  admit {:.1}s ({:.0}%)  spawn {:.1}s ({:.0}%)  \
-             render {:.1}s ({:.0}%)  other {:.1}s ({:.0}%)",
+             controllers {:.1}s ({:.0}%)  admit {:.1}s ({:.0}%)  spawn {:.1}s ({:.0}%)  \
+             render {:.1}s ({:.0}%)  waiting on the next block {:.1}s ({:.0}%)  \
+             other {:.1}s ({:.0}%); alongside, preparing the next block: \
+             drain {:.1}s, controller tables {:.1}s, voices {:.1}s",
             d.us_total as f64 / 1e6,
-            d.us_drain as f64 / 1e6,
-            pct(d.us_drain),
+            d.us_ctrl as f64 / 1e6,
+            pct(d.us_ctrl),
             d.us_admit as f64 / 1e6,
             pct(d.us_admit),
             d.us_spawn as f64 / 1e6,
             pct(d.us_spawn),
             d.us_render as f64 / 1e6,
             pct(d.us_render),
+            d.us_wait as f64 / 1e6,
+            pct(d.us_wait),
             other as f64 / 1e6,
             pct(other),
+            d.us_drain as f64 / 1e6,
+            d.us_variants as f64 / 1e6,
+            d.us_materialise as f64 / 1e6,
         );
+        if cfg.drain_threads > 0 {
+            log::info!(
+                target: TARGET,
+                "of the drain, {:.1}s waiting for its reading of the MIDI and {:.1}s for the coalescing look-ahead",
+                d.us_wait_parse as f64 / 1e6,
+                d.us_wait_ahead as f64 / 1e6,
+            );
+        }
     }
     if !cfg.clamp_output {
         log::info!(
@@ -1030,7 +1230,7 @@ fn run_inner(
     })
 }
 
-/// Everything a front end can show about a render in progress, at one moment. \[63\]
+/// Everything a front end can show about a render in progress, at one moment. \[82\]
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Snapshot {
     pub phase: Phase,
@@ -1042,10 +1242,10 @@ pub struct Snapshot {
     pub render_secs: f64,
     /// Audio rendered so far.
     pub audio_secs: f64,
-    /// Of `audio_secs`, what a resumed render had already made when this run \[64\]
+    /// Of `audio_secs`, what a resumed render had already made when this run \[83\]
     #[serde(skip)]
     pub resumed_secs: f64,
-    /// Track data read so far, and in the whole file. A streamed MIDI has no \[65\]
+    /// Track data read so far, and in the whole file. A streamed MIDI has no \[84\]
     pub bytes_read: u64,
     pub bytes_total: u64,
     pub blocks: u64,
@@ -1067,21 +1267,28 @@ pub struct Snapshot {
     pub backend: Option<String>,
     pub adapter: Option<String>,
     pub tracks: u16,
-    /// Device buffers this render allocated. Not the whole GPU's usage; that \[66\]
+    /// Device buffers this render allocated. Not the whole GPU's usage; that \[85\]
     pub device_bytes: Option<u64>,
-    /// The whole adapter's memory, every process on it counted, once the first \[67\]
+    /// The whole adapter's memory, every process on it counted, once the first \[86\]
     pub gpu_memory: Option<crate::gpu::vram::GpuMemory>,
-    /// This process's resident memory now, and its highest since the monitor \[68\]
+    /// This process's resident memory now, and its highest since the monitor \[87\]
     pub host_rss_bytes: Option<u64>,
     pub host_rss_peak_bytes: Option<u64>,
-    /// A per-track render's tracks, once it is rendering. Its sums are also \[69\]
+    /// A per-track render's tracks, once it is rendering. Its sums are also \[88\]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub per_track: Option<TrackProgress>,
+    /// A per-key merlin render's stage, keys and device, once it has begun.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merlin: Option<crate::merlin::progress::MerlinSnapshot>,
 }
 
 impl Snapshot {
-    /// How far along, 0 to 1: the MIDI's track data read, once the file is \[70\]
+    /// How far along, 0 to 1: the MIDI's track data read, once the file is \[89\]
     pub fn progress(&self) -> Option<f64> {
+        // A merlin render reads no events, so its bar is its own stage's.
+        if let Some(m) = &self.merlin {
+            return m.progress(self.blocks);
+        }
         if let Some(p) = &self.per_track {
             let spans = (p.span_total > 0).then(|| (p.span_blocks as f64 / p.span_total as f64).min(1.0));
             let notes = (p.notes_total > 0).then(|| (p.notes as f64 / p.notes_total as f64).min(1.0));
@@ -1095,7 +1302,7 @@ impl Snapshot {
             .then(|| (self.bytes_read as f64 / self.bytes_total as f64).min(1.0))
     }
 
-    /// Audio the render has made so far: `audio_secs`, or for a per-track \[71\]
+    /// Audio the render has made so far: `audio_secs`, or for a per-track \[90\]
     pub fn audio_done(&self) -> f64 {
         match &self.per_track {
             Some(p) => p.length_secs * self.progress().unwrap_or(0.0),
@@ -1103,13 +1310,16 @@ impl Snapshot {
         }
     }
 
-    /// Seconds of audio per second of rendering, over the render so far: the \[72\]
+    /// Seconds of audio per second of rendering, over the render so far: the \[91\]
     pub fn speed(&self) -> Option<f64> {
         (self.render_secs > 0.2).then(|| (self.audio_done() - self.resumed_secs).max(0.0) / self.render_secs)
     }
 
-    /// Seconds of rendering left, extrapolated from progress. `None` until \[73\]
+    /// Seconds of rendering left, extrapolated from progress. `None` until \[92\]
     pub fn eta_secs(&self) -> Option<f64> {
+        if let Some(m) = &self.merlin {
+            return m.eta_secs();
+        }
         let p = self.progress()?;
         (p > 0.005 && p < 1.0 && self.render_secs > 1.0)
             .then(|| self.render_secs * (1.0 - p) / p)
@@ -1127,7 +1337,7 @@ pub enum Event {
         #[serde(flatten)]
         setup: Setup,
     },
-    /// The render ended normally or was cancelled. Always the last event of a \[74\]
+    /// The render ended normally or was cancelled. Always the last event of a \[93\]
     Summary {
         t: f64,
         #[serde(flatten)]
@@ -1137,7 +1347,7 @@ pub enum Event {
     Failed { t: f64, message: String },
 }
 
-/// A render's live state, shared between the thread rendering it and any \[75\]
+/// A render's live state, shared between the thread rendering it and any \[94\]
 pub struct Monitor {
     created: Instant,
     inner: Mutex<Inner>,
@@ -1153,8 +1363,10 @@ struct Inner {
     phase_since: Option<Instant>,
     render_started: Option<Instant>,
     events: Vec<Event>,
-    /// Started when the render reports its adapter, and stopped when the \[76\]
+    /// Started when the render reports its adapter, and stopped when the \[95\]
     vram: Option<crate::gpu::vram::VramWatch>,
+    /// A per-key merlin render's progress, and its stop.
+    merlin: Option<Arc<crate::merlin::progress::MerlinProgress>>,
 }
 
 impl Monitor {
@@ -1169,7 +1381,7 @@ impl Monitor {
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
-        // [77]
+        // [96]
         self.inner.lock().unwrap_or_else(|p| p.into_inner())
     }
 
@@ -1189,6 +1401,22 @@ impl Monitor {
             snap.phase_secs = since(inner.phase_since);
             snap.render_secs = since(inner.render_started);
             snap.gpu_memory = inner.vram.as_ref().and_then(|watch| watch.latest());
+            if let Some(m) = &inner.merlin {
+                use crate::merlin::progress::Stage;
+                let m = m.snapshot();
+                // [97]
+                if matches!(snap.phase, Phase::Starting | Phase::PreparingDevice | Phase::Rendering) {
+                    match m.stage {
+                        Stage::Arming => {
+                            snap.phase = Phase::Arming;
+                            snap.phase_secs = m.stage_secs;
+                        }
+                        Stage::Rendering | Stage::Mastering => snap.phase = Phase::Rendering,
+                        Stage::Waiting => {}
+                    }
+                }
+                snap.merlin = Some(m);
+            }
             snap
         };
         snap.wall_secs = self.secs(now);
@@ -1201,19 +1429,23 @@ impl Monitor {
         snap
     }
 
-    /// Every event from index `from` on, and the index to pass next time. \[78\]
+    /// Every event from index `from` on, and the index to pass next time. \[98\]
     pub fn events_since(&self, from: usize) -> (Vec<Event>, usize) {
         let inner = self.lock();
         let from = from.min(inner.events.len());
         (inner.events[from..].to_vec(), inner.events.len())
     }
 
-    /// Ask the render to stop after the block it is on. A render that saves \[79\]
+    /// Ask the render to stop after the block it is on. A render that saves \[99\]
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Release);
+        // A merlin render is inside its first block and never asks.
+        if let Some(m) = &self.lock().merlin {
+            m.cancel();
+        }
     }
 
-    /// [`cancel`](Monitor::cancel), and the progress is not wanted: see \[80\]
+    /// [`cancel`](Monitor::cancel), and the progress is not wanted: see \[100\]
     pub fn cancel_discarding(&self) {
         self.discard.store(true, Ordering::Release);
         self.cancel.store(true, Ordering::Release);
@@ -1235,7 +1467,7 @@ impl Monitor {
         }
     }
 
-    /// Record how a render ended. [`run_monitored`] does this; a caller that \[81\]
+    /// Record how a render ended. [`run_monitored`] does this; a caller that \[101\]
     pub fn finish(&self, result: &Result<Summary>) {
         let now = Instant::now();
         let t = self.secs(now);
@@ -1267,7 +1499,7 @@ impl Monitor {
     }
 }
 
-/// How often the observer walks every track to count the bytes read. The \[82\]
+/// How often the observer walks every track to count the bytes read. The \[102\]
 const BYTES_EVERY: Duration = Duration::from_millis(50);
 
 /// The [`Observer`] half of a [`Monitor`].
@@ -1281,7 +1513,7 @@ impl Observer for MonitorObserver {
         let now = Instant::now();
         let t = self.monitor.secs(now);
         let mut inner = self.monitor.lock();
-        // [83]
+        // [103]
         if inner.snap.phase == phase {
             return;
         }
@@ -1344,6 +1576,20 @@ impl Observer for MonitorObserver {
         }
     }
 
+    fn merlin(&mut self, p: &Arc<crate::merlin::progress::MerlinProgress>) {
+        let mut inner = self.monitor.lock();
+        inner.merlin = Some(p.clone());
+        // Its clock starts here: the first block is the end of it.
+        if inner.render_started.is_none() {
+            inner.render_started = Some(Instant::now());
+        }
+        drop(inner);
+        // A stop asked for before the render had anywhere to go.
+        if self.monitor.is_cancelled() {
+            p.cancel();
+        }
+    }
+
     fn tracks(&mut self, p: &TrackProgress) {
         let mut inner = self.monitor.lock();
         if inner.render_started.is_none() {
@@ -1368,7 +1614,7 @@ impl Observer for MonitorObserver {
     }
 }
 
-/// [`run`], reporting into `monitor`, which is marked finished however the \[84\]
+/// [`run`], reporting into `monitor`, which is marked finished however the \[104\]
 pub fn run_monitored(
     job: &Job,
     plan: Plan,
@@ -1407,7 +1653,7 @@ mod tests {
         resolve_output_target(Path::new(p)).map_err(|e| e.to_string())
     }
 
-    /// The bug this guards: `-o mix.mp3` wrote a RIFF/WAVE file named `.mp3` \[85\]
+    /// The bug this guards: `-o mix.mp3` wrote a RIFF/WAVE file named `.mp3` \[105\]
     #[test]
     fn wav_and_every_preset_resolve_and_nothing_else_does() {
         assert!(matches!(target("out/mix.wav"), Ok(Target::Wav)));
@@ -1428,7 +1674,7 @@ mod tests {
         }
     }
 
-    /// A typo should name the thing it probably meant. These four are the ones \[86\]
+    /// A typo should name the thing it probably meant. These four are the ones \[106\]
     #[test]
     fn a_near_miss_extension_suggests_the_real_one() {
         for (typo, want) in [
@@ -1446,7 +1692,7 @@ mod tests {
         }
     }
 
-    /// A real container Kestrel does not write is a considered request, not a \[87\]
+    /// A real container Kestrel does not write is a considered request, not a \[107\]
     #[test]
     fn a_real_but_unsupported_container_is_not_treated_as_a_typo() {
         let e = target("out/mix.aiff").unwrap_err();
@@ -1466,9 +1712,9 @@ mod tests {
     fn edit_distance_is_a_metric_on_the_cases_that_matter() {
         assert_eq!(edit_distance("opus", "opus"), 0);
         assert_eq!(edit_distance("opis", "opus"), 1);
-        // [88]
+        // [108]
         assert_eq!(edit_distance("fkac", "flac"), 1);
-        // [89]
+        // [109]
         assert_eq!(edit_distance("flca", "flac"), 2);
         assert_eq!(edit_distance("", "wav"), 3);
     }
@@ -1492,7 +1738,7 @@ mod tests {
         }
     }
 
-    /// A reader that looks rarely still sees every phase, in order; a reader \[90\]
+    /// A reader that looks rarely still sees every phase, in order; a reader \[110\]
     #[test]
     fn a_monitor_keeps_every_event_for_every_reader() {
         use super::{Event, Monitor, Observer, Phase, Setup};
@@ -1549,7 +1795,7 @@ mod tests {
         assert!(obs.cancelled());
     }
 
-    /// Progress, speed and the estimate say nothing until they mean \[91\]
+    /// Progress, speed and the estimate say nothing until they mean \[111\]
     #[test]
     fn derived_figures_wait_until_they_mean_something() {
         use super::Snapshot;
@@ -1566,7 +1812,7 @@ mod tests {
         assert_eq!(s.eta_secs(), None);
     }
 
-    /// A per-track render's progress is its notes read and its blocks inside \[92\]
+    /// A per-track render's progress is its notes read and its blocks inside \[112\]
     #[test]
     fn a_per_track_render_is_measured_by_its_notes_and_its_file() {
         use super::{Snapshot, TrackProgress, PER_TRACK_NOTE_SHARE};
@@ -1599,7 +1845,7 @@ mod tests {
         assert_eq!(s.progress(), Some(0.8));
     }
 
-    /// The progress feed's wire format is this serialisation, so it is pinned: \[93\]
+    /// The progress feed's wire format is this serialisation, so it is pinned: \[113\]
     #[test]
     fn events_serialise_with_a_type_tag_and_snake_case_names() {
         use super::{Event, Phase};

@@ -30,8 +30,8 @@ pub trait Backend {
     fn set_params_variant(
         &mut self,
         index: u32,
-        data: &[crate::bank::RegionParams],
-        menv: &[crate::bank::ModEnvParams],
+        data: std::sync::Arc<Vec<crate::bank::RegionParams>>,
+        menv: std::sync::Arc<Vec<crate::bank::ModEnvParams>>,
     ) -> Result<()>;
 
     /// Whether a voice may be gliding at any point of the next block, so that \[5\]
@@ -42,26 +42,41 @@ pub trait Backend {
     /// Add voices to the pool. May steal or drop according to the configured \[6\]
     fn spawn(&mut self, cmds: &[SpawnCmd]) -> Result<()>;
 
-    /// Start rendering one block. Returns once the work is queued; the audio \[7\]
+    /// Whether this backend can take a block's commands in parts: \[7\]
+    fn spawn_parts(&self) -> bool {
+        false
+    }
+
+    /// One part of a block's commands, in the order `spawn` would have had \[8\]
+    fn spawn_part(&mut self, cmds: &[SpawnCmd]) -> Result<()> {
+        self.spawn(cmds)
+    }
+
+    /// The block's last part has been handed over.
+    fn spawn_end(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Start rendering one block. Returns once the work is queued; the audio \[9\]
     fn submit(&mut self) -> Result<()>;
 
-    /// Wait for the block started by `submit` and write it into `out`, \[8\]
+    /// Wait for the block started by `submit` and write it into `out`, \[10\]
     fn finish(&mut self, out: &mut [f32]) -> Result<()>;
 
-    /// Step over one block without rendering it, in place of `set_gates` \[9\]
+    /// Step over one block without rendering it, in place of `set_gates` \[11\]
     fn skip_block(&mut self) -> Result<()>;
 
-    /// Write what the backend carries from one block to the next -- the live \[10\]
+    /// Write what the backend carries from one block to the next -- the live \[12\]
     fn save_state(&mut self, _w: &mut dyn std::io::Write) -> Result<()> {
         anyhow::bail!("the {} backend cannot save a render's state", self.name())
     }
 
-    /// The other half: take back what `save_state` wrote, from a backend that \[11\]
+    /// The other half: take back what `save_state` wrote, from a backend that \[13\]
     fn load_state(&mut self, _r: &mut dyn std::io::Read) -> Result<()> {
         anyhow::bail!("the {} backend cannot load a render's state", self.name())
     }
 
-    /// Render one block, start to finish. \[12\]
+    /// Render one block, start to finish. \[14\]
     fn render(&mut self, out: &mut [f32]) -> Result<()> {
         self.submit()?;
         self.finish(out)
@@ -71,12 +86,32 @@ pub trait Backend {
 
     fn name(&self) -> &'static str;
 
-    /// Per-pass timings from the last block, for `--profile`. Empty when the \[13\]
+    /// Whether this backend has a fixed voice pool that admission must respect. \[15\]
+    fn has_pool(&self) -> bool {
+        true
+    }
+
+    /// Frames of leading output the driver must run and throw away. \[16\]
+    fn output_latency_frames(&self) -> u64 {
+        0
+    }
+
+    /// A backend that rendered the whole song before the driver began, and \[17\]
+    fn prerendered_blocks(&self) -> Option<(u64, u64)> {
+        None
+    }
+
+    /// For such a backend, what the driver that did read the events counted, \[18\]
+    fn event_counts(&self) -> Option<crate::driver::DriverStats> {
+        None
+    }
+
+    /// Per-pass timings from the last block, for `--profile`. Empty when the \[19\]
     fn timings(&self) -> Vec<(&'static str, f64)> {
         Vec::new()
     }
 
-    /// Lose the device on purpose, for testing what a render does when the \[14\]
+    /// Lose the device on purpose, for testing what a render does when the \[20\]
     #[cfg(feature = "dev")]
     fn lose_device(&mut self) {}
 }

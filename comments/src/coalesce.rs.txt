@@ -1,0 +1,294 @@
+# Comments extracted from src/coalesce.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/coalesce.rs:5
+//! Duplicate-note coalescing, `Config::coalesce`: N note-ons that would build N
+//! voices identical in everything but their gain build one, at N times the gain.
+//!
+//! Black MIDI is made by layering tracks, so the same note is written many
+//! times -- same channel, key, velocity, tick and length. Each copy is a voice,
+//! and every voice costs admission, a pool slot, render work and, under
+//! saturation, a steal. One voice at the summed gain is the same sound up to
+//! float rounding: `N * g` does not round as `g + g + ... + g` does. So this is
+//! behind a flag and checked by a null test, not by the byte-identity test.
+//! the development notes have the brief and the design note.
+//!
+//! # What makes two note-ons the same voice
+//!
+//! Everything a voice is built from and everything that acts on it while it
+//! sounds. The driver compares the first kind when the second note-on arrives
+//! (`GroupKey`: the packed note word, which holds channel, key, velocity,
+//! variant, frame, opening row and glide; the preset; the tuning; the epoch,
+//! below; and the previewed layers, which is where a `lorand`/`hirand` draw
+//! shows). Two such note-ons are on one gate slot, so every channel controller
+//! reaches both alike from then on -- with two exceptions that are decided by
+//! where an event sits in the stream rather than by its frame:
+//!
+//! * **an event between them on their tick.** A CC120 there cuts the first and
+//!   not the second, and a bend or a gain change gives them different opening
+//!   rows. So any event on the channel other than a note bumps the channel's
+//!   *epoch*, and a group takes only note-ons of one epoch.
+//!
+//!   This is a guard more than a need. Everything such an event can change is
+//!   caught elsewhere -- an opening row by the note word's `row_bias`, a
+//!   preset, variant or tuning by the key, a cut by the release, since a cut
+//!   note is released on the cut's tick -- except a cut between two note-ons
+//!   that are both released on that tick anyway, and those are notes that end
+//!   on the frame they start, which render silent. No case was found where
+//!   the epoch changes what is heard; it costs one increment an event, and it
+//!   keeps the next event someone teaches the driver from becoming a merge
+//!   nobody checked.
+//! * **their release.** That is the one input the note-on cannot know, and it
+//!   is what [`Lookahead`] is for.
+//!
+//! # Why a second reader, and not a pre-pass or a voice that splits
+//!
+//! The driver drains one block of events at a time, and a voice learns its
+//! release from the gate tables published later. Of the brief's options:
+//!
+//! * a whole-file pre-pass is simplest and wrong for a file of billions of
+//!   notes, whose decisions would not fit;
+//! * a weighted voice that splits when its group's note-offs differ is exact
+//!   and needs no look-ahead, but a backend voice would have to spawn a voice
+//!   mid-render, which on the GPU is the spawn and compaction passes;
+//! * merging in a backend that already knows durations helps that backend only.
+//!
+//! So this reads the file a second time, ahead of the driver, and pairs each
+//! note-on with the event that releases it using **the render's own pairing**:
+//! a real `GateTable`, fed the same events in the same order through the same
+//! 31-EDO and `--min-velocity` routing, so the j-th note-off at a slot ends the
+//! j-th note-on there with the pedals, CC120, CC121 and CC123 exactly as the
+//! render has them. What it hands the driver, one per note-on in stream order,
+//! is a *release token*: the tick of the event that publishes the note's
+//! note-off, or [`EOF`] for one released when the file runs out. Equal ticks
+//! are equal frames, and every note-off published by one event lands on that
+//! event's frame, so **equal tokens are equal release frames**. A note-on whose
+//! token is `None` is not merged.
+//!
+//! # What bounds it
+//!
+//! A note-on is decided as soon as it is released, or at the end of its own
+//! tick if nothing else was struck on its slot on that tick, which is most of
+//! them. The reader holds the decisions between the driver and its own read
+//! position. A note that is held longer than `Config::coalesce_window` further
+//! note-ons is decided unmerged -- *forced* -- and that is the bound: the
+//! reader never holds more than the window, whatever the file. It is a function
+//! of the stream alone, never of how far the reader happened to have read, so
+//! a render decides the same notes on any run and after any resume.
+//!
+//! # Where it runs
+//!
+//! On a thread of its own (`Config::drain_threads`, [`Lookahead`]), which hands
+//! the drain its decisions in batches through a bounded queue. That is safe
+//! because of the rule above: nothing but the stream decides what the reader
+//! hands over, so a reader that is a long way ahead of the drain decides what
+//! one in step with it would. The queue adds at most a few hundred KiB to what
+//! the window holds. It moved off the drain's thread on 2026-10-16, when
+//! coalescing went on by default and its second parse would otherwise have
+//! been the drain's to pay (the development notes).
+//!
+//! # The checkpoint
+//!
+//! Rebuilt, not saved. At a block boundary no note-on of a block that is still
+//! to come shares a tick with one already drained (a tick is one frame), and
+//! the decision for a note-on depends only on the events from it on and on the
+//! pairing state when it arrived, which the gate table and the note pairing of
+//! `--min-velocity` already save. So [`Lookahead::resync`] puts the reader at
+//! the driver's stream position with copies of those, and it decides every
+//! later note-on as it would have. A reader running ahead when that happens is
+//! stopped first, and what it had decided is dropped: it is decided again.
+
+[2] src/coalesce.rs:119
+/// Note-ons read between sweeps of every slot's open queue for spent entries.
+/// A sweep is one pass over 32,768 slots, so this keeps it under a thousandth
+/// of the reading.
+
+[3] src/coalesce.rs:123
+/// Decided unmerged: nothing else was struck on its slot on its tick, it was
+/// skipped by `--min-velocity`, or it outlived the window.
+
+[4] src/coalesce.rs:132
+    /// Its slot and velocity, `slot << 8 | vel`, which the driver's note-on
+    /// must match, and `FORCED` if the window decided it. A mismatch is the two
+    /// readers out of step, and is an error.
+
+[5] src/coalesce.rs:138
+/// In `Entry::check`: decided unmerged because it outlived the window. Above
+/// every slot and velocity.
+
+[6] src/coalesce.rs:142
+/// The second reader: the stream, the pairing, and the note-ons read and not
+/// yet decided. See the module notes. It runs where [`Lookahead`] puts it.
+
+[7] src/coalesce.rs:150
+    /// The next event to read, ahead of the stream: the one the driver had
+    /// already pulled when it was saved.
+
+[8] src/coalesce.rs:153
+    /// One entry per note-on read and not yet decided and handed on. The first
+    /// is note-on `head`, counting from where the reader started.
+
+[9] src/coalesce.rs:162
+    /// Per slot, its note-ons not yet released or decided, as (ordinal,
+    /// number), in ordinal order.
+    ///
+    /// **Pruned of note-ons already handed to the driver** (number below
+    /// `head`): their token is spent, so nothing a release could say about
+    /// them can change a decision, and the release that would have popped one
+    /// matches by ordinal, not by position. Without it a note forced unmerged
+    /// kept its entry until its note-off: on the densest test file, whose
+    /// one-second burst holds hundreds of millions of notes at once, that was
+    /// 8.4 GiB and climbing before a watchdog stopped it (2026-10-16).
+
+[10] src/coalesce.rs:175
+    /// Per slot, note-ons struck on it on the tick being read, and the first
+    /// one's number: `tick_gen` says whether the entry is this tick's.
+
+[11] src/coalesce.rs:250
+    /// The next note-on's decision, in stream order; `None` once the stream
+    /// has no more note-ons. Nothing but the stream decides what this returns
+    /// -- not who asks, nor how far ahead of the asking it runs -- which is
+    /// what lets it run on a thread of its own.
+
+[12] src/coalesce.rs:264
+                // Checked after the decision and before reading further, so
+                // a note-on is forced exactly when the reader reaches the
+                // window past it, however far it had read before.
+
+[13] src/coalesce.rs:305
+        // The driver's `handle_event`: a note by its key and channel, the
+        // channel messages that move the gates on all three of a triplet.
+
+[14] src/coalesce.rs:349
+                // Spent entries are at the front: a slot's numbers rise with its
+                // ordinals.
+
+[15] src/coalesce.rs:401
+                // Ordinals `before + 1 ..= before + n` are released; the queue
+                // holds none at or below `before`, which went earlier.
+
+[16] src/coalesce.rs:417
+    /// The tick being read is over: a note-on that was alone on its slot on it
+    /// has nothing to merge with, so it is decided and forgotten.
+
+[17] src/coalesce.rs:441
+/// Decisions handed from the reader's thread to the drain's at once. A channel
+/// operation a note-on would cost about what the thread saves; one a batch is
+/// a few nanoseconds a note-on.
+
+[18] src/coalesce.rs:445
+/// Batches the reader may have ready before it waits for the drain. With the
+/// one being filled and the one being read, at most six of 64 KiB, beside the
+/// window, however far behind the drain is.
+
+[19] src/coalesce.rs:465
+/// The look-ahead, as the driver asks it: one decision per note-on, in order.
+///
+/// **The reader runs on a thread of its own** unless `Config::drain_threads`
+/// is 0, and hands its decisions over in batches through a bounded queue.
+/// Because a decision is a function of the stream alone (`Reader::next_decision`),
+/// the driver gets the same decision for every note-on whichever thread made
+/// it and however far ahead it ran -- the threaded and the inline reader are
+/// checked against each other in the tests below. The thread starts with the
+/// first note-on asked for, and stops when the driver goes or `resync`s.
+
+[20] src/coalesce.rs:475
+    /// The reader while it is not running on its thread: before the first
+    /// note-on is asked for, after a `resync`, and always when it runs inline.
+
+[21] src/coalesce.rs:487
+    /// Note-ons decided unmerged because they outlived the window, counted as
+    /// the driver takes them.
+
+[22] src/coalesce.rs:495
+    /// A reader at the start of `stream`, which must be a second opening of the
+    /// driver's own: the same file, tracks and key width.
+
+[23] src/coalesce.rs:511
+    /// Put the reader where a driver that has just loaded a saved state is:
+    /// its stream at `stream_state` with `pending` read and not yet handled,
+    /// the pairing at `gates_state`, and `quiet` its `--min-velocity` pairing.
+    /// A reader running ahead is stopped and what it decided is dropped; the
+    /// next note-on asked for starts it again from there.
+
+[24] src/coalesce.rs:537
+    /// The release token of the driver's next note-on, which is on `ch` and
+    /// `key` after the 31-EDO mapping, at `vel`: `None` if it is not to be
+    /// merged. Call once for every note-on, skipped ones included, in order.
+
+[25] src/coalesce.rs:564
+    /// The next batch from the thread, which is started if it is not running,
+    /// and its first decision; `None` once the reader has no more.
+
+[26] src/coalesce.rs:593
+                // Gone without its last batch: it panicked, and that is what
+                // the render should report, not a reader out of step.
+
+[27] src/coalesce.rs:635
+    /// Stop the thread, if it runs, and take the reader back. A panic on it is
+    /// raised here when `raise`, and dropped otherwise (from `drop`, where a
+    /// second panic would abort).
+
+[28] src/coalesce.rs:663
+/// What two note-ons must share, beside their previewed layers, to be one
+/// voice. See the module notes.
+
+[29] src/coalesce.rs:688
+    /// Its candidates in the driver's `cands`, and their gains in
+    /// `Coalescer::gains`, both in the order they were pushed.
+
+[30] src/coalesce.rs:709
+/// The driver's coalescing state: the reader, the channels' epochs, and the
+/// groups open on the tick being drained.
+///
+/// The groups are per-block scratch. They close when the tick changes, before
+/// candidates are thinned, and at the end of every drain, so none is open at a
+/// block boundary, which is the only place a render is saved.
+
+[31] src/coalesce.rs:739
+    /// An event, on one channel after the 31-EDO mapping, as the driver
+    /// handles it: anything but a note starts a new epoch on its channel, or on
+    /// every channel if it is not a channel's.
+
+[32] src/coalesce.rs:767
+    /// Whether the groups open are on `tick`. When they are not, the driver
+    /// closes them before the note-on on `tick` goes any further.
+
+[33] src/coalesce.rs:785
+    /// Take a note-on into the open group it is the same voice as, if there is
+    /// one: its key equal, and its previewed layers the same regions at the
+    /// same gains and delays.
+
+[34] src/coalesce.rs:893
+    /// Every note-on's token, in order, as a driver would ask for them, and how
+    /// many the window forced: from the reader on its thread, checked against
+    /// the same reader on the asking thread.
+
+[35] src/coalesce.rs:928
+    /// A note alone on its slot on its tick is decided at the end of the tick,
+    /// and two on one slot carry the ticks their note-offs land on, paired
+    /// first in, first out.
+
+[36] src/coalesce.rs:945
+    /// The pedal holds the note-offs of both, and they are published at the
+    /// lift together; a note-off under the pedal for one and not the other is
+    /// two tokens.
+
+[37] src/coalesce.rs:989
+    /// A note-on the reader did not read is an error, not a guess, wherever the
+    /// reader runs.
+
+[38] src/coalesce.rs:1007
+    /// Black MIDI's layering, many batches long, with the window short enough
+    /// that it forces notes in every batch: the reader on its thread hands over
+    /// exactly the decisions it makes on the drain's, at every window.
+
+[39] src/coalesce.rs:1028
+    /// A driver that goes, or resumes somewhere else, while its reader is
+    /// running ahead stops the thread rather than leaving it reading -- or
+    /// waiting forever for a drain that is gone.

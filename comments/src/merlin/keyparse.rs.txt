@@ -1,0 +1,364 @@
+# Comments extracted from src/merlin/keyparse.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/merlin/keyparse.rs:5
+//! Merlin's own MIDI front end for the per-key render: the file read straight
+//! into paired notes, a group of keys at a time, streaming, with nothing on
+//! disk and no driver.
+//!
+//! Kestrel's driver exists to feed a voice pool: admission, gate tiles,
+//! channel rows, a spawn command per layer. Key-major merlin has no pool, and
+//! paid for all of it (about 95 ns a note in the bucket pass's `spawn`, about
+//! 160 ns a controller event) and for its memory: a dense block was held
+//! whole, for every key at once. This reads the file the way the per-key
+//! render wants it.
+//!
+//! 1. **A pre-pass** ([`Prepass::scan`]), every track on its own worker: the
+//!    tempo changes and the controllers that move a note's end (sustain,
+//!    sostenuto, CC120, CC121, CC123-127) in stream order, the notes on each
+//!    key counted per bucket of [`BUCKETS_PER_QN`] to a quarter note, and
+//!    where the stream ends. [`Prepass::scan_filed`] also files every note
+//!    event by key in a temporary file (`keystore`), so nothing later reads
+//!    the MIDI file.
+//! 2. **A pass per key group** ([`extract`]): those keys' streams, or the file
+//!    read again without a store, a window of ticks at a time sized from the
+//!    counts so a window holds about
+//!    [`ExtractOpts::window_notes`] of the group's notes. Runs of neighbouring
+//!    tracks are read on workers; the group's keys are spread over as many
+//!    pairings, each merging its own notes into stream order with a counting
+//!    sort and pairing them, side by side.
+//!
+//! **Pairing is the driver's, exactly** (`GateTable`): a slot's note-offs
+//! release its note-ons in order, counted, and the pedals, CC120, CC121 and
+//! CC123 act on each slot of their channel from that slot's own counts. So a
+//! key's notes and its channels' controllers are all a key's pairing needs,
+//! and a group pass holds only its own keys' state. A note's frames are the
+//! driver's too: the same [`TempoClock`] walked in stream order, and the end of
+//! the file releasing everything at the start of the block its last event
+//! falls in.
+//!
+//! Identical copies -- one slot, one velocity, one start -- are held as one run
+//! with a count from the note-on, and released from the front of their slot's
+//! queue as note-offs arrive, so a stack of hundreds of copies costs one entry
+//! however it is released. What a pass holds is one window of the group's
+//! notes and the runs still sounding, not the song.
+//!
+//! **Checked** by a digest against the driver and the bucket pass, per key
+//! and exact, on whole files (`examples/keyparse_bench.rs --gate`) and on
+//! made material (`tests/merlin_keyparse.rs`). **Except the sostenuto
+//! pedal,** where the driver's counting lets a slot's note-offs overtake its
+//! note-ons and so loses a note (the development notes, 2026-10-30); this keeps the
+//! queues straight instead, and the two part there.
+//!
+//! **Not yet a renderer's front end.** It stops at paired notes ([`Note`]):
+//! the layers, params and gains the driver builds from them are the next
+//! step. 31-EDO files and `--min-velocity` are refused.
+
+[2] src/merlin/keyparse.rs:67
+/// Count buckets to a quarter note: a sixty-fourth note, the finest a window
+/// is cut at.
+
+[3] src/merlin/keyparse.rs:76
+/// The read windows a group pass holds for all its tracks together. It runs
+/// beside the render, so it takes a quarter of what one reading of the file
+/// does; the window changes how often the file is read and nothing decoded.
+
+[4] src/merlin/keyparse.rs:100
+/// An event's place in the stream: the merge takes ticks in order, ties by
+/// track and then by the controllers before it in the track, which is all a
+/// note's order against controllers needs and costs a stream nothing.
+
+[5] src/merlin/keyparse.rs:186
+/// A channel's pitch along the song as a clock: `tau` is how far a note on it
+/// has played, in frames of the note unbent, by each frame of the song. A note a
+/// bend moves under is rendered unbent in `tau` and read back at this clock's
+/// speed, which is a user's way with bends: the whole channel shares one clock,
+/// so its notes share kernels as if nothing bent them.
+
+[6] src/merlin/keyparse.rs:240
+    /// The song's frames `[lo, hi)` as runs of at most `most`, none across a
+    /// change of pitch: `[first frame, whole tau, its fraction, tau a frame,
+    /// frames]`, the two in between as `f32` bits.
+
+[7] src/merlin/keyparse.rs:273
+/// The scan's controllers: those in memory, and, past the budget and where
+/// there is a directory to write to, sorted runs of them on disk.
+
+[8] src/merlin/keyparse.rs:280
+    /// The tempo changes and CC120s, which always stay here: what placing a
+    /// CC120 needs, for the tails it cuts. With `pitch`, what moves a channel's
+    /// pitch too.
+
+[9] src/merlin/keyparse.rs:288
+    /// `evs` taken on. What is held past `budget` goes to a run; if it cannot,
+    /// it stays here and costs memory, not the render.
+
+[10] src/merlin/keyparse.rs:355
+/// A pass's walk along the file's controllers in stream order, a window at a
+/// time. Those in memory, sorted, are merged with the runs on disk; with no
+/// runs a window is a slice of them.
+
+[11] src/merlin/keyparse.rs:414
+/// `Config::merlin_told_events`' default: events a track's worker reads before
+/// it tells the others what it has read.
+
+[12] src/merlin/keyparse.rs:418
+/// Who the pre-pass tells how it is getting on, and who can stop it. The
+/// render's progress is one (`MerlinProgress`); a test is another, which is how
+/// a stop in the middle of a track is tested at a known place.
+
+[13] src/merlin/keyparse.rs:424
+    /// `bytes` more read and `notes` more note-ons counted, from any worker, at
+    /// least every `Config::merlin_told_events` events and at each track's end.
+    /// An error stops the pass.
+
+[14] src/merlin/keyparse.rs:428
+    /// Whether the render has been stopped, which the passes after this one
+    /// ask.
+
+[15] src/merlin/keyparse.rs:459
+    /// Each channel's CC120s, as frames in stream order. A note leaves pairing
+    /// at its note-off, with its tail still to play, so what cuts that tail
+    /// has to be known before the stream reaches it.
+
+[16] src/merlin/keyparse.rs:463
+    /// What placing each channel's pitch along the song needs, with
+    /// `Config::merlin_km_warp`, and the clock it is walked by.
+
+[17] src/merlin/keyparse.rs:472
+    /// The tick of the stream's last event that is not a tempo change, the
+    /// one the driver finds the stream exhausted after.
+
+[18] src/merlin/keyparse.rs:475
+    /// A per-key render's progress and stop, which the pre-pass and the passes
+    /// after it check and feed.
+
+[19] src/merlin/keyparse.rs:542
+    /// `scan`, and every note event filed by key in a temporary file in `dir`.
+    /// Without room for the file it is `scan`.
+
+[20] src/merlin/keyparse.rs:548
+    /// `scan_filed`, reporting to `watch` as it reads and stopping, with
+    /// `Cancelled`, when it is set.
+
+[21] src/merlin/keyparse.rs:608
+        // Counts are folded, then merged pairwise as the folds finish, never
+        // collected: a fold is one of rayon's splits, not a worker, and a file
+        // of thousands of tracks makes about as many of them, each with a whole
+        // song's table (13.8 GB at once on one such file, 2026-10-30). The controllers
+        // go to one sink, a batch at a time, and past its budget to disk.
+
+[22] src/merlin/keyparse.rs:615
+        // The note-ons so far across the workers, told every so often rather
+        // than at each track's end: one track can be most of a file.
+
+[23] src/merlin/keyparse.rs:701
+        // A place orders every event, so what comes of this is the stream's
+        // order however the tracks' batches arrived.
+
+[24] src/merlin/keyparse.rs:764
+    /// Keys in groups of consecutive keys, each holding at most `budget`
+    /// notes unless one key alone holds more. A function of the file and the
+    /// budget.
+
+[25] src/merlin/keyparse.rs:789
+    /// Each channel's clock (`Warp`), by the channel state's own reading of
+    /// what moves its pitch: a bend, and the RPNs that set its range and tuning.
+
+[26] src/merlin/keyparse.rs:820
+    /// Window ends, in ticks, for `keys`: each window as many whole buckets as
+    /// keep its notes on those keys, and a share for its controllers, at or
+    /// under `notes`. A bucket that alone holds more is cut into equal runs of
+    /// ticks, which divides it unless its notes share a tick. The last window
+    /// runs to the end of the file. Where windows end changes what a pass
+    /// holds, never what it pairs.
+
+[27] src/merlin/keyparse.rs:853
+/// Paired notes, as the driver pairs them: `count` identical copies on `slot`
+/// (`channel * 128 + key`) struck at frame `start` with `vel`, all released at
+/// frame `end`, which is never before `start`.
+
+[28] src/merlin/keyparse.rs:872
+    /// The frame of the first CC120 on its channel after its release, which
+    /// cuts what is left of its tail; `u64::MAX` for none.
+
+[29] src/merlin/keyparse.rs:886
+/// The driver's `GateTable`, for one group's keys, with each slot's sounding
+/// copies held as runs so a release says which notes it ends.
+
+[30] src/merlin/keyparse.rs:902
+    /// Each slot's last release, held until the next one differs, so copies
+    /// released together leave as one note.
+
+[31] src/merlin/keyparse.rs:962
+    /// `GateTable::publish_off`: the next `n` sounding copies of `s` end at
+    /// `frame`.
+
+[32] src/merlin/keyparse.rs:979
+            // Copies of one run released one note-off at a time on one frame
+            // are one note with their count.
+
+[33] src/merlin/keyparse.rs:1019
+    /// `n` of `note_off` at once. Identical note-offs reach here folded, and
+    /// with no pedal down they are one release of however many are sounding;
+    /// a pedal has to be asked once for each.
+
+[34] src/merlin/keyparse.rs:1154
+        // Swept on the densest files, 2026-11-01: a merge's memory fits the
+        // CPU's caches here, and four times shorter its windows cost more than
+        // their merges save.
+
+[35] src/merlin/keyparse.rs:1172
+    /// The tracks read into their buffers, then each pairing's window merged
+    /// and paired.
+
+[36] src/merlin/keyparse.rs:1176
+    /// Within those, summed over the pairings: keys read from the store, the
+    /// merge, the pairing, and notes built into the sinks. Then the time
+    /// `after` held the pass, a streamed key waiting for the render.
+
+[37] src/merlin/keyparse.rs:1184
+    /// What the group's notes asked of the channel state that records do
+    /// not build yet: `keyrec::unsupported` bits.
+
+[38] src/merlin/keyparse.rs:1187
+    /// The frame everything still held is released at, the start of the
+    /// block of the stream's last event that is not a tempo change; `None`
+    /// for a file with no such event.
+
+[39] src/merlin/keyparse.rs:1201
+    /// Identical note events read back to back in one track on one tick,
+    /// which the merge keeps together: within a tick it takes a track's
+    /// events as one block.
+
+[40] src/merlin/keyparse.rs:1207
+/// One track's stream of one key in a group pass, holding the event it read
+/// past the window's end.
+
+[41] src/merlin/keyparse.rs:1236
+/// One track's reader in a group pass, holding the event it read past the
+/// window's end.
+
+[42] src/merlin/keyparse.rs:1245
+/// A run of neighbouring tracks, read by one worker into one buffer per
+/// pairing. A buffer holds its tracks' notes in track order and, within a
+/// track, in the track's order, which is what the stable merge by tick needs;
+/// and the buffers are a few hundred however many tracks the file has, where
+/// one per track and pairing was tens of thousands for a file of thousands of
+/// tracks, and the allocator's. The buffers are kept apart from the worker, two
+/// sets of them, so one window is read into one set while the last one, in the
+/// other, is paired.
+
+[43] src/merlin/keyparse.rs:1262
+    /// Its tracks' events of the window ending at tick `end`, the group's
+    /// notes into `buf`, the buffer of the pairing `sub_of` names for their
+    /// key (`NONE` for a key not in the group). `bytes` are the keys' streams
+    /// from a store, and `shared` says which pairings hold several keys: their
+    /// streams are put back in the track's order, which orders the notes
+    /// against the track's controllers.
+
+[44] src/merlin/keyparse.rs:1288
+                // The notes of other keys first, a run at a time: nothing
+                // below reads them but to count them.
+
+[45] src/merlin/keyparse.rs:1320
+                // The same note event again in this track, with nothing
+                // between that its pairing reads -- another pairing's notes
+                // are another slot's -- so one more copy of the last.
+
+[46] src/merlin/keyparse.rs:1335
+/// The workers' buffers for pairing `sub` merged into `out` in stream order:
+/// by tick, ties in track order and then in each track's own order, which is
+/// the order of the buffers laid end to end. A counting sort over the window's
+/// ticks when they span few enough; otherwise -- a window with a long silence
+/// in it -- the buffers appended and sorted stably. Linear in the window,
+/// where a comparison sort of every window was most of a pass. `window` is its
+/// `[start, end)` in ticks, which spares reading every event for its bounds.
+
+[47] src/merlin/keyparse.rs:1350
+    // The window says where its ticks are, unless it runs to the end of the
+    // file or is mostly silence: then the events do.
+
+[48] src/merlin/keyparse.rs:1384
+/// One pass over the file for `keys`: their notes paired and handed to `sink`
+/// a window at a time, a pairing at a time. A key's own notes arrive in the
+/// order they are released, but for copies of one run released on one frame,
+/// which are held back as one note until that slot's next release differs.
+/// `Config::block_frames` is the driver's block, which places the end of the
+/// file's release.
+
+[49] src/merlin/keyparse.rs:1401
+/// What [`extract_par`] calls after each window but the last, with the sinks
+/// and a frame every note starting before which has reached them. False stops
+/// the pass.
+
+[50] src/merlin/keyparse.rs:1406
+/// [`extract`] with a sink per pairing, each fed on a worker as its pairing
+/// releases notes, the pairings side by side: `make` makes one for a
+/// pairing's keys, and `note` hands it a note. Each key is one pairing's, and
+/// its notes reach that pairing's sink in the order [`extract`] hands them
+/// over. Returns each pairing's keys and its sink.
+
+[51] src/merlin/keyparse.rs:1437
+    // The keys over as many pairings as there are workers, each key to the
+    // one with the fewest notes so far, largest key first: slots pair on
+    // their own, so a key's notes are released in the same order whichever
+    // pairing holds it.
+
+[52] src/merlin/keyparse.rs:1455
+    // Runs of neighbouring tracks, about the same bytes each, one a worker
+    // and a few more so a long track does not hold the rest back. The tracks
+    // are opened side by side: a file of thousands of tracks spent most of a
+    // second here opening them one at a time.
+
+[53] src/merlin/keyparse.rs:1512
+    // A window goes through four stages, each on a thread of its own with a
+    // short queue before it, so each is at work on a different window and none
+    // waits for the slowest of the others on every window: read, merged, paired,
+    // then built into the sinks, here. Merging, pairing and building all follow
+    // the stream, so they cannot share out one window, but they can share out
+    // neighbouring ones. Every stage takes its windows in order, so each sink
+    // meets its notes in the order it would on one thread, and where the stages
+    // fall moves no byte.
+    //
+    // Each stage's buffers come back for its next window.
+
+[54] src/merlin/keyparse.rs:1573
+                // Where a later note can start, and where a note not handed
+                // over did. A release held back would wait for its slot's next,
+                // which may never come, and hold every window it reaches until
+                // the end of the file; it can only have been waiting for copies
+                // on its own frame, and a copy that comes after this is one more
+                // record of the same note.
+
+[55] src/merlin/keyparse.rs:1642
+    // The driver releases everything at the start of the block in which the
+    // stream ran out: the block of its last event that is not a tempo change.
+
+[56] src/merlin/keyparse.rs:1680
+/// `frame_of`, remembering the last tick: nearly every event of black MIDI is
+/// on the tick of the one before it.
+
+[57] src/merlin/keyparse.rs:1691
+/// One window through one pairing: its notes and the window's controllers,
+/// merged by their places in the stream.
+
+[58] src/merlin/keyparse.rs:1750
+    /// The merge is a stable sort by tick over the buffers laid end to end,
+    /// however it gets there: on the window's own bounds, on the events' when
+    /// the window runs to the end of the file or is wider than its events
+    /// justify, and by the comparison sort when even they span too much. One
+    /// `out` and one `bins` throughout, each case leaving the next its length.
+    /// Every controller there is comes back from disk as it went.
+    /// A clock's frames and `tau`s are each other's, its runs walk it without a
+    /// gap and turn only at a change of pitch, and it says when a note is
+    /// moved under.
+
+[59] src/merlin/keyparse.rs:1818
+    /// Runs on disk and what stayed in memory merge into the stream's order,
+    /// a window at a time, however the budget cut them.

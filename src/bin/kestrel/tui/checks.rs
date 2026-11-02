@@ -452,6 +452,9 @@ pub(crate) const LOAD_NEUTRAL: &[&str] = &[
     "--backend",
     "--block-csv",
     "--ceiling-db",
+    // Read as the MIDI is drained, never by the loader.
+    "--coalesce",
+    "--coalesce-window",
     // How often a render saves its progress; the loader never sees it.
     "--checkpoint-every",
     // The output stage's, applied to the mix, which the loader never sees.

@@ -10,7 +10,7 @@
 //! `--progress json`: a render's live state as JSON lines on stdout, at a rate
 //! the reading program sets, with control messages taken from stdin.
 //!
-//! The protocol is specified in `METRICS.md`. Everything sent comes from a
+//! The protocol is specified in the development notes. Everything sent comes from a
 //! `session::Monitor`, the same one the guided renderer's progress screen
 //! reads, and nothing here runs on the render thread: the emitter and the
 //! control reader are threads of their own, so a program that reads slowly,
@@ -114,20 +114,20 @@
 /// (and the request's `id` under `api`); the batch adds `batch_set` as a soundfont
 /// set starts to load, and `batch_job` as a job starts and as it ends.
 
-[23] src/bin/kestrel/feed.rs:537
+[23] src/bin/kestrel/feed.rs:540
             // Its last lines -- the summary or the failure -- go out first, and
             // then the batch says how the job ended.
 
-[24] src/bin/kestrel/feed.rs:547
+[24] src/bin/kestrel/feed.rs:550
 /// How a batch ended, as `api` answers a `batch` request with it and as the command
 /// line's last line, `batch_summary`, carries it.
 
-[25] src/bin/kestrel/feed.rs:586
+[25] src/bin/kestrel/feed.rs:589
 /// Read control lines for a batch until input ends. `cancel` stops the job on the
 /// stage and starts none of the rest; `interval_ms` and `snapshot` go to the job on
 /// the stage, and an interval is kept for the jobs after it.
 
-[26] src/bin/kestrel/feed.rs:629
+[26] src/bin/kestrel/feed.rs:632
 /// `kestrel --force-cli render a.mid b.mid ... -o DIR --progress json`.
 ///
 /// The same lines a render writes, once for each job and marked with its `job`
@@ -135,22 +135,22 @@
 /// `hello` first, as always, and `batch_summary` last. A batch that cannot be set up
 /// ends on a `failed` line instead, as a render does.
 
-[27] src/bin/kestrel/feed.rs:665
+[27] src/bin/kestrel/feed.rs:668
         // Detached on purpose, as a render's is: it blocks on stdin, which may never
         // close, and must not keep the process alive once the batch is done.
 
-[28] src/bin/kestrel/feed.rs:784
+[28] src/bin/kestrel/feed.rs:787
     /// With periodic progress off, a reader gets the events in order, one
     /// final snapshot, and the summary last, with nothing after it.
 
-[29] src/bin/kestrel/feed.rs:804
+[29] src/bin/kestrel/feed.rs:807
     /// A control message is answered before the progress it changes, and a
     /// refused one is reported rather than ignored.
 
-[30] src/bin/kestrel/feed.rs:823
+[30] src/bin/kestrel/feed.rs:826
     /// The control reader stops at the end of its input and applies cancel
     /// itself, without waiting for the emitter.
 
-[31] src/bin/kestrel/feed.rs:840
+[31] src/bin/kestrel/feed.rs:843
     /// `{"cancel": true, "discard": true}` is a stop that keeps none of its
     /// progress, and `discard` alone is not a stop.

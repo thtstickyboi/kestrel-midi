@@ -4,7 +4,7 @@
 
 //! What each track of a MIDI holds, read before a per-track render is set up. \[1\]
 
-use crate::midi::{Division, Event, SmfHeader, TempoClock, TrackReader};
+use crate::midi::{Division, Event, SmfHeader, TempoClock, TempoTiming, TrackReader, TRACK_BUF};
 use anyhow::{bail, Context, Result};
 use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
@@ -225,8 +225,8 @@ pub fn max_jobs() -> usize {
 }
 
 /// Seconds each track of a per-track render runs: to where the file ends and \[24\]
-pub fn render_secs(scan: &TrackScan, rate: u32, seconds: Option<f64>) -> f64 {
-    let secs = scan.duration(rate) + 1.0;
+pub fn render_secs(scan: &TrackScan, rate: u32, timing: TempoTiming, seconds: Option<f64>) -> f64 {
+    let secs = scan.duration(rate, timing) + 1.0;
     seconds.map_or(secs, |s| secs.min(s))
 }
 
@@ -394,10 +394,10 @@ impl TrackScan {
     }
 
     /// The output frame each of `ticks` falls on at `rate`, by the same clock \[39\]
-    pub fn frames_at(&self, ticks: &[u64], rate: u32) -> Vec<f64> {
+    pub fn frames_at(&self, ticks: &[u64], rate: u32, timing: TempoTiming) -> Vec<f64> {
         let mut order: Vec<usize> = (0..ticks.len()).collect();
         order.sort_by_key(|&i| ticks[i]);
-        let mut clock = TempoClock::new(self.division, rate);
+        let mut clock = TempoClock::with_timing(self.division, rate, timing);
         let mut tempo = self.tempo.iter().peekable();
         let mut out = vec![0.0; ticks.len()];
         for i in order {
@@ -415,8 +415,8 @@ impl TrackScan {
     }
 
     /// Seconds from the start to the file's last event at `rate`. The render \[41\]
-    pub fn duration(&self, rate: u32) -> f64 {
-        self.frames_at(&[self.end_tick()], rate)[0] / rate as f64
+    pub fn duration(&self, rate: u32, timing: TempoTiming) -> f64 {
+        self.frames_at(&[self.end_tick()], rate, timing)[0] / rate as f64
     }
 }
 
@@ -522,7 +522,7 @@ type Scanned = (TrackInfo, Vec<(u64, u32)>);
 
 /// Read one track chunk start to finish.
 fn scan_track(path: &Path, offset: u64, len: u64, progress: &ScanProgress) -> Result<Scanned> {
-    let mut r = TrackReader::open(path, offset, len)?;
+    let mut r = TrackReader::open(path, offset, len, TRACK_BUF)?;
     r.keep_name = true;
     let mut t = TrackInfo {
         name: None,
@@ -744,8 +744,8 @@ mod tests {
         assert_eq!(*s.tempo, tempo[..]);
         assert_eq!(s.tempo[1..3], [(960, 250_000), (960, 600_000)], "same tick: by track");
         assert_eq!(s.notes(), notes);
-        assert_eq!(s.frames_at(&ticks, 48_000), frames);
-        assert_eq!(s.duration(48_000), frames.last().unwrap() / 48_000.0);
+        assert_eq!(s.frames_at(&ticks, 48_000, TempoTiming::Bassmidi), frames);
+        assert_eq!(s.duration(48_000, TempoTiming::Bassmidi), frames.last().unwrap() / 48_000.0);
         let _ = std::fs::remove_file(&path);
     }
 

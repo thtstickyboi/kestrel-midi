@@ -732,7 +732,7 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
             [info.first_note.unwrap_or(0), info.last_note.or(info.first_note).unwrap_or(0)]
         })
         .collect();
-    let frames = scan.frames_at(&ends, cfg.sample_rate);
+    let frames = scan.frames_at(&ends, cfg.sample_rate, cfg.tempo_timing);
     for (stem, f) in stems.iter_mut().zip(frames.chunks(2)) {
         let block = |frame: f64| frame.max(0.0) as u64 / cfg.block_frames as u64;
         stem.span = (block(f[0]), block(f[1]).max(block(f[0])));
@@ -823,16 +823,20 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
         bytes_total: 0,
     };
     match kind {
+        // [37]
+        BackendKind::Merlin => {
+            bail!("per-track rendering is not available on the merlin backend; use --note-slice to split it")
+        }
         BackendKind::Cpu => {
             backends.extend((0..wanted).map(|_| JobBackend::Cpu));
             at_once = format!("{wanted} at once");
         }
         BackendKind::Gpu => {
-            // [37]
+            // [38]
             let mut probe = cfg.clone();
             probe.max_voices = 1;
             let shared = GpuShared::new(&probe, &bank, &phase)?;
-            // [38]
+            // [39]
             let cap = GpuBatch::max_voices_each(&cfg, &bank, shared.binding_bytes(), 1);
             if cfg.max_voices > cap && cap > 0 {
                 log::warn!(
@@ -844,7 +848,7 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
                 );
                 cfg.max_voices = cap;
             }
-            // [39]
+            // [40]
             let want = stems.len().min(LANES_MAX);
             // No more than fits in video memory beside the pool.
             let per_lane = GpuBatch::lane_bytes(&cfg, &bank).max(1);
@@ -854,10 +858,10 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
                 .map(|free| (free.saturating_sub(VRAM_MARGIN) / per_lane) as usize)
                 .filter(|&fit| fit < want)
                 .map(|fit| fit.max(1));
-            // [40]
+            // [41]
             let bind = Some(GpuBatch::lanes_that_bind(&cfg, &bank, shared.binding_bytes(), want))
                 .filter(|&bind| bind > 0 && bind < want);
-            // [41]
+            // [42]
             let lanes = fit.into_iter().chain(bind).min().unwrap_or(want);
             if lanes < want {
                 let mut why = Vec::new();
@@ -897,7 +901,7 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
             );
         }
     }
-    // [42]
+    // [43]
     let backend_id = match &setup.adapter {
         Some(a) => format!("gpu: {a}"),
         None => "cpu".to_string(),
@@ -934,17 +938,19 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
             tracks::SetupTracks::Ignore => "ignored",
         }
     );
-    // [43]
+    // [44]
     let mut stem_cfg = cfg.clone();
     stem_cfg.max_block_candidates = tracks::candidates_each(&stem_cfg);
     // The tracks are already spread over threads; a thread each is enough.
     stem_cfg.materialise_threads = 1;
+    stem_cfg.drain_threads = 0;
     let mix = if merge {
         stem_cfg.limiter_mode = LimiterMode::Off;
         stem_cfg.clamp_output = false;
         stem_cfg.master_volume = 1.0;
         stem_cfg.dc_blocker = false;
-        let secs = job.seconds.map_or(scan.duration(cfg.sample_rate), |s| s.min(scan.duration(cfg.sample_rate)));
+        let full = scan.duration(cfg.sample_rate, cfg.tempo_timing);
+        let secs = job.seconds.map_or(full, |s| s.min(full));
         log::info!(
             target: TARGET,
             "the tracks are summed exactly in memory before the limiter: at most about {} for {:.1}s",
@@ -952,7 +958,7 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
             secs
         );
         Some(match &restore {
-            // [44]
+            // [45]
             Some(cp) => {
                 let t0 = Instant::now();
                 let mut payload = cp.payload()?;
@@ -993,7 +999,7 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
         }
     }
 
-    // [45]
+    // [46]
     let mut order: Vec<usize> = (0..stems.len()).filter(|&i| !finished_tracks.contains(&stems[i].track)).collect();
     order.sort_by_key(|&i| (Reverse(stems[i].notes), stems[i].track));
 
@@ -1017,10 +1023,10 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
         .sum();
     let progress = Progress::new(slots);
     // Every track runs to where the file ends, or to --seconds.
-    let per_track = ((max_frames as f64).min(scan.duration(cfg.sample_rate) * cfg.sample_rate as f64)
+    let per_track = ((max_frames as f64).min(scan.duration(cfg.sample_rate, cfg.tempo_timing) * cfg.sample_rate as f64)
         / cfg.block_frames as f64)
         .ceil() as u64;
-    // [46]
+    // [47]
     let span_total: u64 = stems
         .iter()
         .filter(|s| s.span.0 < per_track)
@@ -1037,7 +1043,7 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
     }
     let length_secs = (per_track * cfg.block_frames as u64) as f64 / cfg.sample_rate as f64;
     // Every note the tracks hold, unless --seconds stops them short of some.
-    let cut = (max_frames as f64) < scan.duration(cfg.sample_rate) * cfg.sample_rate as f64;
+    let cut = (max_frames as f64) < scan.duration(cfg.sample_rate, cfg.tempo_timing) * cfg.sample_rate as f64;
     let notes_total: u64 = if cut { 0 } else { stems.iter().map(|s| s.notes).sum() };
     let report = || {
         let mut now: Vec<(usize, u64)> = progress
@@ -1134,7 +1140,7 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
                 running.fetch_sub(1, Ordering::Relaxed);
             });
         }
-        // [47]
+        // [48]
         let mut last_save = Instant::now();
         let mut saved_at = finished.load(Ordering::Relaxed);
         while running.load(Ordering::Relaxed) > 0 {
@@ -1160,13 +1166,13 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
     });
     obs.tracks(&report());
     obs.phase(Phase::Finishing);
-    // [48]
+    // [49]
     let failed = failure.lock().unwrap().is_some();
     let unfinished = failed || {
         let r = results.lock().unwrap();
         r.len() < stems.len() || r.iter().any(|d| d.cancelled)
     };
-    // [49]
+    // [50]
     let discard = !failed && obs.cancelled() && obs.discard_progress();
     if unfinished {
         if let Some(s) = &saver {
@@ -1213,7 +1219,7 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
         discarded: discard && saver.is_some() && unfinished,
     };
     match mix {
-        // [50]
+        // [51]
         Some(_) if cancelled => {
             log::warn!(
                 target: TARGET,
@@ -1226,7 +1232,7 @@ pub(crate) fn run(job: &Job, plan: Plan, preloaded: Option<Arc<Bank>>, obs: &mut
         }
         Some(mix) => {
             let t0 = Instant::now();
-            // [51]
+            // [52]
             let part = resume::partial_of(&job.out);
             let w = match mix.write(&cfg, &part, encoder.as_ref(), job.wav_format) {
                 Ok(w) => w,
@@ -1324,7 +1330,7 @@ fn render_stem(ctx: &Ctx, stem: &Stem, slot: usize) -> Result<Done> {
     let mut peak_voices = 0u64;
     let mut cancelled = false;
     let mut seen = Seen::default();
-    // [52]
+    // [53]
     loop {
         let more = driver.next_block(backend, &mut block)?;
         emit(ctx, stem, &mut out, &driver, &block)?;
@@ -1366,9 +1372,9 @@ fn render_stem(ctx: &Ctx, stem: &Stem, slot: usize) -> Result<Done> {
     })
 }
 
-/// Say how much the stems will take and refuse to start a WAV render that \[53\]
+/// Say how much the stems will take and refuse to start a WAV render that \[54\]
 fn check_space(folder: &Path, scan: &TrackScan, stems: usize, cfg: &Config, job: &Job, ext: &str) -> Result<()> {
-    let secs = tracks::render_secs(scan, cfg.sample_rate, job.seconds);
+    let secs = tracks::render_secs(scan, cfg.sample_rate, cfg.tempo_timing, job.seconds);
     let (need, exact) = tracks::output_bytes(stems, secs, cfg.sample_rate, ext, job.wav_format == wav::SampleFormat::Float32);
     let mut probe = folder;
     while !probe.exists() {

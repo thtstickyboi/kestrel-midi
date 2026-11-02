@@ -87,7 +87,7 @@ pub(super) fn flow(
             _ => None,
         },
     };
-    let mut ready = go!(step_flags(io, env, &midis[0], fonts, voices, &outs[0], (6, 6), &[]));
+    let mut ready = go!(step_flags(io, env, &midis[0], fonts, voices, &outs[0], (6, 6), &[], false));
 
     let planned = batch::jobs_from(&ready.job, &entries, None, ext).and_then(batch::plan);
     let mut plan = match planned {
@@ -271,6 +271,7 @@ mod flow_tests {
         Env {
             adapters: Vec::new(),
             default_adapter: None,
+            failed: Vec::new(),
             gpu_error: None,
             ffmpeg: Err("not looked for".into()),
             ring: Ring::default(),

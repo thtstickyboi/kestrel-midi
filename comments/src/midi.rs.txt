@@ -10,19 +10,46 @@
 //! Streaming SMF parser and track merger.
 //!
 //! Nothing here ever holds a whole MIDI file in memory. Each track keeps a
-//! 256 KiB window over its own chunk, and a min-heap merges the per-track
-//! cursors into one tick-ordered stream. A 40 GB black MIDI costs the same
-//! resident memory as a 4 KB one.
+//! window over its own chunk, and a min-heap merges the per-track cursors into
+//! one tick-ordered stream. The windows of every track come out of one budget
+//! (`READ_BUDGET`), so neither a 40 GB black MIDI nor one with tens of
+//! thousands of tracks holds more than that, short of a floor of a few KiB a
+//! track.
 
-[2] src/midi.rs:24
+[2] src/midi.rs:26
+/// The largest window a track reads through. A reader that is alone, like the
+/// track scan's, gets this; one of a stream's many gets its share of
+/// `READ_BUDGET`, up to this. Never more than the track itself.
+
+[3] src/midi.rs:31
+/// The smallest window a stream gives a track, however many tracks share the
+/// budget. Past `budget / TRACK_BUF_MIN` tracks -- 65,536 for each of a
+/// coalescing render's two streams -- the floor wins and the windows add up to
+/// more than the budget. A window this size reads the file 32 times as often
+/// as the largest; at 4 KiB a 4,000-track file parsed a quarter to a third
+/// slower.
+
+[4] src/midi.rs:39
+/// Bytes of read window one render's MIDI readers share: every track of every
+/// stream it opens on the file. A render that coalesces opens two
+/// (`coalesce::Lookahead` reads the file a second time) and gives each half.
+///
+/// It used to be 256 KiB a track for every stream, which made host memory a
+/// function of the track count: about 14 GiB of windows on a 57,000-track file
+/// (the development notes, 2026-09-13), and twice that once coalescing opened a second
+/// stream. Not less than this, because a smaller window costs reads: on a
+/// 4,000-track file, half of this a stream leaves the long tracks 223 KiB, and
+/// a quarter left them 96 KiB, which measured a few percent slower.
+
+[5] src/midi.rs:51
 /// Bytes of an FF 03 track name a reader keeps; the rest is skipped. Names in
 /// the wild run to a few dozen bytes, and this bounds a malformed one.
 
-[3] src/midi.rs:28
+[6] src/midi.rs:55
 /// Bytes of a SysEx a reader looks at: a scale/octave tuning message is 31
 /// after its `F0`, the longest thing matched. Whatever is past this is skipped.
 
-[4] src/midi.rs:32
+[7] src/midi.rs:59
 /// MIDI ports a file can address. A port is one more set of sixteen channels,
 /// named per track by the FF 21 meta event. Sixteen of them, A to P, because
 /// that is what Domino -- the editor most black MIDI is written in -- offers;
@@ -34,11 +61,11 @@
 /// that uses ports I to P renders here with those parts apart and in BASSMIDI
 /// with them merged onto A to H. Every other port rule is still BASSMIDI's.
 
-[5] src/midi.rs:43
+[8] src/midi.rs:70
 /// Channels across every port, and the range of an event's `ch`: all 256
 /// values of a `u8`.
 
-[6] src/midi.rs:47
+[9] src/midi.rs:74
 /// One decoded event.
 ///
 /// **`ch` is the channel across every port**, `16 * port + channel`, so
@@ -47,7 +74,7 @@
 /// channel within its port. A file that never names a port is on port 0 and
 /// sees exactly the sixteen channels it always did.
 
-[7] src/midi.rs:61
+[10] src/midi.rs:88
     /// Roland GS "USE FOR RHYTHM PART". `map` is 0 for a melodic part and 1 or
     /// 2 for the two GS drum maps.
     ///
@@ -56,14 +83,14 @@
     /// moves its drums off channel 10 -- or adds a second drum part, which is
     /// the common case -- is unrenderable without it.
 
-[8] src/midi.rs:69
+[11] src/midi.rs:96
     /// GM System On, GM System Off or GS Reset. Puts every channel back to the
     /// default part type: drums on channel 10, melodic everywhere else.
     ///
     /// On every port, whichever port's track sent it: BASSMIDI resets them all.
     /// The part type a `DrumPart` sets, by contrast, stays on its own port.
 
-[9] src/midi.rs:77
+[12] src/midi.rs:104
     /// MIDI Tuning Standard scale/octave tuning, one pitch class of one
     /// channel: from now on a note-on on `ch` whose key is `pc` mod 12 sounds
     /// `units` away from where it would, in `mts::UNITS_PER_CENT`.
@@ -72,18 +99,18 @@
     /// 192, all on the message's tick: a message is read as a run of these
     /// (`Burst`) rather than carried whole, so that an event stays eight bytes.
 
-[10] src/midi.rs:85
+[13] src/midi.rs:112
     /// MIDI Tuning Standard single-note change or bulk dump, one key of one tuning
     /// program: `units` is how far the key is tuned from where 12-tone puts it, in
     /// `mts::UNITS_PER_CENT`. Like `Tune`, one event for each key a message sets, handed
     /// out as a run (`Burst`). Acted on only with `Config::mts_notes`, since BASSMIDI
     /// ignores the messages.
 
-[11] src/midi.rs:91
+[14] src/midi.rs:118
     /// Anything the synth does not act on. Kept in the stream so callers can
     /// count events without a second pass.
 
-[12] src/midi.rs:180
+[15] src/midi.rs:207
 /// What is left of a tuning message, which is read as a run of events, one for
 /// each thing it sets: a `Tune` for each (channel, pitch class) of a scale/octave
 /// message, in channel order and then pitch class, or a `KeyTune` for each key of a
@@ -91,11 +118,37 @@
 /// out before it reads on, so they share the message's tick and nothing of the same
 /// track comes between them.
 
-[13] src/midi.rs:229
+[16] src/midi.rs:249
+/// Where a track's reader is, apart from its window: how many bytes of its
+/// chunk are still to be decoded, which says where the next one is, and what
+/// the events before it left behind. All a reader needs to go on from there,
+/// and what a snapshot of a stream is made of.
+
+[17] src/midi.rs:265
+    /// For a snapshot. The window is not kept; it is read again from the byte
+    /// `unread` names.
+
+[18] src/midi.rs:273
+        // A tuning message part way through its run: which kind, the message, and
+        // how far in.
+
+[19] src/midi.rs:335
+/// The window each of a stream's tracks reads through, from their chunk
+/// lengths and the bytes the stream may spend on windows: the largest, up to
+/// `TRACK_BUF`, for which the windows fit in `budget`, counting each track's as
+/// `min(len, window)` since a reader never holds more than its chunk. A track
+/// shorter than an equal share leaves the rest to the long ones, which hold
+/// the bytes and do the reading. Never less than `TRACK_BUF_MIN`.
+
+[20] src/midi.rs:348
+            // This track and every longer one get an equal share of what the
+            // shorter ones left.
+
+[21] src/midi.rs:365
     /// Where the chunk ends in the file, which is how a saved position is
     /// found again: `end - unread()` is the next byte to decode.
 
-[14] src/midi.rs:236
+[22] src/midi.rs:372
     /// This track's port, already folded to `PORTS` and shifted into place:
     /// `16 * port`, which is what a channel message adds to its channel.
     ///
@@ -103,51 +156,74 @@
     /// whatever the tracks before it said, and an FF 21 moves it from that
     /// event on, mid-track or on the same tick as the events around it.
 
-[15] src/midi.rs:243
+[23] src/midi.rs:379
     /// Keep the track's first FF 03 name in `name`. Only the track scan asks;
     /// a render has no use for it.
 
-[16] src/midi.rs:247
+[24] src/midi.rs:383
     /// Ignore FF 21, so every event stays on port A. A per-track render sets
     /// it: with one track and the setup tracks, there is nothing for a port
     /// to keep apart.
 
-[17] src/midi.rs:251
+[25] src/midi.rs:387
     /// What a note key is ANDed with: `0x7F`, which makes it a key, or `0xFF`
     /// for a file written for the 31-EDO template, whose keys run to 255
     /// (`edo31`). A mask and not a branch, because every note event pays it.
 
-[18] src/midi.rs:255
+[26] src/midi.rs:391
     /// A tuning message being handed out. Checked once an event, which costs
     /// nothing measurable beside decoding it.
 
-[19] src/midi.rs:283
+[27] src/midi.rs:397
+    /// A reader over the `len` bytes of chunk at `offset`, pulling `window`
+    /// bytes from the file at a time, or the whole chunk if it is shorter. The
+    /// window changes how often the file is read and nothing that is decoded.
+
+[28] src/midi.rs:422
     /// Bytes of the chunk not yet decoded: still on disk, or read into the
     /// window and not yet consumed.
 
-[20] src/midi.rs:290
-    /// What a reader needs to go on from where it is: how many bytes of its
-    /// chunk are still to be decoded, which says where the next one is, and what
-    /// the events before it left behind. The window is not kept; it is read
-    /// again from that byte.
+[29] src/midi.rs:441
+    /// Go on from `pos`, which a reader of this same chunk was at. The window
+    /// is read again from there.
 
-[21] src/midi.rs:300
-        // A tuning message part way through its run: which kind, the message, and
-        // how far in.
+[30] src/midi.rs:520
+    /// A channel message and its delta, decoded straight out of the window when
+    /// all of it is there with room to spare; `None`, and nothing touched, for
+    /// anything else, which `next_event` then decodes a byte at a time.
+    ///
+    /// **Almost every event of a black MIDI is this**: a note, a controller or
+    /// a bend, most of them in running status with a delta of zero, and the
+    /// general path asks "is the window used up" and bounds-checks the buffer for
+    /// every one of the three or four bytes. Here that is asked once, on a
+    /// 16-byte array the longest such event (an eight-byte delta, a status and
+    /// two data bytes) fits in. It does exactly what the general path does with
+    /// the same bytes -- `tests` decodes the same stream both ways -- and gives up
+    /// on whatever the general path would end the track for or read further than
+    /// 16 bytes to decode, so none of the oddities are decided here.
 
-[22] src/midi.rs:458
+[31] src/midi.rs:602
+    /// Step over the channel events a pass has no use for -- notes on keys
+    /// `keep` does not hold (`key & 0x7F`), and aftertouch -- that start before
+    /// tick `end`, a run of them at once, decoding each exactly as
+    /// `channel_event_in_window` would. Stops, with nothing of it consumed, at
+    /// anything else: a kept note, any other event, one at or past `end`, or
+    /// one the window does not hold with room to spare. Returns how many it
+    /// stepped over, each an event `next_event` would have returned.
+
+[32] src/midi.rs:695
         // Running status: a data byte where a status byte was expected reuses
         // the previous channel status and is itself the first data byte.
 
-[23] src/midi.rs:473
+[33] src/midi.rs:710
                 // Meta and realtime clear running status per the spec; many
                 // writers disagree, so only clear on meta.
 
-[24] src/midi.rs:543
+[34] src/midi.rs:780
                     // MIDI port. Exactly one data byte, or BASSMIDI ignores it
                     // and the track stays where it was.
 
-[25] src/midi.rs:567
+[35] src/midi.rs:804
                     // Almost every SysEx is ignored, but the GS part-mode
                     // messages are not expressible as channel messages, so
                     // skipping the lot loses them for good. Read the head into
@@ -155,17 +231,17 @@
                     // bytes, and a scale/octave tuning message is 31 -- and
                     // skip the remainder.
 
-[26] src/midi.rs:578
+[36] src/midi.rs:815
                     // A key-tuning message (a single-note change, a bulk dump) is
                     // longer than the head and is read whole, up to what the longest
                     // is; everything else has the rest skipped.
 
-[27] src/midi.rs:594
+[37] src/midi.rs:831
                     // A tuning message is read as a run of events, the first of
                     // which is this one. A message that sets nothing -- no
                     // channels named -- is nothing.
 
-[28] src/midi.rs:629
+[38] src/midi.rs:866
 /// Recognise the SysEx messages that change how a channel resolves.
 ///
 /// `p` starts after the `F0` and may be truncated; the trailing `F7` and the
@@ -173,18 +249,18 @@
 /// message that happens to match the address is indistinguishable from a real
 /// one, which is the same bet every other synth makes.
 
-[29] src/midi.rs:638
+[39] src/midi.rs:875
         // 40 1n 15 is USE FOR RHYTHM PART. `n` is a *block* number and not a
         // channel: block 0 is channel 10, blocks 1-9 are channels 1-9, and
         // blocks A-F are channels 11-16. Getting that mapping backwards moves
         // the drums one channel over, which is worse than ignoring it.
 
-[30] src/midi.rs:663
+[40] src/midi.rs:900
 /// How much of a file `uses_extended_keys` reads, so that asking costs a
 /// fraction of a second whatever the file: a window at the start of each track,
 /// the first thousand tracks, and 16 MiB in all.
 
-[31] src/midi.rs:670
+[41] src/midi.rs:907
 /// Whether a file has a note-on whose key is over 127, which is how a file
 /// written for the 31-EDO template says so (`edo31`). Such a key is
 /// not MIDI, and without `--31edo` it is played as the key its low seven
@@ -193,32 +269,32 @@
 /// Looks at the start of each track only, so a file whose first such key comes
 /// later than that in every track is not seen.
 
-[32] src/midi.rs:701
+[42] src/midi.rs:938
 /// What a standard MIDI file says about itself before any event is decoded:
 /// the header fields, and where each track chunk sits.
 ///
 /// Split out of `MidiStream::open` so a file can be checked without opening a
 /// reader per track. The guided renderer checks every file it is handed this
 /// way, and a selection can be thousands of files, each of which would
-/// otherwise cost a 256 KiB window and a file handle per track.
+/// otherwise cost a read window and a file handle per track.
 
-[33] src/midi.rs:712
+[43] src/midi.rs:949
     /// Tracks the MThd chunk claims. A truncated or hand-edited file can
     /// disagree with what the chunk walk actually finds.
 
-[34] src/midi.rs:715
+[44] src/midi.rs:952
     /// `(data offset, length)` of every MTrk chunk, each length clamped to
     /// what the file really holds.
 
-[35] src/midi.rs:718
+[45] src/midi.rs:955
     /// MTrk chunks whose declared length ran past the end of the file, which
     /// is what an interrupted download or copy looks like.
 
-[36] src/midi.rs:752
+[46] src/midi.rs:989
         // Walk the chunk list. Only the 8-byte headers are read, so this is a
         // handful of seeks even on a 40 GB file.
 
-[37] src/midi.rs:774
+[47] src/midi.rs:1011
                 // An unrecognised tag with no body is not a chunk, and the
                 // walk must stop rather than step over it. Exporters pad the
                 // end of a file with zeros, and every 8 zero bytes then parse
@@ -229,101 +305,43 @@
                 // busy, the disk idle, and nothing logged between the
                 // soundfont and the track count.
 
-[38] src/midi.rs:801
+[48] src/midi.rs:1038
 /// What a per-track render reads: some of a file's tracks, timed by the whole
 /// file's tempo map. `tracks::TrackScan::selection` builds one.
 
-[39] src/midi.rs:805
+[49] src/midi.rs:1042
     /// Tracks to read, 0-based: the one being rendered, and the setup tracks
     /// when they apply.
 
-[40] src/midi.rs:808
+[50] src/midi.rs:1045
     /// Every FF 51 in the file, in the merged stream's order. Played in place
     /// of the selected tracks' own, which are dropped: whichever track carried
     /// a tempo change, it times every track. Shared: every stem of a file
     /// reads the same map, and one file's map is 274,148 events.
 
-[41] src/midi.rs:813
+[51] src/midi.rs:1050
     /// The file's chunk table, as the scan read it. Shared for the same
     /// reason: reading it again for each track of a file of tens of
     /// thousands would be billions of chunk headers before a note played.
 
-[42] src/midi.rs:817
+[52] src/midi.rs:1054
     /// The tick of the whole file's last event other than a tempo change. The
     /// render treats the stream as ending there and not before, which is where
     /// a render of the whole file would, so a note the track leaves sounding
     /// is released at the same frame.
 
-[43] src/midi.rs:824
-/// Tick-ordered merge of every track in a standard MIDI file, or of the tracks
-/// a `TrackSelection` names.
+[53] src/midi.rs:1061
+/// A k-way merge of some tracks on one thread: each track's reader, the event
+/// it has decoded ahead and is holding, and a heap of those events' keys.
+///
+/// The whole of `MidiStream` when it reads on the caller's thread, and one
+/// worker's share of it when it does not (`par`).
 
-[44] src/midi.rs:833
-    /// A selection's tempo map, played beside the tracks, and how far it has
-    /// got. Empty for a whole file, whose tracks carry their own.
+[54] src/midi.rs:1074
+    /// The readers as they stand, each holding the event it decoded last, if
+    /// any, which is `pending`'s.
 
-[45] src/midi.rs:851
-    /// `open`, reading note keys as the 31-EDO template writes them --
-    /// 0 to 255, where a key is otherwise ANDed down to seven bits -- when
-    /// `wide`. It has to be said at the start: the first event of every track
-    /// is decoded as the stream opens.
-
-[46] src/midi.rs:862
-    /// Read only the tracks `sel` names, with every port folded onto port A
-    /// and the tracks' own tempo changes replaced by `sel.tempo`.
-    ///
-    /// Among the selected tracks, events on one tick keep the order a whole
-    /// file's stream gives them, by track and then by position. A tempo change
-    /// goes ahead of every other event on its tick, which moves nothing: an
-    /// event's frame does not depend on whether a change on its own tick came
-    /// first, because the clock's base frame is where the old tempo put that
-    /// tick.
-
-[47] src/midi.rs:895
-        // Said once, by the whole file's render; a per-track render opens the
-        // file once a track and would say it thousands of times.
-
-[48] src/midi.rs:952
-    /// For a selection, the frame at `rate` its `end_tick` falls on, which is
-    /// where a whole-file render finds the stream exhausted. `None` for a
-    /// whole file, which ends where its events do.
-
-[49] src/midi.rs:970
-    /// Bytes of track data decoded so far.
-    ///
-    /// A streamed file has no length in seconds until it has been read to the
-    /// end, but it always has one in bytes, and render time follows the events
-    /// far more closely than it follows the audio clock -- so this is what a
-    /// progress bar should be driven by. A track that has ended counts as
-    /// fully read even if bytes sit after its end-of-track, so this reaches
-    /// `bytes_total` exactly when the stream is exhausted.
-    ///
-    /// A sum over every track, so call it at a display rate rather than per
-    /// event: a file can have tens of thousands of tracks.
-
-[50] src/midi.rs:991
-    /// Where every track is, for a snapshot: how far into its chunk, and the
-    /// event it has decoded ahead and is holding. The heap is not kept, because
-    /// it is exactly the held events keyed by their ticks and the track's
-    /// number, which `load_state` puts back: its order is a function of those
-    /// keys, with no ties, so it pops what it would have popped.
-
-[51] src/midi.rs:1011
-    /// Go on from a saved position. The stream must have been opened on the
-    /// same file and the same tracks, as `Driver::open*` does; the number of
-    /// tracks is checked, and the file itself is the caller's fingerprint.
-
-[52] src/midi.rs:1032
-    /// Next event in tick order, or None at the end of the file.
-    ///
-    /// Deliberately not an `Iterator`: the borrow of `self` that an iterator
-    /// would need conflicts with the per-track readers this pulls from.
-
-[53] src/midi.rs:1044
-    /// A selection's next event: its tempo map merged with its tracks, whose
-    /// own tempo changes the map already holds.
-
-[54] src/midi.rs:1064
+[55] src/midi.rs:1089
         // Replace the root in place rather than `pop` then `push`.
         //
         // Those are a sift-down *and* a sift-up per event, and this is the
@@ -342,13 +360,159 @@
         // the sift-down exit early, since the next event from that track is
         // usually still the smallest.
 
-[55] src/midi.rs:1092
+[56] src/midi.rs:1117
             // Exhausted, so the entry leaves. `PeekMut::pop` costs what the
             // old path paid on every event, and this happens once per track.
 
-[56] src/midi.rs:1102
+[57] src/midi.rs:1164
+/// What it takes to open a stream's readers again, from anywhere: the file,
+/// each track's chunk, and how its readers were set up.
+
+[58] src/midi.rs:1175
+    /// A reader of the stream's track `t` at its start, with a window of
+    /// `window` bytes.
+
+[59] src/midi.rs:1186
+/// Tick-ordered merge of every track in a standard MIDI file, or of the tracks
+/// a `TrackSelection` names.
+///
+/// **On worker threads** once `set_threads` has asked for any (`par`): the
+/// tracks are split into runs of neighbours, a worker merges each run into
+/// chunks of events, and `next` merges the workers' chunks. Ties break on the
+/// track first and the run second, and a run's tracks are neighbours, so that
+/// is exactly the order of one merge over every track -- the same events in the
+/// same order, and the same `save_state`, as on the caller's thread.
+
+[60] src/midi.rs:1196
+    /// The merge, while it runs on the caller's thread. Its readers move to
+    /// the workers when they start, and come back when they stop.
+
+[61] src/midi.rs:1199
+    /// The merge on worker threads, from the first event on when `threads` is
+    /// more than 0.
+
+[62] src/midi.rs:1203
+    /// Events a worker's chunk holds; 0 for `par`'s own choice. The tests set
+    /// it small, to cross chunk boundaries everywhere.
+
+[63] src/midi.rs:1209
+    /// A selection's tempo map, played beside the tracks, and how far it has
+    /// got. Empty for a whole file, whose tracks carry their own.
+
+[64] src/midi.rs:1227
+    /// `open`, reading note keys as the 31-EDO template writes them --
+    /// 0 to 255, where a key is otherwise ANDed down to seven bits -- when
+    /// `wide`. It has to be said at the start: the first event of every track
+    /// is decoded as the stream opens.
+    ///
+    /// The track windows add up to no more than `read_budget` bytes, unless
+    /// there are so many tracks that the floor of `TRACK_BUF_MIN` each is
+    /// more (`window_share`). `READ_BUDGET` for a stream that is the only
+    /// one on its file; a caller opening more divides it between them.
+
+[65] src/midi.rs:1243
+    /// Read only the tracks `sel` names, with every port folded onto port A
+    /// and the tracks' own tempo changes replaced by `sel.tempo`.
+    ///
+    /// Among the selected tracks, events on one tick keep the order a whole
+    /// file's stream gives them, by track and then by position. A tempo change
+    /// goes ahead of every other event on its tick, which moves nothing: an
+    /// event's frame does not depend on whether a change on its own tick came
+    /// first, because the clock's base frame is where the old tempo put that
+    /// tick.
+
+[66] src/midi.rs:1256
+    /// `open_tracks`, with `open_keys`' `wide` and `read_budget`. The budget
+    /// is shared by the selected tracks only.
+
+[67] src/midi.rs:1278
+        // Said once, by the whole file's render; a per-track render opens the
+        // file once a track and would say it thousands of times.
+
+[68] src/midi.rs:1306
+        // The windows are the budget's however the merge runs: on worker
+        // threads these same readers move to the workers, windows and all.
+
+[69] src/midi.rs:1335
+    /// For a selection, the frame at `rate` its `end_tick` falls on, which is
+    /// where a whole-file render finds the stream exhausted. `None` for a
+    /// whole file, which ends where its events do.
+
+[70] src/midi.rs:1358
+    /// Bytes of track data decoded so far.
+    ///
+    /// A streamed file has no length in seconds until it has been read to the
+    /// end, but it always has one in bytes, and render time follows the events
+    /// far more closely than it follows the audio clock -- so this is what a
+    /// progress bar should be driven by. A track that has ended counts as
+    /// fully read even if bytes sit after its end-of-track, so this reaches
+    /// `bytes_total` exactly when the stream is exhausted.
+    ///
+    /// A sum over every track, so call it at a display rate rather than per
+    /// event: a file can have tens of thousands of tracks.
+    ///
+    /// Read ahead on worker threads, it is what had been decoded when the
+    /// chunks being read were begun, which runs a chunk or so behind and gets
+    /// to the total at the same moment.
+
+[71] src/midi.rs:1381
+    /// Time spent waiting for the worker threads to hand over events: what the
+    /// caller would have gained from more of them. Zero on one thread.
+
+[72] src/midi.rs:1387
+    /// Merge on `threads` worker threads from the first event on, or on the
+    /// caller's thread if 0. Asked before the first `next`; the same events
+    /// in the same order either way. `par` has how the tracks are shared.
+
+[73] src/midi.rs:1402
+    /// Where every track is, for a snapshot: how far into its chunk, and the
+    /// event it has decoded ahead and is holding. The heap is not kept, because
+    /// it is exactly the held events keyed by their ticks and the track's
+    /// number, which `load_state` puts back: its order is a function of those
+    /// keys, with no ties, so it pops what it would have popped.
+    ///
+    /// **The same bytes when the merge runs on worker threads**, which have
+    /// read further than the caller has taken: each worker's tracks are put
+    /// back where the caller has them by `par::Part::replay`, which reads them
+    /// again from where they stood when the chunk being taken was begun. The
+    /// one cost of that is here, a chunk's events at most a worker.
+
+[74] src/midi.rs:1431
+    /// Go on from a saved position. The stream must have been opened on the
+    /// same file and the same tracks, as `Driver::open*` does; the number of
+    /// tracks is checked, and the file itself is the caller's fingerprint.
+    ///
+    /// Workers reading ahead are stopped first, and what they read is dropped.
+    /// The merge goes back to them at the next event.
+
+[75] src/midi.rs:1459
+    /// Next event in tick order, or None at the end of the file.
+    ///
+    /// Deliberately not an `Iterator`: the borrow of `self` that an iterator
+    /// would need conflicts with the per-track readers this pulls from.
+
+[76] src/midi.rs:1471
+    /// A selection's next event: its tempo map merged with its tracks, whose
+    /// own tempo changes the map already holds.
+
+[77] src/midi.rs:1522
+    /// BASSMIDI's own MIDI file player, and so Keppy's MIDI Converter: a change
+    /// takes effect on the first whole sample at or after its tick, and the
+    /// ticks the old tempo ran past it carry into the new one. The default since
+    /// 2026-09-17, when a file's author called that version correct.
+
+[78] src/midi.rs:1528
+    /// The tempo map exactly: every event on the first whole sample at or after
+    /// the time the map gives its tick, however many changes come before it.
+    /// What OmniConverter does, which times events itself and hands BASSMIDI
+    /// each one on the sample it computed (`MIDIConverter.cs` 985), and what a
+    /// MIDI editor's length says. Asked for 2026-10-23 as an opt-in, after a
+    /// third file sounded different from OmniConverter's render.
+
+[79] src/midi.rs:1554
 /// Converts ticks to absolute output frames the way BASSMIDI does, tracking
-/// tempo changes as they arrive in the merged stream.
+/// tempo changes as they arrive in the merged stream. [`TempoTiming::Exact`]
+/// is the other way, the tempo map exactly; see the end of this comment.
 ///
 /// **Not the textbook tick arithmetic, on purpose.** BASSMIDI advances MIDI
 /// time one whole output sample at a time. An event -- a tempo change included
@@ -377,52 +541,100 @@
 /// out in `set_tempo`, and an event costs one 64-bit multiply and divide. The
 /// first version recomputed the ratio and divided in 128 bits on every call,
 /// and it put 3.7 s on the 14 s drain of a 45-million-note file (2026-09-17).
+///
+/// **The exact timing** (designed 2026-09-20, the development notes, "Tempo:
+/// one clock, two timebases"; built 2026-10-23) shares the per-event expression.
+/// An event's frame is `base_frame + ceil((d * num + carry) / den)` either way;
+/// only what a tempo change leaves in `carry` and `overshoot` differs. Under
+/// BASSMIDI's timing `carry` stays 0, so its frames are the bits they always
+/// were. Under the exact one a change keeps the exact part frame its tick fell
+/// on in `carry`, in units of `1 / den` frames, and nothing overshoots. That is
+/// exact in integers because `den`, `1_000_000 * ppq`, does not move with the
+/// tempo. The two agree wherever every change lands on a whole sample, which
+/// includes every file with one tempo.
 
-[57] src/midi.rs:1140
+[80] src/midi.rs:1602
+    /// Under the exact timing, how far past `base_frame` the tick `base_tick`
+    /// falls, in units of `1 / den` frames: always under `den`. 0 under
+    /// BASSMIDI's.
+
+[81] src/midi.rs:1610
     /// How far past `base_tick` the tick position had already run by
     /// `base_frame`, in ticks. Zero until a change lands between samples.
 
-[58] src/midi.rs:1166
+[82] src/midi.rs:1618
+    /// The last tick `frame_at_cached` was asked about and the answer, under
+    /// the tempo in force; cleared by anything that moves the clock. Not saved:
+    /// it is a function of the fields above and the tick.
+
+[83] src/midi.rs:1648
     /// Take a new tempo's ratio, and the carried overshoot in its frames. The
     /// expressions match the per-call ones they replaced term for term, so the
     /// frames come out bit for bit the same.
 
-[59] src/midi.rs:1179
+[84] src/midi.rs:1661
     /// Whole frames from `base_frame` to the first one whose tick position has
     /// reached `tick`.
 
-[60] src/midi.rs:1193
+[85] src/midi.rs:1675
         // What is left of a frame, less the overshoot already run, which is
         // how many frames of this tempo those ticks are worth.
 
-[61] src/midi.rs:1199
+[86] src/midi.rs:1681
     /// For a snapshot. Everything but the division and the rate, which the
     /// render's own settings fix; the two are written anyway so that a snapshot
     /// made at another rate is refused rather than played back wrong.
+    ///
+    /// The timing is the configuration's, and a checkpoint is resumed with the
+    /// command it was made with, so it is not written. The exact timing's
+    /// `carry` is written last and only under it, so that a checkpoint under
+    /// BASSMIDI's timing has the layout it always had (`resume::FORMAT` 1).
 
-[62] src/midi.rs:1249
-        // The tick position `n` frames in, less `tick`: exact as a rational
-        // over `num`, and never negative, since `n` is the first frame there.
+[87] src/midi.rs:1745
+        // What the memo holds was worked out under the tempo this replaces. (A
+        // stream only asks ticks from this one on, and this tick's frame does not
+        // move; it is cleared because it is a function of the clock, not of that.)
 
-[63] src/midi.rs:1259
+[88] src/midi.rs:1752
+                // The tick position `n` frames in, less `tick`: exact as a rational
+                // over `num`, and never negative, since `n` is the first frame there.
+
+[89] src/midi.rs:1759
+            // Where `tick` falls exactly, whole frames into `base_frame` and the
+            // part frame into `carry`. `den` is the same under the new tempo, so
+            // the part frame needs no converting.
+
+[90] src/midi.rs:1773
     /// The frame an event at `tick` fires on. Always a whole frame; `f64` so
     /// callers that divide it into seconds need no cast.
 
-[64] src/midi.rs:1267
+[91] src/midi.rs:1780
+    /// `frame_at`, which remembers the tick it last answered for.
+    ///
+    /// **Black MIDI is written on a grid, and nearly every event is on the tick
+    /// of the one before it**: 99.5% of the 124.6 M events of one file, 98.2 to
+    /// 99.9% of five real ones (`examples/drain_bench.rs parse`, 2026-10-12).
+    /// The answer for a tick is one 64-bit multiply, divide and remainder and an
+    /// `f64` divide, 8 to 10 ns an event, and the same tick asks the same question
+    /// again. The answer is a pure function of the tick and the clock, and
+    /// `set_tempo` is the only thing that moves the clock, so remembering it
+    /// returns the same bits.
+
+[92] src/midi.rs:1803
 // ---------------------------------------------------------------------------
 // writer, for generating test material
 // ---------------------------------------------------------------------------
 
-[65] src/midi.rs:1271
+[93] src/midi.rs:1807
 /// Minimal SMF writer. Only used by tests and the `gen-test-midi` CLI command,
 /// but it lives here so the format constants stay in one file.
 
-[66] src/midi.rs:1288
+[94] src/midi.rs:1824
     /// A track of arbitrary events, each written verbatim after its delta:
     /// meta events and SysEx as well as channel messages. The sort is stable,
     /// so events on one tick keep the order they were given in.
 
-[67] src/midi.rs:1359
+[95] src/midi.rs:1895
     /// A tempo change between two samples fires on the later one and carries
     /// the ticks it ran past into the new tempo, as BASSMIDI does.
     ///
@@ -433,11 +645,113 @@
     /// 25,321.77. BASSMIDI plays it 12.599 ms early, 604.8 frames, and so does
     /// this.
 
-[68] src/midi.rs:1377
+[96] src/midi.rs:1913
     /// On a sample boundary nothing carries: the same pattern with an 800-tick
     /// fast segment, exactly 45 frames, which BASSMIDI plays exactly.
 
-[69] src/midi.rs:1398
+[97] src/midi.rs:1925
+    /// The same burst under `--tempo-timing exact`: nothing carries, so tick
+    /// 3618 is on the first frame at or after the textbook 25,321.77, where
+    /// BASSMIDI's player has it 604.8 frames early.
+
+[98] src/midi.rs:1936
+        // On a sample boundary the two timings agree, as they do wherever every
+        // change lands on one.
+
+[99] src/midi.rs:1944
+    /// A user's file, in small (2026-10-23): a tempo that wobbles every 10
+    /// ticks, each segment a part frame long, adding up to exactly the time one
+    /// steady tempo gives. Under the exact timing every bar lands where the
+    /// steady file's does; under BASSMIDI's player each change leaves its part
+    /// frame behind, and the bars drift.
+
+[100] src/midi.rs:1951
+        // At 960 PPQ and 48 kHz, 10 ticks at `us` per beat are `us / 2000`
+        // frames: 1.5005 and 1.4995, so each pair is exactly 3.
+
+[101] src/midi.rs:1972
+    /// The exact timing is the exact rational time of each tick, rounded up to a
+    /// frame, over random tempo maps at several divisions and rates: every
+    /// part frame carried, however many changes. The reference sums
+    /// `ticks * us * rate` in 128 bits over `1_000_000 * ppq`.
+
+[102] src/midi.rs:1993
+                    // Anything from 30,000,000 bpm to 20, as the files in the
+                    // reports have.
+
+[103] src/midi.rs:2007
+    /// A checkpoint of an exact clock carries its part frame: one loaded from it
+    /// gives the frames the clock it was taken from gives. Under BASSMIDI's
+    /// timing the layout is the one checkpoints always had, so files made before
+    /// the exact timing existed still load.
+
+[104] src/midi.rs:2022
+            // Division (1 + 4), rate, base frame, base tick, overshoot, num, den and
+            // overshoot frames, 8 each: BASSMIDI's timing writes exactly that.
+
+[105] src/midi.rs:2044
+    /// The clock that remembers its last answer gives the bits the one that does
+    /// not gives, through repeated ticks and through tempo changes. A tempo
+    /// change moves what a tick before it is answered with, so the tick asked
+    /// about just before a change is asked about again after it.
+
+[106] src/midi.rs:2069
+                        // A tempo change a little later, then straight away the
+                        // tick the cache last held. A stream never asks that, but
+                        // the answer is a function of the clock all the same.
+
+[107] src/midi.rs:2091
+    /// A track chunk of bytes that mostly make events, and a few that do not:
+    /// channel messages with and without a status byte, deltas of every length
+    /// a reader accepts, meta events, SysEx, a stray byte now and then, and a
+    /// `tail` of whatever the caller wants to see the end of the track do.
+    /// Long enough to cross the reader's window several times.
+
+[108] src/midi.rs:2105
+        // A status to run on from the first event, so that a stream is not
+        // garbage before it has seen one.
+
+[109] src/midi.rs:2115
+                // The longest delta a reader accepts, which the window path
+                // leaves to the general one.
+
+[110] src/midi.rs:2147
+                // The status byte again, so a message is in running status on
+                // the one it just repeated.
+
+[111] src/midi.rs:2163
+            // A byte that is part of no event, rarely: where the track goes from
+            // here is the general path's to say.
+
+[112] src/midi.rs:2174
+    /// The decoder that takes a channel message straight out of the window and
+    /// the one that reads a byte at a time agree on every event, every tick and
+    /// the position the track has got to, over bytes that are not all events.
+
+[113] src/midi.rs:2221
+    /// Stepping over the notes of other keys a run at a time lands where
+    /// decoding them one by one does, whatever the track holds: the same next
+    /// event, tick, count of events behind it, and position, past every window
+    /// and with the window's end moving as a group pass moves it.
+
+[114] src/midi.rs:2289
+    /// The window is how often the file is read and nothing else: a track read
+    /// a byte at a time, a few bytes either side of the 16 the fast path wants,
+    /// or at the floor, decodes to what the largest window gives, event for
+    /// event and position for position.
+
+[115] src/midi.rs:2322
+    /// A stream's windows add up to its budget at most, a track never gets more
+    /// than itself or `TRACK_BUF`, what a short track does not use goes to the
+    /// long ones, and the floor holds however many tracks there are.
+
+[116] src/midi.rs:2361
+    /// A saved position is in bytes of the chunk, not in windows, so a stream
+    /// goes on from one saved by a stream whose windows were another size, as
+    /// a checkpoint from a build with the old 256 KiB windows is loaded into
+    /// one with smaller ones.
+
+[117] src/midi.rs:2405
     /// Trailing padding must not be walked eight bytes at a time.
     ///
     /// Exporters pad the end of a file with zeros, and every 8 zero bytes
@@ -451,7 +765,7 @@
     /// behaviour instead: the padding is skipped, the tracks are all found,
     /// and it happens promptly.
 
-[70] src/midi.rs:1445
+[118] src/midi.rs:2452
     /// A file that moves its drums with SysEx must not be read as melodic.
     ///
     /// The GS block number is not the channel number, and the two agree
@@ -461,58 +775,58 @@
     /// channel 10 and 2 on channel 11 for a file whose SysEx writes block 0
     /// with 01 and block A with 02.
 
-[71] src/midi.rs:1480
+[119] src/midi.rs:2487
         // A GS message to some other address, a master volume, and a truncated
         // header all have to fall through rather than be guessed at.
 
-[72] src/midi.rs:1491
+[120] src/midi.rs:2498
     /// The head-and-skip read has to leave the cursor exactly at the end of the
     /// SysEx, whether the message is shorter or longer than the buffer.
 
-[73] src/midi.rs:1499
+[121] src/midi.rs:2506
         // Two SysEx messages either side of the 10-byte peek: a 5-byte GM
         // System On, then a 40-byte bulk dump that is not recognised.
 
-[74] src/midi.rs:1542
+[122] src/midi.rs:2549
     /// The FF 21 port meta event, read the way BASSMIDI was measured
     /// reading it on 2026-09-22 -- per track, from its own
     /// position on, and ignored unless it carries exactly one byte -- but
     /// folded to Domino's sixteen ports rather than BASSMIDI's eight. A GS part
     /// message lands on its track's port.
 
-[75] src/midi.rs:1557
+[123] src/midi.rs:2564
         // Port 1 from the start, then back to 0 mid-track, then 17 -- which
         // folds onto port 1 -- and a running-status message after that.
 
-[76] src/midi.rs:1602
+[124] src/midi.rs:2609
     /// A scale/octave tuning message is read as one event for each pitch class
     /// of each channel it names, in order and on its own tick, and on its
     /// track's port.
 
-[77] src/midi.rs:1607
+[125] src/midi.rs:2614
         // Channels 1 and 16 (mask 02 00 01), C raised 20 cents and the rest
         // lowered by their pitch class in whole cents, in the two-byte form.
 
-[78] src/midi.rs:1647
+[126] src/midi.rs:2654
         // The other track's controller is on the same tick, and ties between
         // tracks go by track order: after all of it, since the run is read
         // before the track goes on.
 
-[79] src/midi.rs:1656
+[127] src/midi.rs:2663
     /// A stop can fall anywhere in that run -- the next block's first event is
     /// held by the driver and the reader's own next one by the stream -- and
     /// going on from a saved state has to give the rest of it, whole.
 
-[80] src/midi.rs:1692
+[128] src/midi.rs:2699
     /// A single-note change with more keys than the 32-byte head holds, a bulk dump of
     /// 406 bytes, and a scale/octave message, in one track with notes between them.
 
-[81] src/midi.rs:1803
+[129] src/midi.rs:2810
     /// Without being asked a note key is its low seven bits, as BASSMIDI reads
     /// it; asked, it is all eight. The scan that looks for a template file finds
     /// a key over 127 and not an ordinary file.
 
-[82] src/midi.rs:1858
+[130] src/midi.rs:2865
     /// A file cut short mid-track still opens, and the header reader says so.
     ///
     /// The guided renderer reports this rather than refusing the file: the
@@ -520,7 +834,31 @@
     /// interrupted download, and the count is the difference between "valid"
     /// and "valid, but damaged".
 
-[83] src/midi.rs:1891
+[131] src/midi.rs:2898
     /// Progress climbs monotonically and lands on exactly the total when the
     /// stream runs out -- not short of it, which would leave a bar at 99%, and
     /// not past it.
+
+[132] src/midi.rs:2940
+    /// Tracks enough to share several ways and of every size, all starting at
+    /// tick 0 with runs of zero deltas, so a tie between tracks is the usual
+    /// case: `random_track`s, with ports, tempo changes and running status; one
+    /// of scale tuning messages for every channel back to back, so a chunk can
+    /// begin part way through a run of `Tune` events; one that ends in a delta
+    /// no reader accepts; and one with nothing in it.
+
+[133] src/midi.rs:2994
+    /// The merge on worker threads hands out every event the one-thread merge
+    /// does, in its order, however the tracks are shared, however small the
+    /// chunks and whatever windows the read budget gives the readers the
+    /// workers take over; and its progress lands on the total.
+
+[134] src/midi.rs:3036
+    /// A stream on worker threads saves, at any event, the bytes the stream on
+    /// one thread saves there -- at chunk boundaries, either side of them and
+    /// between -- and a saved state loaded into one, fresh or already running
+    /// ahead, goes on with the events the one thread goes on with.
+
+[135] src/midi.rs:3094
+    /// A selection -- some tracks, with the whole file's tempo map played
+    /// beside them -- reads and saves the same on worker threads.

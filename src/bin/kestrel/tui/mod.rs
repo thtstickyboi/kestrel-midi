@@ -18,7 +18,9 @@ mod capture;
 /// when a soundfont needs loading again exactly as the guided renderer does.
 pub(crate) mod checks;
 pub mod extras;
+pub mod merlin;
 mod progress;
+pub mod window;
 pub(crate) mod style;
 
 use kestrel::session::{self, Job, Plan, Summary};
@@ -32,6 +34,7 @@ use crossterm::tty::IsTty;
 use crossterm::{cursor, execute, queue, terminal};
 use kestrel::bank::Bank;
 use kestrel::config::{BackendKind, Config};
+use kestrel::gpu::listing::Failed;
 use kestrel::gpu::AdapterSummary;
 use kestrel::tracks::{self as ktracks, SetupTracks, TrackKind, TrackList, TrackScan};
 use std::collections::HashMap;
@@ -378,6 +381,9 @@ struct Ffmpeg {
 struct Env {
     adapters: Vec<AdapterSummary>,
     default_adapter: Option<usize>,
+    /// Backends whose adapter listing crashed, hung or failed, and how. See
+    /// `kestrel::gpu::listing`.
+    failed: Vec<Failed>,
     gpu_error: Option<String>,
     ffmpeg: Result<Ffmpeg, String>,
     /// The update ring the check ran on, as `ktrl.ini` had it at startup.
@@ -389,6 +395,18 @@ struct Env {
 impl Env {
     fn default_adapter(&self) -> Option<&AdapterSummary> {
         self.default_adapter.map(|i| &self.adapters[i])
+    }
+
+    /// `--gpu-backend` for the default adapter, when a backend's listing failed
+    /// and nothing typed chose one: a render that names none would list every
+    /// backend again, in its own process. Said in the command, so the command
+    /// writes what the render writes.
+    fn backend_flag(&self, typed: &[String]) -> Option<String> {
+        let chose = typed.iter().any(|a| a.starts_with("--gpu-backend") || a.starts_with("--gpu-adapter"));
+        if self.failed.is_empty() || chose {
+            return None;
+        }
+        self.default_adapter().map(|a| format!("--gpu-backend={}", backend_flag(a.backend)))
     }
 }
 
@@ -482,6 +500,18 @@ fn adapter_lines(env: &Env) -> Vec<Line> {
 
 fn check_environment() -> Env {
     style::heading("Checking the environment", "");
+    // Watched by FalconEye like a render: this is where the graphics drivers are
+    // first opened, and a crash here used to leave nothing at all (a user's
+    // laptop GPU, 2026-10-23). Kept only if something failed.
+    let watched = kestrel::falconeye::renderlog::open_check(&|line| {
+        line("CHECK", "the guided renderer's environment check: GPU adapters, a backend a process; ffmpeg; updates");
+    });
+    // `KESTREL_CRASH_TEST=segv@check`: the native crash this log is watched for,
+    // in this process rather than a listing's. Dev builds only.
+    #[cfg(feature = "dev")]
+    if std::env::var("KESTREL_CRASH_TEST").as_deref() == Ok("segv@check") {
+        kestrel::falconeye::winsys::access_violation();
+    }
     let (saved, problems) = settings::load();
     let ring = saved.ring;
     // Started first, so the request runs behind the adapter survey rather than
@@ -490,9 +520,9 @@ fn check_environment() -> Env {
     let cfg = Config::default();
     let survey = spin("Looking for GPU adapters", || kestrel::gpu::survey(&cfg));
     let _ = capture::problems();
-    let (adapters, default_adapter, gpu_error) = match survey {
-        Ok((list, pick)) => (list, pick, None),
-        Err(e) => (Vec::new(), None, Some(format!("{e:#}"))),
+    let (adapters, default_adapter, failed, gpu_error) = match survey {
+        Ok(s) => (s.adapters, s.default, s.failed, None),
+        Err(e) => (Vec::new(), None, Vec::new(), Some(format!("{e:#}"))),
     };
     let ffmpeg = spin("Looking for ffmpeg", probe_ffmpeg);
     let update = update.map(|check| match spin("Checking for updates", || check.join()) {
@@ -503,11 +533,20 @@ fn check_environment() -> Env {
     let env = Env {
         adapters,
         default_adapter,
+        failed,
         gpu_error,
         ffmpeg,
         ring,
         update,
     };
+    let kept = watched.and_then(|log| {
+        if env.failed.is_empty() && env.gpu_error.is_none() {
+            log.discard();
+            None
+        } else {
+            Some(log.path().to_path_buf())
+        }
+    });
 
     match (&env.gpu_error, env.default_adapter()) {
         (Some(e), _) => {
@@ -525,6 +564,24 @@ fn check_environment() -> Env {
     }
     for line in adapter_lines(&env) {
         style::detail(line);
+    }
+    for f in &env.failed {
+        style::status(WARN, vec![s(format!("Couldn't list the {} adapters", backend_name(f.backend)))]);
+        style::detail(vec![c(format!("Its listing process {}.", f.how), DIM)]);
+    }
+    if !env.failed.is_empty() {
+        let names: Vec<&str> = env.failed.iter().map(|f| backend_name(f.backend)).collect();
+        style::detail(vec![c(
+            format!(
+                "Renders here leave {} out, unless --gpu-backend names it. Updating the graphics \
+                 driver, or removing an overlay or capture tool that hooks into it, may bring it back.",
+                names.join(" and ")
+            ),
+            DIM,
+        )]);
+    }
+    if let Some(p) = &kept {
+        style::detail(vec![c(format!("Details: {}", p.display()), DIM)]);
     }
 
     match &env.ffmpeg {
@@ -666,6 +723,8 @@ pub fn run() -> Result<()> {
         let _ = execute!(std::io::stdout(), terminal::SetTitle("Kestrel"));
     }
     let mut io = Native::remembered();
+    // So that a window opened from Extras can see this one out.
+    window::serve_quit();
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| guided(&mut io)));
     let failure = match outcome {
         Ok(Ok(())) => None,
@@ -807,9 +866,9 @@ fn main_menu(io: &mut dyn Io) -> Choice {
     option("3", "Resume a render", "continue a per-track render that was stopped");
     // The null test is a dev-build Extras entry; say only what this build has.
     let extras = if cfg!(feature = "dev") {
-        "GPU info, file info, null test, flag help, updates"
+        "GPU info, file info, null test, flag help, updates, Merlin"
     } else {
-        "GPU info, file info, flag help, updates"
+        "GPU info, file info, flag help, updates, Merlin"
     };
     option("4", "Extras", extras);
     option("5", "Exit", "");
@@ -870,7 +929,7 @@ fn render_flow(io: &mut dyn Io, env: &Env) -> Result<Next> {
         ));
     }
     style::detail(writes);
-    let ready = step!(step_flags(io, env, &midi, (&fonts).into(), voices, &out, (6, 6), &[]));
+    let ready = step!(step_flags(io, env, &midi, (&fonts).into(), voices, &out, (6, 6), &[], false));
     // The render holds its own handle on this bank when it can use it,
     // and loads a new one when a typed flag changes how soundfonts load.
     // Either way this handle is done with. Kept, it held the step 2 bank
@@ -999,7 +1058,7 @@ fn per_track_loop(io: &mut dyn Io, env: &Env) -> Result<Next> {
         } else {
             base.push(format!("--stem-format={}", format.ext).into());
         }
-        let mut ready = step!(step_flags(io, env, &midi, (&fonts).into(), voices, &out, (8, OF), &base));
+        let mut ready = step!(step_flags(io, env, &midi, (&fonts).into(), voices, &out, (8, OF), &base, false));
         drop(fonts.bank);
 
         // What the render will do, now that --min-velocity is known.
@@ -1014,7 +1073,7 @@ fn per_track_loop(io: &mut dyn Io, env: &Env) -> Result<Next> {
         }
         // As `stems::run` settles it: never more than the tracks.
         let threads = ready.job.stems.as_ref().map_or(1, |s| s.jobs).min(ktracks::max_jobs()).min(kept).max(1);
-        let secs = ktracks::render_secs(&scan, ready.plan.cfg.sample_rate, ready.job.seconds);
+        let secs = ktracks::render_secs(&scan, ready.plan.cfg.sample_rate, ready.plan.cfg.tempo_timing, ready.job.seconds);
         let float32 = ready.job.wav_format == kestrel::wav::SampleFormat::Float32;
         let (bytes, exact) = ktracks::output_bytes(if merged { 1 } else { kept }, secs, ready.plan.cfg.sample_rate, format.ext, float32);
         style::status(
@@ -1138,13 +1197,13 @@ fn resume_flow(io: &mut dyn Io, env: &Env) -> Result<Next> {
                 ],
             ),
         }
-        style::detail(vec![c(format!("{}  \u{00B7}  made on {}", file_name(&args.midi), cp.header.backend), DIM)]);
+        style::detail(vec![c(format!("{}  \u{00B7}  made on {}", file_name(args.input()), cp.header.backend), DIM)]);
 
-        let stem_name = args.midi.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "stems".into());
+        let stem_name = args.input().file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "stems".into());
         let one_file = single.is_some() || merged;
         let shown = if one_file { file_name(&args.out) } else { format!("{stem_name}{}", std::path::MAIN_SEPARATOR) };
         let labels = progress::Labels {
-            midi: file_name(&args.midi),
+            midi: file_name(args.input()),
             output: shown,
             format: if one_file {
                 args.out.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default()
@@ -1168,7 +1227,7 @@ fn resume_flow(io: &mut dyn Io, env: &Env) -> Result<Next> {
         // The flags the render ran with are the command's, which the checkpoint holds: the
         // done screen said "none" for a resumed render that had --dc-blocker and --volume 80
         // (2026-10-06, though the audio had them: the flags were applied, only not shown).
-        let flags = flags_of_command(&argv, &args.midi);
+        let flags = flags_of_command(&argv, args.input());
         match single {
             Some(_) => show_outcome(&at, None, &flags, &result, &problems, None, saved),
             None => show_outcome(&at, None, &flags, &result, &problems, Some(PerTrack { tracks: kept, merged, saved }), None),
@@ -1244,7 +1303,7 @@ fn scan_tracks(midi: &MidiInfo) -> Option<Arc<TrackScan>> {
             style::thousands(setup as u64),
             style::thousands(empty as u64),
             style::thousands(notes),
-            style::audio_clock(scan.duration(48_000))
+            style::audio_clock(scan.duration(48_000, kestrel::midi::TempoTiming::default()))
         ),
         DIM,
     )]);
@@ -1610,7 +1669,7 @@ fn step_midis(io: &mut dyn Io, at: (u8, u8), many: bool) -> Step<Vec<MidiInfo>> 
             }
         }
         if !many {
-            style::warn("A per-track render takes one MIDI. Choose a single MIDI.");
+            style::warn("This render takes one MIDI. Choose a single MIDI.");
             continue;
         }
         if valid == 0 {
@@ -2217,6 +2276,8 @@ struct Ready {
     /// `None` when the typed flags change how the soundfont loads.
     bank: Option<Arc<Bank>>,
     adapter: Option<String>,
+    /// That adapter's PCI vendor and device, which a screen watches its memory by.
+    adapter_ids: Option<(u32, u32)>,
     /// Every flag the render runs with but its MIDI, soundfonts and output,
     /// the steps' own among them, as the done screen lists them.
     flags: Vec<String>,
@@ -2237,7 +2298,7 @@ fn joined(flag: &str, path: &Path) -> OsString {
 /// a stray word is what fills the MIDI's place.
 fn stray_word(argv: &[OsString]) -> Option<String> {
     let head = argv[..argv.len().checked_sub(2)?].to_vec();
-    parse_render(head).ok().map(|a| a.midi.to_string_lossy().into_owned())
+    parse_render(head).ok().and_then(|a| a.midi.map(|m| m.to_string_lossy().into_owned()))
 }
 
 fn clap_message(e: &clap::Error) -> String {
@@ -2287,7 +2348,10 @@ fn voice_cost_note(cfg: &Config) -> &'static str {
 }
 
 /// `base` is what earlier steps chose beyond the render's own: a per-track
-/// render's `--tracks` and the rest.
+/// render's `--tracks` and the rest. `merlin` is Merlin's window asking: no
+/// voices, so none are added or checked, no checkpoint, since a merlin render
+/// cannot be resumed, and the flags that mean nothing to it are refused
+/// (`merlin::flow::refused`).
 #[allow(clippy::too_many_arguments)]
 fn step_flags(
     io: &mut dyn Io,
@@ -2298,6 +2362,7 @@ fn step_flags(
     out: &Path,
     at: (u8, u8),
     base: &[OsString],
+    merlin: bool,
 ) -> Step<Ready> {
     style::heading(&step_title(at, "Additional flags"), "optional");
     style::say(vec![c(
@@ -2326,9 +2391,12 @@ fn step_flags(
             }
         };
         let typed = line.trim();
-        let extra = match checks::split_args(typed)
-            .and_then(|tokens| checks::extra_flags(tokens, env.adapters.len(), !base.is_empty()))
-        {
+        let extra = match checks::split_args(typed).and_then(|tokens| {
+            if let Some(why) = merlin.then(|| merlin::flow::refused(&tokens)).flatten() {
+                return Err(why);
+            }
+            checks::extra_flags(tokens, env.adapters.len(), !base.is_empty() && !merlin)
+        }) {
             Ok(x) => x,
             Err(e) => {
                 style::error(e);
@@ -2342,7 +2410,7 @@ fn step_flags(
         }
         argv.push(joined("--out=", out));
         argv.extend(base.iter().cloned());
-        if !extra.max_voices {
+        if !extra.max_voices && !merlin {
             argv.push(format!("--max-voices={voices}").into());
         }
         if let Some(i) = extra.adapter {
@@ -2356,6 +2424,8 @@ fn step_flags(
             }
             argv.push(format!("--gpu-backend={}", backend_flag(a.backend)).into());
             argv.push(format!("--gpu-adapter={}", a.name).into());
+        } else if let Some(flag) = env.backend_flag(&extra.args) {
+            argv.push(flag.into());
         }
         argv.extend(extra.args.iter().map(OsString::from));
         // A switch a flag may not repeat, so only when it was not typed.
@@ -2390,7 +2460,9 @@ fn step_flags(
         // under the command the flow built; the render keeps it so that
         // "Resume a render" can run it again.
         let planned = args.to_job().and_then(|mut job| {
-            args.with_checkpoints(&mut job, argv.clone());
+            if !merlin {
+                args.with_checkpoints(&mut job, argv.clone());
+            }
             session::plan(&job).map(|plan| (job, plan))
         });
         let (job, plan) = match planned {
@@ -2406,15 +2478,16 @@ fn step_flags(
         }
 
         let mut adapter = None;
-        if matches!(plan.kind, BackendKind::Gpu) {
+        let mut adapter_ids = None;
+        if matches!(plan.kind, BackendKind::Gpu | BackendKind::Merlin) {
             let cfg = &plan.cfg;
             match spin("Checking the adapter", || kestrel::gpu::survey(cfg)) {
-                Ok((list, Some(i))) => {
+                Ok(kestrel::gpu::Survey { adapters: list, default: Some(i), .. }) => {
                     let a = &list[i];
                     // Not a per-track total: that is shared between the
                     // tracks, and the render holds each track's share to what
                     // it can hold rather than refusing.
-                    if job.stems.is_none() && cfg.max_voices > a.max_voices {
+                    if !merlin && job.stems.is_none() && cfg.max_voices > a.max_voices {
                         let offered = env.default_adapter().map(|d| device_max(d, fonts.bank.map(|(b, _)| &**b)).count);
                         let stock = kestrel::gpu::max_voices_for_config(a.binding_bytes, &Config::default());
                         let why = voice_cost_note(cfg);
@@ -2455,8 +2528,9 @@ fn step_flags(
                         continue;
                     }
                     adapter = Some(format!("{} ({})", a.name, backend_name(a.backend)));
+                    adapter_ids = Some((a.vendor, a.device));
                 }
-                Ok((_, None)) => {
+                Ok(kestrel::gpu::Survey { default: None, .. }) => {
                     style::error(
                         "No usable GPU adapter matches. Pick one with --adapter, or render with --backend cpu.",
                     );
@@ -2504,6 +2578,7 @@ fn step_flags(
             plan,
             bank,
             adapter,
+            adapter_ids,
             flags,
         });
     }
@@ -2794,11 +2869,39 @@ mod tests {
         Env {
             adapters: Vec::new(),
             default_adapter: None,
+            failed: Vec::new(),
             gpu_error: None,
             ffmpeg: Err("not looked for".into()),
             ring: Ring::default(),
             update: None,
         }
+    }
+
+    /// A backend whose listing crashed would crash a render that names no
+    /// backend, so the command says the default adapter's; one the person typed,
+    /// or chose by adapter, is theirs, and with nothing failed nothing is added.
+    #[test]
+    fn a_failed_backend_puts_the_default_adapters_backend_in_the_command() {
+        let mut env = bare_env();
+        env.adapters.push(AdapterSummary {
+            name: "Example Discrete GPU".into(),
+            backend: wgpu::Backend::Dx12,
+            device_type: wgpu::DeviceType::DiscreteGpu,
+            binding_bytes: 2047 << 20,
+            max_voices: 1 << 20,
+            vendor: 0x10de,
+            device: 0,
+            memory_bytes: Some(4 << 30),
+        });
+        env.default_adapter = Some(0);
+        assert_eq!(env.backend_flag(&[]), None, "nothing failed");
+        env.failed.push(Failed { backend: wgpu::Backend::Vulkan, how: "crashed".into() });
+        assert_eq!(env.backend_flag(&[]).as_deref(), Some("--gpu-backend=dx12"));
+        for typed in ["--gpu-backend=gl", "--gpu-adapter=Intel"] {
+            assert_eq!(env.backend_flag(&[typed.to_string()]), None, "{typed}");
+        }
+        env.default_adapter = None;
+        assert_eq!(env.backend_flag(&[]), None, "no adapter to name");
     }
 
     /// Every file under `dir`, by name, with its bytes.

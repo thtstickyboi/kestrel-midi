@@ -1,0 +1,747 @@
+# Comments extracted from src/merlin/keymajor.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/merlin/keymajor.rs:5
+//! Key-major merlin, step 2: one window, the static case, on the CPU.
+//!
+//! THE PLAN's build order (the dev notes, "Proposed: key-major rendering"), step
+//! 2. Time-major merlin steps through the song a block at a time with every
+//! waveform live; this renders one group's notes for the whole song at a time
+//! and adds the groups into one master in a fixed order.
+//!
+//! **This is the reference implementation, not the fast one.** It resolves
+//! every note the bucket pass filed exactly as `MerlinSynth::plan_note` does
+//! -- release bucket, reference point, kernel segment and depth, impulse gain,
+//! head record -- and then, where time-major has a frequency-domain delay line
+//! and fixed-point scatters, it adds each entry's kernel at its impulses
+//! directly and plays each head correction the way `head.wgsl` does, in f64.
+//! What it is for:
+//!
+//! - its own gate, a null against time-major merlin with controllers pinned,
+//!   which proves the decomposition and the bucket store end to end before any
+//!   of it moves to the device;
+//! - then the oracle the GPU version is nulled against, the way `cpu.rs` is for
+//!   the per-voice backend.
+//!
+//! ## Groups are (key, filter), not keys
+//!
+//! A note reaches the output through its velocity's biquad (`bus.wgsl`; the
+//! reference bank is 128 velocity layers that differ only in cutoff). Kernels
+//! are filterless and shared across filters, but a group's notes can only be
+//! summed before the biquad if they share it. So a key is split by filter, each
+//! (key, filter) group is filtered from rest over its own extent -- exact, for
+//! the reason `bus.wgsl` gives: the biquad is linear and every contribution is
+//! zero before the group's first frame -- and the master is their sum in key
+//! order, then filter order.
+//!
+//! ## Where it differs from time-major on purpose
+//!
+//! - No note-length ceiling and no head-cache clamp.
+//! - No emit lag: a head plays from the note-on, and an impulse is never moved
+//!   later because its block has gone out (`impulses_late`).
+//! - A note's params come from the bucket pass's capture at the note-on, where
+//!   time-major reads its variant slot at the note-off (see THE PLAN, "Step 1").
+//! - No fixed point and no partitioned FFT, so none of their rounding.
+
+[2] src/merlin/keymajor.rs:62
+/// `MerlinSynth::plan_note`'s ceiling on section 3b's scalar, past which a note
+/// is released on the head instead of through a kernel. The same number, so the
+/// two choose the same path for every note.
+
+[3] src/merlin/keymajor.rs:67
+/// The device's filter buses, which set the window: `filters * (window +
+/// carry)` frames of two f32s.
+
+[4] src/merlin/keymajor.rs:74
+/// Sustains kept on the host from one window to the next, so a waveform heard
+/// across windows is rendered once.
+
+[5] src/merlin/keymajor.rs:78
+/// Slices read and planned side by side, at most, before they are handed over
+/// in key order.
+
+[6] src/merlin/keymajor.rs:82
+/// The most records planned side by side: what a window's planning holds at
+/// once, about 200 bytes a record with its hand-over copies.
+
+[7] src/merlin/keymajor.rs:86
+/// The most of one key's records in one plan, `Config::merlin_km_slice_records`'s
+/// default. A key denser than this in a window is planned in slices, in record
+/// order, each with its own entries.
+
+[8] src/merlin/keymajor.rs:94
+/// Bytes of prepared windows the parsed render hands the device's thread
+/// ahead of what it has put, so the host prepares the next key while the
+/// device works on this one, inside a budget.
+
+[9] src/merlin/keymajor.rs:99
+/// What the packing thread has handed the device's thread and the device has
+/// not yet put, bounded by a limit however many windows that is.
+///
+/// **It can be closed**, which the device's thread does however it ends. It was
+/// a bare count and a condvar that only the device's thread notified, so a
+/// device thread that failed left the packing thread waiting for room for ever,
+/// and the render looked frozen, with no error, for a person who had been
+/// watching a bar (found 2026-11-01, older than the pool).
+
+[10] src/merlin/keymajor.rs:124
+    /// Wait for room for `bytes` and take it. Always room when nothing is held,
+    /// so a window larger than the limit still goes. False once the device's
+    /// thread is gone: nothing is waiting for the window.
+
+[11] src/merlin/keymajor.rs:155
+/// Closes an `Ahead` when dropped, so the device's thread closes it whether it
+/// finishes, fails or panics.
+
+[12] src/merlin/keymajor.rs:165
+/// Sustains longer than this are rendered on the host rather than by the
+/// device's kernel builder, whose time is its longest note's.
+
+[13] src/merlin/keymajor.rs:187
+/// Marks a sustain segment's entry in `plan_key`, whose release buckets are
+/// the number alone.
+
+[14] src/merlin/keymajor.rs:191
+/// Records of a key the parsed render plans and packs side by side at once,
+/// a batch of whole windows, unless one window alone holds more.
+
+[15] src/merlin/keymajor.rs:196
+/// The constants time-major merlin derives from the bank and the config, which
+/// a note's plan depends on.
+
+[16] src/merlin/keymajor.rs:207
+    /// Frames of a sustain segment, a whole number of partitions: zero on the
+    /// reference, whose heads stay whole, and where the config turns them off.
+
+[17] src/merlin/keymajor.rs:213
+    /// As `MerlinSynth::new` sets them, less the cap one storage binding puts
+    /// on the ring: there is no ring here.
+
+[18] src/merlin/keymajor.rs:239
+    /// Whole segments of a body `frames` long, for a note whose gain holds
+    /// still: a segment's impulse carries one gain, where a head can ramp.
+
+[19] src/merlin/keymajor.rs:261
+/// What a note of one voice needs that does not depend on how long it is held:
+/// `MerlinSynth::voice_index`'s memo row.
+
+[20] src/merlin/keymajor.rs:272
+/// One waveform of a key: what its sustain is rendered from, and how much of it
+/// the key's notes read.
+
+[21] src/merlin/keymajor.rs:283
+    /// Sustains it takes in the pool: its left and right, end to end, for one
+    /// made of a stereo sample.
+
+[22] src/merlin/keymajor.rs:352
+/// The renderer. Holds what is shared across keys: the filters in first-seen
+/// order, which fixes the order groups are added in, and the bank's filterless
+/// params table kernels are rendered through.
+
+[23] src/merlin/keymajor.rs:362
+    /// The convolution on the device, in place of adding every kernel frame
+    /// here. `None` is the reference.
+
+[24] src/merlin/keymajor.rs:365
+    /// Sustain renders by waveform, inside `SUSTAIN_CACHE_BYTES`.
+    /// `(cache, bytes held)`, behind a lock so windows prepare side by side.
+    /// What it holds changes only how often a waveform is rendered.
+
+[25] src/merlin/keymajor.rs:370
+    /// The voice rows taken on so far, and what each needs, for the streamed
+    /// render; and whether its device buses are made.
+
+[26] src/merlin/keymajor.rs:425
+            // The command's waveform words are the voice row's; the per-note
+            // words `WaveKey` does not read.
+
+[27] src/merlin/keymajor.rs:431
+    /// Render every note the bucket pass filed, here, the whole song as one
+    /// window, into one interleaved stereo master: the reference.
+
+[28] src/merlin/keymajor.rs:500
+    /// Take on voice rows the pass has made, their filters interned in voice
+    /// order as they always were, and grow the device's buses if a new filter
+    /// came with them.
+
+[29] src/merlin/keymajor.rs:516
+    /// One sealed window of `key`, the current key, on the device, added into
+    /// the song's master there. Its records are planned a slice at a time, a
+    /// slice being at most `SLICE_RECORDS` records, slices side by side up to
+    /// `BATCH_RECORDS` and handed over in record order; so what is held at once
+    /// is bounded by those, however dense the window is.
+
+[30] src/merlin/keymajor.rs:540
+    /// A window's `n` records of the current key, planned by `plan` a slice
+    /// at a time and handed over in record order.
+
+[31] src/merlin/keymajor.rs:557
+    /// A window's `n` records of the current key, planned by `plan` a slice
+    /// at a time, slices side by side up to `BATCH_RECORDS`, built and packed
+    /// in record order: everything but the device's part, so windows prepare
+    /// side by side while the device works.
+
+[32] src/merlin/keymajor.rs:594
+    /// The next key: its buses and filter state clear. The voice rows and the
+    /// filter table are the whole file's, numbered in the order the parse made
+    /// them.
+
+[33] src/merlin/keymajor.rs:604
+    /// One key's plan for the window, packed for the device with pools of its
+    /// own: its waveforms and kernels built, its impulses from the window's
+    /// start, its heads clipped to the window. On any thread.
+
+[34] src/merlin/keymajor.rs:628
+    /// Pass one over a key: every window planned, only for the waveforms and
+    /// kernels the key reads, each waveform as long as its longest need; then
+    /// each built once, side by side, and laid end to end in pools the
+    /// device holds for the key's windows.
+
+[35] src/merlin/keymajor.rs:657
+        // The key's waveforms and entries in first-seen order, window by
+        // window, which the pools are laid out in.
+
+[36] src/merlin/keymajor.rs:694
+            // Rendered on the device into its pool: each waveform's command
+            // through the filterless table, or, where the voice's own
+            // captured row differs from the table's, through a copy with that
+            // row in place -- the first copy whose row is free or the same,
+            // so a few copies hold every variant. One pass per table.
+
+[37] src/merlin/keymajor.rs:702
+            // Most sustains are a pure function of their frame and go to the
+            // device's frame-parallel pass, whatever their length. The rest
+            // take the voice path below.
+
+[38] src/merlin/keymajor.rs:712
+            // The longest few here, side by side: the device renders a
+            // note's blocks one after another, so its time is the longest
+            // note's, and these are a sliver of the frames.
+
+[39] src/merlin/keymajor.rs:770
+        // Each kernel as `Kernel::segment` would cut it from its sustain, for
+        // the device to cut.
+
+[40] src/merlin/keymajor.rs:797
+    /// Pass two over a run of a key's windows: pass one's plans, each part's
+    /// slices in order, packed against the key's pools; every slice of a batch
+    /// of parts side by side, up to `KEY_BATCH_RECORDS` notes, then handed to
+    /// `send` a part at a time in order. Stops early, returning false, when
+    /// `send` does.
+
+[41] src/merlin/keymajor.rs:839
+    /// One slice's plan packed against the key's pools, and what it counted.
+    /// On any thread.
+
+[42] src/merlin/keymajor.rs:863
+    /// One waveform rendered through the filterless table with the voice's
+    /// own captured row in place, `frames` long.
+
+[43] src/merlin/keymajor.rs:880
+    /// One key's notes that reach `[w0, w1)`: their waveforms, the entries
+    /// whose impulses land there, and the (filter) groups in filter order --
+    /// the order filters were first seen, a function of the records alone.
+    /// Counted once, by the window the note starts in.
+    ///
+    /// Touches nothing shared, so keys plan side by side. A record costs an
+    /// index, not a hash: its voice row's wave is remembered for the plan, and
+    /// its group is found by filter. Each comes with the frames from its
+    /// note-off to the CC120 that cuts its tail, `NO_CUT` for none.
+
+[44] src/merlin/keymajor.rs:958
+            // A note's segments that start in this window: the sustain as it
+            // is, `seg` frames from each whole `seg` of its body, each a kernel
+            // of its own that the density of its (block, entry) pairs sends to
+            // a transform or to `direct`. The head starts where they stop.
+
+[45] src/merlin/keymajor.rs:968
+                        // Plain to its end, however far `dj` is: nothing here
+                        // is released.
+
+[46] src/merlin/keymajor.rs:976
+            // Section 3b's scalar, once a note: it decides the branch below
+            // and it is the impulse's gain.
+
+[47] src/merlin/keymajor.rs:980
+            // `plan_note`'s branch for a note held so far past `Dj` that the
+            // kernel would need amplifying past `MAX_KERNEL_GAIN`.
+
+[48] src/merlin/keymajor.rs:990
+                // Its release on the head as far as a CC120 lets it, then a
+                // damp; the head alone has it, so there is no kernel to stop.
+
+[49] src/merlin/keymajor.rs:1097
+    /// A plan's waveforms -- rendered through the filterless table with the
+    /// voice's own captured row in place, as long as the plan reads, and kept
+    /// for later windows inside a budget -- and its entries' kernels,
+    /// `Kernel::segment` of them, the cut time-major caches.
+
+[50] src/merlin/keymajor.rs:1120
+                // Grown at least twice over what was held, so a waveform a
+                // later window reads further renders a few times, not once a
+                // window.
+
+[51] src/merlin/keymajor.rs:1150
+        // `from_rendered` reads the release and `flat_from` from the row at
+        // the command's index, so a one-row table takes it at zero.
+
+[52] src/merlin/keymajor.rs:1168
+    /// One key, the whole song, here: plan it, render the waveforms it reads,
+    /// and add each group into the master.
+
+[53] src/merlin/keymajor.rs:1238
+    /// This plan cut by waveform, a plan for each of `n` classes of `class_of`:
+    /// a wave's entries, impulses and heads go with it, each in its old order,
+    /// and the counts go with the first.
+
+[54] src/merlin/keymajor.rs:1278
+/// Some of the slices of window `w`, planned; `ends` on the last of them, whose
+/// handing-over ends the window.
+
+[55] src/merlin/keymajor.rs:1286
+/// A prepared window onto the device, in the order windows are submitted,
+/// and the window ended there if this was the last of it. Returns the seconds
+/// putting and ending it.
+
+[56] src/merlin/keymajor.rs:1305
+/// A key's sustains for the device's kernel builder: each job's command and
+/// frames through `table`, at its word in the pool.
+
+[57] src/merlin/keymajor.rs:1320
+    /// The next key, with the coefficients of the filters it uses, which
+    /// are its buses in that order, at windows of these frames.
+
+[58] src/merlin/keymajor.rs:1323
+    /// The next key, streamed: its filters so far, its windows' frames, and
+    /// room for the filters its buses may yet take.
+
+[59] src/merlin/keymajor.rs:1335
+    /// The window just before was `index` of `key`: what the progress is told
+    /// when the device has had it.
+
+[60] src/merlin/keymajor.rs:1349
+/// A window ready for the device: its packs in order, and what preparing it
+/// counted.
+
+[61] src/merlin/keymajor.rs:1360
+/// The pool for a run of a key's windows: its sustains as the device renders them end
+/// to end, where each waveform is in it, and each kernel as the device cuts it
+/// from them.
+
+[62] src/merlin/keymajor.rs:1383
+/// `part` cut by waveform, for a window that alone needs more than one pool:
+/// its waveforms in the order they appear, as many to a part as `budget`
+/// frames hold, a waveform and everything that reads it staying together. What
+/// a part writes adds into the window's buses like any other's, so it is one
+/// window read through several pools.
+
+[63] src/merlin/keymajor.rs:1410
+/// Runs of `parts`, in order, each run's waveforms at their longest need within
+/// `budget` frames laid end to end; a part that alone needs more is cut by
+/// waveform into runs of its own. So a key's pool is bounded by the budget, not
+/// by how long its notes are held or how many waveforms a window reads, and a
+/// waveform two runs share is rendered for each.
+
+[64] src/merlin/keymajor.rs:1467
+/// A plan's impulses and head pieces for the window at `w0`, each head reading
+/// its waveform at `at_wave[wave]`, `(offset, length)` in the sustain pool.
+
+[65] src/merlin/keymajor.rs:1493
+        // Notes of one waveform struck on one frame are one read: see `Fold`.
+        // The index is in the key, so what ties keeps the planned order.
+
+[66] src/merlin/keymajor.rs:1506
+        // The device reads `log2(r)` in `split`, in f64 and rounded once; see
+        // `kmconv.wgsl`'s `f_at`. A waveform's notes share `r`, and neighbours
+        // are mostly one waveform.
+
+[67] src/merlin/keymajor.rs:1549
+/// One group's output: where it starts, both channels, and the kernel and head
+/// frames it added.
+
+[68] src/merlin/keymajor.rs:1559
+/// One group: every kernel at its impulses and every head correction, in f64
+/// over the group's extent, then through its biquad in f32 as `bus.wgsl` runs
+/// it, rung out past the end.
+
+[69] src/merlin/keymajor.rs:1591
+        // The filter rings on past the group's last note, and time-major's bus
+        // filter runs on and plays it: cutting the group off at its extent was
+        // a -62.5 dB burst on the first null, the frame after the last note of
+        // a group ended (2026-10-22).
+
+[70] src/merlin/keymajor.rs:1603
+/// What a biquad left in state `z` plays with nothing more going in, until the
+/// state is below anything an f32 mix can hold against a signal near one, or
+/// two seconds at most.
+
+[71] src/merlin/keymajor.rs:1618
+/// `head.wgsl`'s `apply`, for a piece clipped from its note's own start: the
+/// same recurrences in the same precision, and an exact sum where the shader
+/// rounds into fixed point. Returns the frames it played.
+///
+/// **The recurrences in f64**, where the shader runs them in f32. `f` is
+/// multiplied by `r` once a frame, and in f32 that drifts: about 1e-4 of the
+/// value after the few thousand frames between a note's `Dj` and its note-off,
+/// against a kernel whose release `Kernel::segment` forms in f64 -- so the two
+/// halves the head correction has to cancel stop cancelling, by about -77 dB on
+/// the first 45 s of the 44.75 M-note test file (2026-10-22). A reference
+/// should not carry that.
+
+[72] src/merlin/keymajor.rs:1653
+/// `bus.wgsl`'s biquad: transposed direct form II, `b2 == b0`, from rest.
+/// Returns the state it ends in.
+
+[73] src/merlin/keymajor.rs:1670
+    /// Blocks its driver committed with events still to come, plus the first
+    /// without: what the stream covers.
+
+[74] src/merlin/keymajor.rs:1680
+/// The bucket pass through `driver`, to the end of the file. Windowed, every
+/// window is sealed at the end, for `BucketPass::take_ready`. `stop` ends it
+/// early, between blocks.
+
+[75] src/merlin/keymajor.rs:1719
+/// The per-key render's window and the carry past it, fixed before the file
+/// is read so the pass can file by it: as long as the bus budget allows with a
+/// bus for each filter the soundfont's own regions have, to at most
+/// `WINDOW_MAX`. A function of the soundfont and the settings, so one command
+/// renders the same bytes on any machine. A file whose controllers make more
+/// filters than that grows the buses past the budget.
+
+[76] src/merlin/keymajor.rs:1737
+/// The render thread, which runs the whole per-key render:
+///
+/// 1. one time-ordered parse of the whole file through the real driver and the
+///    windowed bucket pass, coalescing off (the pass folds identical notes into
+///    runs itself). The pass files each record under its key, in every window
+///    it reaches, and seals nothing until the file is read, so what the parse
+///    holds is the store's budget and the spill, however the notes fall;
+/// 2. each key, in key order, over the whole song on the device into the
+///    song's master: its windows from its first record to its ring-out, its
+///    filter state carried from one window to the next;
+/// 3. the master read back once, after the last key.
+///
+/// The controllers are read once, with the notes, as the CPU reference reads
+/// them; voice rows and filters are numbered over the whole file, in the order
+/// the parse makes them.
+
+[77] src/merlin/keymajor.rs:1815
+/// Note-ons a key group of the parsed render holds at most, unless one key
+/// alone holds more. What a group holds is its records, at most this many
+/// times the layers a note has, at 40 bytes each, and copies fold first.
+
+[78] src/merlin/keymajor.rs:1823
+/// Note-ons a group takes at most, whatever the last one folded to, so a
+/// sparse stretch cannot size a group that a dense one then overfills.
+
+[79] src/merlin/keymajor.rs:1835
+    /// A channel's bent notes: on the first of them the windows start adding
+    /// into a master of their own, and with the last it is read back through
+    /// this clock, from one `tau` to the other.
+
+[80] src/merlin/keymajor.rs:1870
+/// The parsed render's second half, on a thread of its own: each planned key's
+/// pools and windows handed to the device's thread, in key order. Nothing here
+/// reads what the render's thread changes between keys: a plan carries its
+/// waveforms by value, and `km` is only the shape and the bank's tables.
+
+[81] src/merlin/keymajor.rs:1899
+            // Windows prepared side by side and handed to the device's thread
+            // in order; it works on them while the next ones prepare.
+
+[82] src/merlin/keymajor.rs:1937
+/// A voice row as the parsed render interns it: compared and hashed by its
+/// bytes, so one row stands for one sound.
+
+[83] src/merlin/keymajor.rs:1963
+/// The per-key render fed by merlin's own MIDI front end, with no driver, no
+/// bucket store and no spill:
+///
+/// 1. the pre-pass (`keyparse::Prepass`), then the keys in groups of
+///    neighbouring keys, each sized by the records the last one made
+///    (`GROUP_RECORDS`);
+/// 2. a group's notes paired and built into layers as they are released
+///    (`keyparse::extract_par`, `keyrec::Layers`), each layer a packed record
+///    under its key and a voice row interned by its bytes, in the order the
+///    notes arrive, on a thread of its own while the last group renders;
+///    A key alone over `Config::merlin_km_stream_notes` is held no longer than
+///    it must be: its records come a part at a time, and a window goes on as
+///    soon as no note reaching it is still to come (`KeyRun`), so what is held
+///    follows the busiest window, not the key. A note held for a long time
+///    keeps the windows it reaches from finishing, and what piles up behind it
+///    goes to disk (`KeySpill`).
+/// 3. each key of the group, in key order, over the whole song on the device
+///    into the song's master: its filters are its buses, it takes windows
+///    that fit them, its records are binned into every window they reach and
+///    planned a batch of `Config::merlin_km_plan_records` at a time; then, on
+///    the packing thread while the next batch plans
+///    (`pack_keys`), its sustains are rendered on the device into pools of at
+///    most `Config::merlin_km_pool_frames`, and the windows packed side by side
+///    and handed to the device's thread, `AHEAD_BYTES` ahead at most;
+/// 4. the group's records dropped, then the next group; the master read back
+///    after the last.
+///
+/// So what is held is two groups' records and two batches' plans, whatever
+/// the file. Records read the channel at the note's own frame (`keyrec`), not by
+/// gate tile.
+
+[84] src/merlin/keymajor.rs:2010
+    // A group's notes paired and its layers built on their own thread, the
+    // next group's while this one renders; handed over one at a time, so at
+    // most two groups are held.
+
+[85] src/merlin/keymajor.rs:2023
+    // Where the render's own thread and the device's thread spend the render,
+    // behind `--profile`'s log: binning, planning, and handing the next key to
+    // the packing thread, whose own stages come back in `PackTally`.
+
+[86] src/merlin/keymajor.rs:2030
+        // The device on a thread of its own, taking windows in order while the
+        // next ones prepare here.
+
+[87] src/merlin/keymajor.rs:2033
+        // Bytes of prepared windows handed over and not yet put, bounded by
+        // `AHEAD_BYTES` however many windows that is.
+
+[88] src/merlin/keymajor.rs:2116
+        // Packing on a thread of its own, taking keys in order as they are
+        // planned, so the next batch bins and plans while this one packs. At
+        // most one batch waits planned, so what is held is two batches' plans.
+
+[89] src/merlin/keymajor.rs:2127
+            // Groups of neighbouring keys, each sized by how many records the
+            // last one's note-ons made: copies folding across tracks can't be
+            // seen before a pass, and a file where they fold hard re-reads
+            // itself far less for it. Where groups fall changes what is held,
+            // never what is rendered. A key alone over the budget comes a part
+            // at a time.
+
+[90] src/merlin/keymajor.rs:2180
+                        // Windows no note reaching them is still to come for,
+                        // and no further than a record has reached: the rest
+                        // of a key's ring-out waits for its last record.
+
+[91] src/merlin/keymajor.rs:2198
+            // A channel's bent notes on one key, after the key's others, with
+            // the key's tables.
+
+[92] src/merlin/keymajor.rs:2248
+            // Voice rows are the group's own: no record of an earlier group is
+            // left to read them, so the table does not grow with the song. The
+            // filters stay the file's, in first-seen order.
+
+[93] src/merlin/keymajor.rs:2346
+/// A key group as merlin's front end hands it to the render: the group, each
+/// key's (voice rows, records), what the pass counted, its seconds, and how
+/// many records it made.
+
+[94] src/merlin/keymajor.rs:2355
+    /// The notes a bend moves under: `(key, channel, records)`, in the tables
+    /// of that key's other records, their frames in that channel's `tau`.
+
+[95] src/merlin/keymajor.rs:2368
+/// A streamed key's next records: what its tables gained, and the records,
+/// each reading the tables as they stand with these added.
+
+[96] src/merlin/keymajor.rs:2393
+/// A key's records past what it may hold in memory, in a temporary file by the
+/// windows they reach, a record in each. Bins are written and read in order, so
+/// a window reads its records in the order they arrived, before those in memory,
+/// which arrived later.
+
+[97] src/merlin/keymajor.rs:2437
+/// One key on its way to the packing thread: its records, its buses, and the
+/// windows handed over so far. A key whose group fits comes whole; a key alone
+/// over the budget comes a part at a time (`KeyPart`), and a window goes as soon
+/// as no note reaching it is still to come. The two render the same notes, to
+/// the rounding of the order they are summed in: a streamed key's buses are in
+/// the order it met its filters, and its records in the order they were handed
+/// over, which `keyparse::extract_par` says.
+
+[98] src/merlin/keymajor.rs:2449
+    /// Each of `recs`, the first and last window it reaches: worked out once,
+    /// as a hand-over reads all of them.
+
+[99] src/merlin/keymajor.rs:2471
+/// `plan_key`'s reach, as windows: the first and last a record reaches, its
+/// note-off, the steal fade, its release tail and one frame; and where it ends.
+
+[100] src/merlin/keymajor.rs:2479
+    /// A key whose records are all here. Its buses are the filters they use, in
+    /// filter order, so the window's end mixes them in the order it always did;
+    /// a key with more of them than the render's window was sized for takes
+    /// shorter windows of its own, down to the carry.
+
+[101] src/merlin/keymajor.rs:2498
+    /// A key that will come in parts, at the render's own windows: its filters
+    /// are not known yet, so its buses have the room those windows were sized
+    /// for, and take them as they come.
+
+[102] src/merlin/keymajor.rs:2546
+    /// A part's tables and voice rows taken on, new filters given buses in the
+    /// order met; then its records.
+
+[103] src/merlin/keymajor.rs:2591
+    /// Windows up to `upto` to the packing thread, a batch of them at a time,
+    /// planned here while the last is packed, or one window a batch of slices
+    /// at a time, so what is planned and held is the budget, not the key. What
+    /// reaches no further is dropped. `last` is the key's last. False when the
+    /// packing thread has gone.
+
+[104] src/merlin/keymajor.rs:2599
+        // Only a window being handed over fixes where the key starts: until
+        // then a note released late can start before any record so far.
+
+[105] src/merlin/keymajor.rs:2613
+        // How many of each run reach each window, then each window filled from
+        // the runs that reach it, the windows side by side: records are nearly
+        // in time order, so a window reads a few runs.
+        // On this thread: it is milliseconds of work, and the pool is busy.
+
+[106] src/merlin/keymajor.rs:2667
+            // This batch's windows' records on disk, after those in memory:
+            // indices say the order a window takes them in.
+
+[107] src/merlin/keymajor.rs:2678
+            // A window's slices, by a hash of the note-on: records come in
+            // note-off order, and what shares a start has to meet in one slice
+            // to fold there (`Fold`).
+
+[108] src/merlin/keymajor.rs:2693
+                // The runs side by side, each filing its own, then laid end to
+                // end: a slice's order is the records', on any number of threads.
+
+[109] src/merlin/keymajor.rs:2784
+/// A record as the parsed render holds a group, 24 bytes where a `RunRec` is
+/// 40: its layer and its channel gains by index into its key's tables, and the
+/// cut in the top bit of `gid`. `KeyRecs::run` gives the `RunRec` back, its
+/// gains multiplied as `Layers::build` multiplies them.
+
+[110] src/merlin/keymajor.rs:2804
+/// A record's channel at each end: its gains at the note-on and the note-off,
+/// and the frame of the CC120 that cuts its tail, `u64::MAX` for none.
+
+[111] src/merlin/keymajor.rs:2808
+/// One key's records of a group, and the tables they index: each layer's
+/// voice row and own gains, and each note's channel ends.
+
+[112] src/merlin/keymajor.rs:2822
+    /// Frames from a record's note-off to the CC120 that cuts its tail, or
+    /// `NO_CUT`.
+
+[113] src/merlin/keymajor.rs:2847
+/// One key group through merlin's front end: its notes paired, then each
+/// key's layers built on a worker, its voice rows numbered locally in the
+/// order its notes arrive. The render renumbers them in key order, so the
+/// numbering is the file's, not the scheduler's.
+///
+/// With `send`, the group is one key, and its records go to `send` a part at a
+/// time as they are released, each saying how far it vouches for; the group
+/// returned holds no records.
+///
+/// With `warps`, each channel's clock, a note a bend moves under before its tail
+/// is over is built unbent and goes to the group's `warped`.
+
+[114] src/merlin/keymajor.rs:2862
+    // Each pairing's notes built into layers on its worker as they are
+    // released, never held: its keys' voice rows numbered locally in the
+    // order each key's notes arrive, then renumbered in key order by the
+    // render, so the numbering is the file's, not the scheduler's.
+    // A key's layers depend on the note only through its preset, velocity,
+    // bend and CC71-75: each such sound is built once, its layers' voice rows,
+    // delays and own gains kept, and every later note of it takes them, the
+    // gains multiplied as `Layers::build` multiplies them.
+
+[115] src/merlin/keymajor.rs:2927
+        // A note the channel's pitch moves under, before its tail is over,
+        // leaves its bend to the clock.
+
+[116] src/merlin/keymajor.rs:2962
+    // What a part's tables have gained since the last, its records, and how
+    // far the parser vouches for.
+
+[117] src/merlin/keymajor.rs:3025
+    /// Stops the passes at their next block and waits for the render, so the
+    /// key streams and the spill files go with it.
+
+[118] src/merlin/keymajor.rs:3039
+    /// The whole song's master: the CPU reference's when the backend is made,
+    /// the device's once the last key is done.
+
+[119] src/merlin/keymajor.rs:3046
+/// Key-major merlin as a backend, which the driver's output stage and the
+/// encoder see as they see any other.
+///
+/// **On the device it renders true per-key** (`run_keys`): the file is read
+/// once, in time order, through the real driver and the bucket pass, which
+/// files every record under its key; then each key's windows are rendered on
+/// the device, in key order, into the song's master: one key's notes over its
+/// whole song, then the next. Nothing is shared between keys but the master,
+/// the voice rows and the filter table. No audio comes out before the last
+/// key; then the master is handed out a block at a time.
+///
+/// The CPU reference renders the whole song, every key, in one pass, unsliced:
+/// the oracle the device is nulled against.
+///
+/// Either way the driver this plays through reads no events
+/// (`Backend::prerendered_blocks`): it ends where the stream and the master
+/// say, and reports the pass's event counts (`Backend::event_counts`).
+
+[120] src/merlin/keymajor.rs:3074
+    /// `new`, its render writing `progress` as it goes and stopping, with
+    /// `Cancelled`, when it is set. The CPU reference does neither.
+
+[121] src/merlin/keymajor.rs:3112
+    /// The whole render, interleaved stereo, once it is done; empty while the
+    /// device is still rendering keys.
+
+[122] src/merlin/keymajor.rs:3121
+    /// Wait for the last key, and take the master, cut to the render's end as
+    /// the whole-song render was.
+
+[123] src/merlin/keymajor.rs:3139
+    /// The most of a group's records the render held in memory at once, for
+    /// the parsed render, once it is done.
+
+[124] src/merlin/keymajor.rs:3211
+    /// The driver's old end, without its reading the file again: on while
+    /// the stream lasted, then until the master is handed out. Open-ended
+    /// until the last key is done, which the first block waits for.
+
+[125] src/merlin/keymajor.rs:3244
+    /// Room is taken up to the limit, and one more waits until the device has
+    /// put something: but a first window is never turned away for its size.
+
+[126] src/merlin/keymajor.rs:3262
+    /// The device's thread going, whatever it was doing, lets the packing
+    /// thread go: it is not left waiting for room that will not come.
+
+[127] src/merlin/keymajor.rs:3277
+    /// The device thread's guard closes the queue when the thread ends in any
+    /// way: here, by failing.
+
+[128] src/merlin/keymajor.rs:3304
+    /// A slice reading `waves`, each `(id, need)`, with an entry, an impulse
+    /// and a head for each.
+
+[129] src/merlin/keymajor.rs:3323
+    /// The pool's budget cuts a key's windows into runs, and cuts a window that
+    /// alone needs more by waveform: every wave and what reads it arrive once,
+    /// together, in parts of at most the budget unless one wave is alone over
+    /// it; the window ends on its last part; the notes are counted once.
+
+[130] src/merlin/keymajor.rs:3329
+        // Window 0 fits; window 1 needs 730 of a budget of 300, and one of its
+        // waves is alone over it; window 2 fits but takes a run of its own after
+        // the cut one; window 3 does not fit beside it, and window 4 reads what
+        // window 3 did, so it joins it for nothing.
+
+[131] src/merlin/keymajor.rs:3378
+    /// A wave's slices never part: a slice's waves go where their class goes,
+    /// so a wave's need is the most of what any slice asks.

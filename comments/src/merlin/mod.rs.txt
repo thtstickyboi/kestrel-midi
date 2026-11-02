@@ -1,0 +1,14 @@
+# Comments extracted from src/merlin/mod.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/merlin/mod.rs:5
+//! Merlin: the convolution backend.
+//!
+//! Design in the development notes. Nothing here
+//! implements `Backend` yet -- M1' is the FFT alone, because it is the piece
+//! the rest of the design assumes and the one wgpu does not hand you.

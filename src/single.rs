@@ -72,13 +72,18 @@ pub(crate) fn unsupported(job: &Job, cfg: &Config) -> Option<&'static str> {
         Some("--block-csv follows one run of blocks, which a resume would split")
     } else if cfg.phase.active() {
         Some("analytic phase rotation keeps per-render caches that a checkpoint does not hold yet")
+    } else if job.backend == crate::config::BackendKind::Merlin {
+        // [5]
+        Some("the merlin backend keeps a convolution pipeline's state that a checkpoint does not hold")
+    } else if job.note_slice {
+        Some("a note-slice stream's read position is not part of a checkpoint")
     } else {
         None
     }
 }
 
 impl Saver {
-    /// `identity` is what `identity` returned, and `backend` is `cpu` or \[5\]
+    /// `identity` is what `identity` returned, and `backend` is `cpu` or \[6\]
     pub fn new(spec: &Spec, job: &Job, identity: Identity, backend: String, voices: u32) -> Saver {
         let path = spec.path.clone().unwrap_or_else(|| resume::default_path(&job.out, &job.midi, true));
         Saver {
@@ -93,7 +98,7 @@ impl Saver {
         }
     }
 
-    /// What only the running render knows: where it runs and under how many \[6\]
+    /// What only the running render knows: where it runs and under how many \[7\]
     pub fn set_run(&mut self, backend: String, voices: u32) {
         self.backend = backend;
         self.voices = voices;
@@ -111,7 +116,7 @@ impl Saver {
         PathBuf::from(p)
     }
 
-    /// Whether to stop after the block that is on the device: a checkpoint is \[7\]
+    /// Whether to stop after the block that is on the device: a checkpoint is \[8\]
     pub fn hold(&self, cancelled: bool, done: u64) -> bool {
         cancelled || self.due() || self.stop_hook(done + 1)
     }
@@ -125,7 +130,7 @@ impl Saver {
         self.every.is_some_and(|e| self.last.elapsed() >= e)
     }
 
-    /// Write the checkpoint of the render as it stands: the driver, the \[8\]
+    /// Write the checkpoint of the render as it stands: the driver, the \[9\]
     pub fn save(
         &mut self,
         driver: &Driver,
@@ -173,7 +178,7 @@ impl Saver {
         }
     }
 
-    /// Save, and say so; a checkpoint that could not be written is a warning and \[9\]
+    /// Save, and say so; a checkpoint that could not be written is a warning and \[10\]
     pub fn save_or_warn(
         &mut self,
         driver: &Driver,
@@ -270,7 +275,7 @@ impl Tee {
     }
 }
 
-/// Where a render's blocks go, and what a checkpoint needs of it: the `Sink` \[10\]
+/// Where a render's blocks go, and what a checkpoint needs of it: the `Sink` \[11\]
 pub(crate) struct Output {
     sink: Sink,
     tee: Option<Tee>,
@@ -279,7 +284,7 @@ pub(crate) struct Output {
 }
 
 impl Output {
-    /// The render as it has always been written: straight to its file, with \[11\]
+    /// The render as it has always been written: straight to its file, with \[12\]
     pub fn plain(
         out: &Path,
         cfg: &Config,
@@ -289,7 +294,7 @@ impl Output {
         Ok(Output { sink: Sink::create(out, cfg, encoder, wav_format)?, tee: None, audio_path: out.to_path_buf() })
     }
 
-    /// Start writing `partial`, the name the audio has until the render is \[12\]
+    /// Start writing `partial`, the name the audio has until the render is \[13\]
     pub fn create(
         job: &Job,
         cfg: &Config,
@@ -324,7 +329,7 @@ impl Output {
                 let audio = Audio { path: pcm.display().to_string(), ..audio.clone() };
                 audio.check()?;
                 let mut enc = f.encode_to(partial, cfg.sample_rate, preset)?;
-                // [13]
+                // [14]
                 let t0 = Instant::now();
                 let mut input = File::open(pcm).with_context(|| format!("opening {}", pcm.display()))?;
                 let mut buf = vec![0u8; 1 << 20];
@@ -363,7 +368,7 @@ impl Output {
         Ok(())
     }
 
-    /// Everything written so far is on the disk, and this says how much and what \[14\]
+    /// Everything written so far is on the disk, and this says how much and what \[15\]
     pub fn checkpoint(&mut self) -> Result<Audio> {
         let (kind, bytes) = match (&mut self.sink, self.tee.as_mut()) {
             (Sink::Wav(w), _) => {
@@ -385,7 +390,7 @@ impl Output {
         })
     }
 
-    /// Close the file. For an encoded stream that is the encoder finishing, \[15\]
+    /// Close the file. For an encoded stream that is the encoder finishing, \[16\]
     pub fn finish(self) -> Result<u64> {
         drop(self.tee);
         self.sink.finish()

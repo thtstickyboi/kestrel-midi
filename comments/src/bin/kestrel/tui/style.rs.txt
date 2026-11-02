@@ -41,24 +41,61 @@
 /// Word-wrap plain text to `cols` columns, keeping its own line breaks. A word
 /// longer than the width is broken where it overflows.
 
-[8] src/bin/kestrel/tui/style.rs:315
+[8] src/bin/kestrel/tui/style.rs:288
+/// The colours a window is drawn in. Every screen is written in Kestrel's
+/// amber, gold, ember and greys by name; a window with another theme has them
+/// *remapped as they are written* (`queue_line`), and the gradient is drawn
+/// from its own ends. So a theme is one value, set once when the window
+/// starts, and no screen has to know which window it is in.
+
+[9] src/bin/kestrel/tui/style.rs:311
+    /// Merlin's: `#179e97` in the middle, with the deep end turned toward blue
+    /// as Kestrel's is turned toward red.
+
+[10] src/bin/kestrel/tui/style.rs:333
+    /// What a colour written as one of Kestrel's names is in this theme.
+    /// Anything else (green, yellow, red, a shade of the gradient) is itself.
+
+[11] src/bin/kestrel/tui/style.rs:365
+/// The window's gradient over `t` in 0..=1: gold through amber to ember in
+/// Kestrel's.
+
+[12] src/bin/kestrel/tui/style.rs:397
 /// The KESTREL banner. The gradient runs diagonally, and the outline glyphs
 /// take a darker shade of their column's colour so the letters read as lit
 /// from the front.
 
-[9] src/bin/kestrel/tui/style.rs:343
+[13] src/bin/kestrel/tui/style.rs:427
 /// The banner at the top of a screen. Its trailing blank row is dropped here,
 /// because every section that follows opens with a blank line of its own.
 
-[10] src/bin/kestrel/tui/style.rs:354
+[14] src/bin/kestrel/tui/style.rs:438
 /// A box around `body`, `inner` columns wide, with a title in the top edge and
 /// an optional note right-aligned in the bottom one.
 
-[11] src/bin/kestrel/tui/style.rs:391
+[15] src/bin/kestrel/tui/style.rs:475
 /// A bar `cells` wide filled to `frac`, at half-cell resolution, coloured along
 /// the gradient.
 
-[12] src/bin/kestrel/tui/style.rs:485
+[16] src/bin/kestrel/tui/style.rs:567
+    /// Each theme has its own name over the same height, and the first row of
+    /// each is where the gradient's light end is.
+
+[17] src/bin/kestrel/tui/style.rs:581
         // Two columns a character, so ten columns into eight keeps three
         // characters and the ellipsis, and the column left over is padding:
         // half a character cannot be drawn.
+
+[18] src/bin/kestrel/tui/style.rs:612
+    /// What reaches the terminal is the theme's colour for each of Kestrel's
+    /// names, which is what a screen written in them needs to be a Merlin one.
+
+[19] src/bin/kestrel/tui/style.rs:636
+    /// Kestrel's theme is the colours the constants name, the gradient is the
+    /// one it always was, and nothing is remapped: a window that never sets a
+    /// theme looks as it did before there were any.
+
+[20] src/bin/kestrel/tui/style.rs:653
+    /// Merlin's: each of Kestrel's names is its own colour, the status colours
+    /// are left alone, and the gradient runs from its light end through
+    /// `#179e97` to its deep end.

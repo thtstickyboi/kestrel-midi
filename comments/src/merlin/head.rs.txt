@@ -1,0 +1,609 @@
+# Comments extracted from src/merlin/head.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/merlin/head.rs:5
+//! The head correction: what the frequency-domain delay line cannot say.
+//!
+//! `shaders/head.wgsl` carries the derivation. This owns the cache of
+//! sustaining waveforms and turns notes into the per-step records the shader
+//! walks.
+//!
+//! The cache is keyed by **waveform**, not by entry: a release bucket changes
+//! the envelope and nothing else, so the development notes section 3b's ten buckets per
+//! key share one head between them.
+//!
+//! It also carries more than a correction. A note's body over `[0, Dj)` comes
+//! from here in full, because the delay line's kernel starts at `Dj` and is
+//! silent before it -- see [`HeadNote::skip`] -- and a note that has not been
+//! released yet is emitted from here block by block, before its length is
+//! known, by [`sustaining`]. So the row length is **merlin's longest note**,
+//! and it is the only length limit left in the backend.
+
+[2] src/merlin/head.rs:25
+/// One note's correction, clipped to one partition step. Mirrors the WGSL
+/// `Head`.
+
+[3] src/merlin/head.rs:30
+    /// Where this note's waveform starts in the head cache.
+    ///
+    /// **An absolute frame offset, not a row index**, and filled in per step by
+    /// `head_pass` after `HeadCache::bind` has decided where the waveform
+    /// lives. The cache is packed now, so there is no row stride to multiply
+    /// by -- and putting the offset in the record rather than in a table the
+    /// shader looks up is what keeps the inner loop a single sequential read.
+    ///
+    /// Carries the *logical waveform id* between `clip` and that rewrite, which
+    /// is what the counting sort groups on.
+
+[4] src/merlin/head.rs:50
+    /// Frames from `src0` over which the delay line contributes nothing, so the
+    /// correction is the whole waveform rather than a difference.
+
+[5] src/merlin/head.rs:53
+    /// Frames this waveform's pages hold, which is what `src` is bounded by.
+    /// Was padding; the packed cache needs a per-waveform length where a
+    /// rectangular one had a single stride.
+
+[6] src/merlin/head.rs:57
+    /// Added to `f` after each multiply by `r`: the envelope recurrence is
+    /// affine. Zero for a release, `1/fade` for a CC120 damp. See the WGSL.
+
+[7] src/merlin/head.rs:60
+    /// Per-frame gain increments, for a channel whose volume moves under the
+    /// note. See the WGSL.
+
+[8] src/merlin/head.rs:64
+    /// The gain the delay line's impulse carries, which the correction has to
+    /// subtract at rather than at the ramping gain. See the WGSL.
+
+[9] src/merlin/head.rs:68
+    /// Host-side only, in what was padding: non-zero on the second piece of a
+    /// note released on the head, whose first piece is in the same step. The
+    /// shader never reads it. The head pass sizes its fixed-point scale by
+    /// notes rather than pieces with it -- the two pieces of one note never
+    /// write the same output frame, and counting both halved the scale and
+    /// cost 6.9 dB of precision on real material (2026-09-19).
+
+[10] src/merlin/head.rs:75
+    /// Identical notes this correction stands for (THE PLAN, Phase 1: per run,
+    /// not per note), in what was padding. The shader multiplies each frame's
+    /// rounded fixed-point value by it, so a run writes exactly what that many
+    /// corrections of one did; the head pass scales by the total weight.
+
+[11] src/merlin/head.rs:87
+    /// First frame of the note this record covers.
+    ///
+    /// Non-zero for a note that outlived the renderer's emit lag: its body up
+    /// to here was already written out block by block while it was still open,
+    /// because `A[n]` does not depend on `D` and waiting for the note-off would
+    /// mean waiting past the blocks it belongs in. On the per-key render it is
+    /// where a note's sustain segments stop: kernels played its body up to here
+    /// (`Config::merlin_km_segment`).
+
+[12] src/merlin/head.rs:102
+    /// Where the gain gets to by frame `d`, because a channel's volume moves
+    /// under the note and CC7 is sent eleven times a note on real material.
+    ///
+    /// The head ramps linearly from `gain` to this across `[0, d)`, and the
+    /// delay line's impulse is fired at *this* gain rather than the note-on's
+    /// -- so both ends of the body are exact and the tail meets it without a
+    /// step. A linear ramp is not what `cpu.rs` does exactly (it re-targets
+    /// once a gate tile), but the two agree at every point the host can see and
+    /// it costs one record per note rather than one per tile.
+
+[13] src/merlin/head.rs:112
+    /// Frames of linear damp after `d`, or zero for an ordinary note; after
+    /// `d + release` for a note released on the head and cut in its tail, which
+    /// [`Self::damp`] plays.
+    ///
+    /// **CC120.** All Sound Off silences a channel *now*, and the gate table
+    /// publishes a note-off at the cut frame -- so merlin used to release those
+    /// notes and play out a release tail the reference had already damped.
+    /// Non-zero here means: no delay-line impulse at all, and the head runs
+    /// `d + fade` frames with the last `fade` of them a linear ramp to silence.
+    ///
+    /// `u16` because it is either zero or `steal_fade_frames`, which `Config`
+    /// validates below `block_frames`. See the note on the struct.
+
+[14] src/merlin/head.rs:125
+    /// Frames of the region's own exponential release after `d`, played out by
+    /// the head, or zero for an ordinary note.
+    ///
+    /// Non-zero means no delay-line impulse: the note was held so far past its
+    /// release reference `Dj` that the kernel would need amplifying by
+    /// `r^(Dj-D)` -- over ten orders of magnitude on a one-millisecond
+    /// release -- and the head subtracting the same amount back, which the
+    /// fixed-point accumulators cannot hold. The head plays the body and then
+    /// `A[n] * r^(n-D+1)` instead, which is exact because such a note is past
+    /// `flat_from`. See `plan_note`'s `MAX_KERNEL_GAIN`. Fits the padding
+    /// `env_ratio` left, so the record stays 56 bytes.
+
+[15] src/merlin/head.rs:137
+    /// Left output bus; right is `bus + 1`. The head has to go through the same
+    /// biquad as the rest of its note. `u16` for the same reason: buses are
+    /// twice `--merlin-filters`, which `MerlinSynth::new` caps well inside it.
+
+[16] src/merlin/head.rs:141
+    /// Identical notes this record stands for (THE PLAN, Phase 1: per run, not
+    /// per note): copies struck together and released together. In what was
+    /// padding, so the record stays 56 bytes; a run is cut at `u16::MAX`.
+
+[17] src/merlin/head.rs:145
+    /// `env(D) / env(Dj)`, section 3b's envelope ratio.
+    ///
+    /// One for every note that outlives its own attack, which is almost all of
+    /// them; below one for a note that ends inside it. The delay line's impulse
+    /// carries this inside its gain, so `f_at` has to carry it too -- what the
+    /// head subtracts and what the delay line adds are two halves of one
+    /// number, and they were briefly out of step on 2026-09-10 when the scalar
+    /// was corrected and this was not. That cost **-3.4 dB on the note's own
+    /// body**, in the opposite direction to the defect being fixed.
+    ///
+    /// **Eight bytes of `HeadNote`, not four**, because the struct is
+    /// `u64`-aligned and this pushes 48 to 56. That gives back the saving of
+    /// 2026-09-09 and is worth it for a correct scalar; the head-correction
+    /// collapse should reclaim it. See TODO.
+
+[18] src/merlin/head.rs:163
+    /// Frames from the note-on to the end of everything this record plays:
+    /// the body, then a CC120 damp, a release on the head, or both.
+    ///
+    /// **One expression for `clip` and for the list's retention.** Retention
+    /// used to read `d` alone, so a record whose damp or release crossed into
+    /// the next partition step was dropped before that step was played: the
+    /// rest of the tail went missing, -28.6 dB against the CPU reference on a
+    /// 10 ms release (2026-09-19).
+
+[19] src/merlin/head.rs:177
+    /// Frames of the kernel the delay line does not hold, because its impulse
+    /// was delayed by this much instead.
+    ///
+    /// `Kernel::segment` explains why: caching `kernel_j` from frame 0 makes
+    /// its length grow with how long the note was held, and a sixteen-second
+    /// note is real material. Cached from `skip` and fired `skip` frames late
+    /// it is the same convolution, and what is cached is the release tail
+    /// alone. The correction picks up the difference -- over `[0, skip)` the
+    /// delay line is silent, so `f` is zero and the correction is the note
+    /// itself.
+    ///
+    /// **Derived rather than stored**, and it has to stay the same expression
+    /// `plan_note` fires the impulse with -- if the two disagree the cached
+    /// kernel and the impulse delay disagree and the note comes out several dB
+    /// loud, which is the defect `tests/merlin_entry_key.rs` exists for. It was
+    /// a field until 2026-09-09; on the largest test file this list reached
+    /// 102.7 M records, so four bytes here is 392 MiB of host memory.
+
+[20] src/merlin/head.rs:202
+    /// `f` at head frame `n`: the kernel's envelope, which the correction
+    /// subtracts from unity.
+    ///
+    /// Constant at `r^(Dj-D)` until `Dj`, then releasing. Evaluated on the host
+    /// once per step so the shader's inner loop is a single multiply.
+
+[21] src/merlin/head.rs:208
+        // The `+ 1` past `Dj` is not a fudge. `Kernel::at_release` multiplies
+        // before storing, because `cpu.rs` advances the envelope before scaling
+        // the sample -- so the kernel's first released frame already carries one
+        // factor of `r`, and its envelope is `r^(n - Dj + 1)`, not `r^(n - Dj)`.
+        // Times the scalar `r^(Dj - D)` that is `r^(n - D + 1)`.
+        //
+        // Leaving it out is a single frame of envelope, and it held the whole
+        // correction at about -60 dB instead of -80.
+
+[22] src/merlin/head.rs:222
+            // An instant release: the kernel is silent from Dj on, so the
+            // correction is the whole sustain there and nothing before it.
+
+[23] src/merlin/head.rs:229
+    /// The frames `[lo, hi)` this record plays, in absolute frames, or `None`
+    /// when it plays nothing: it begins at `start + from`, runs `span` frames
+    /// from `start`, and is cut short at the head cache's length.
+    ///
+    /// **The one definition of "reaches a step"**, shared by [`Self::clip`],
+    /// which intersects it with a step, and [`Self::steps`], which says which
+    /// steps that is. They have to agree to the frame: a record filed under a
+    /// step `clip` then finds empty is only wasted work, but one `clip` would
+    /// have played and the filing missed is a note that goes silent.
+
+[24] src/merlin/head.rs:244
+    /// The first and last partition step, as `frame / step_len`, that
+    /// [`Self::clip`] finds anything in -- or `None` if it never does.
+    ///
+    /// A step `[s * len, (s + 1) * len)` meets `[lo, hi)` exactly when
+    /// `lo < (s + 1) * len` and `s * len < hi`, i.e. `s >= lo / len` and
+    /// `s <= (hi - 1) / len`.
+
+[25] src/merlin/head.rs:255
+    /// Where in this record and in the step the frames `clip` plays are:
+    /// `(first frame of the record, first frame of the step, frames)`, or
+    /// `None` when the record plays nothing in it.
+
+[26] src/merlin/head.rs:268
+    /// Which of the two pieces [`Self::clip`] returns exist, as a bitmask:
+    /// bit 0 for the first and bit 1 for the second.
+    ///
+    /// Answered without building them, because a `Head` is 76 bytes and a
+    /// `powi`, and the caller needs only to know how many there will be and
+    /// where -- see `head_pass`, which counts and sorts the corrections of a
+    /// step before it clips any of them. `pieces_agree_with_clip` holds the two
+    /// together.
+
+[27] src/merlin/head.rs:281
+            // The body if the window starts before the note-off, the release if
+            // it runs past it: see the branch in `clip`.
+
+[28] src/merlin/head.rs:289
+    /// The part of this correction landing in `[step_start, step_start + len)`.
+    ///
+    /// Nothing when the note does not reach this step, or when its head runs
+    /// past what the cache holds -- see [`HeadCache::frames`]. Two pieces only
+    /// for a note released on the head whose note-off falls inside the step:
+    /// see the comment on that branch.
+
+[29] src/merlin/head.rs:296
+        // A damped note runs `fade` frames past its note-off: the cut is where
+        // the ramp *starts*, not where the note stops. A note released on the
+        // head runs its release past it the same way.
+
+[30] src/merlin/head.rs:302
+        // Linear from the gain at the note-on to the gain at the note-off. The
+        // record starts part-way in when the head spans several steps, so the
+        // start value has to be advanced to `src0` rather than restarted.
+
+[31] src/merlin/head.rs:314
+            // CC120. No impulse was ever fired for this note, so the delay line
+            // has nothing anywhere in it -- `dead` covers the body and `f` is
+            // free to carry the damp instead of a release.
+            //
+            // `hold` is one past the cut so the first damped frame is still at
+            // full level, which is where `cpu.rs` starts its ramp: it tests
+            // `f + 1 >= stop_rel` and its first faded frame has `d == 0`.
+
+[32] src/merlin/head.rs:338
+                // A damped note fires no impulse, so there is nothing for the
+                // correction to subtract *at* -- what `f` carries here is the
+                // damp itself, and the level it damps from is the gain at the
+                // cut, which is where the ramp has got to.
+
+[33] src/merlin/head.rs:349
+            // Released on the head: no impulse was fired, so the delay line
+            // has nothing for this note and the correction is the whole of it,
+            // in two pieces either side of the note-off.
+            //
+            // The body is `A * G(n)`, with the gain ramped from the note-on to
+            // the note-off exactly as every other note's is, and `f` held at
+            // zero. The release is `A * gain_end * r^(n-D+1)`: `f` follows
+            // `1 - r^(n-D+1)`, the shader's affine step with `a = 1 - r`, and
+            // `G - f * G` is the release from where the envelope had settled.
+            //
+            // Two pieces rather than one because the shader's gain ramp runs to
+            // the end of whatever it is given. One piece ramped past `D` would
+            // leave `A * (G(n) - gain_end)` in the release, which never decays;
+            // one held at `gain_end` would lose a channel volume that moves
+            // during the note -- which `tests/merlin_controllers.rs` catches at
+            // -15.7 dB.
+
+[34] src/merlin/head.rs:433
+            // Frames from `src0` over which the delay line has nothing: its
+            // copy of the kernel starts at `skip`. `skip <= Dj`, so `f` is
+            // still on its constant stretch throughout and the masking below
+            // does not have to interact with the release.
+
+[35] src/merlin/head.rs:451
+    /// The third piece of a note released on the head and cut in its tail, a
+    /// CC120 having come `release` frames after its note-off: from where the
+    /// release has got to, a straight line to nothing over `fade` frames, with
+    /// `f = 1 - level` climbing to one. The release's own `r` is left out, as
+    /// over so few frames it is the line's shape and not its level, and the
+    /// first frame is at full level, as `cpu.rs` has it.
+
+[36] src/merlin/head.rs:492
+    /// Every piece this record plays in the step: [`Self::clip`]'s and
+    /// [`Self::damp`]'s.
+
+[37] src/merlin/head.rs:499
+/// One change to what a run of notes plays, `n` frames from their note-on: to
+/// its level, its slope per frame and its decaying part, which is `b * r^k` `k`
+/// frames after `n`. `notes` and `tails` count what starts or stops here.
+
+[38] src/merlin/head.rs:513
+    /// Where this note changes what the run plays, by the same cases as
+    /// [`Self::f_at`] and [`Self::clip`]: its gain from the note-on to the
+    /// note-off, less the delay line's share from `Dj`, then a release on the
+    /// head if it has one. Every term is in the weight, and a term that decays
+    /// is written at the frame it starts.
+
+[39] src/merlin/head.rs:536
+            // Ends before the kernel starts to release, so what the delay line
+            // holds under it is a constant.
+
+[40] src/merlin/head.rs:554
+/// Notes of one waveform struck on one frame, played as one.
+///
+/// A head reads its waveform at `A[frame - start]`, so notes that share a
+/// waveform and a start read the same frames, and what they add to a bus is
+/// `A[n]` times the sum of their envelopes. Black MIDI's chords are made of
+/// exactly this: on one test file 46 M records of a sample of keys share 8 M
+/// starts, and 97% of their 393 G head frames are the same read made again for
+/// another note. The sum needs no table, because a waveform fixes its release
+/// and so `r`: between two note-offs every note's envelope is one of a constant,
+/// a ramp (a channel volume moving under the note) or `r^n`, and those add to
+/// `a + c * k + b * r^k` per channel. `Head` already says that, with `gain` and
+/// `dg` for the first two terms and `gi` for the third.
+///
+/// So a run of notes becomes one piece per stretch between the turns of its
+/// notes. Cut notes (`fade`) are left as they are: they are rare, and a damp is
+/// not one of those three shapes once it overlaps another.
+
+[41] src/merlin/head.rs:576
+    /// `notes`, all of one waveform and one start, as the pieces playing their
+    /// sum inside `[step_start, step_start + step_len)`, appended to `out`
+    /// with `base` the logical waveform, as [`HeadNote::clip`] leaves it.
+
+[42] src/merlin/head.rs:601
+        // Where a stretch with nothing decaying began, when the next one is
+        // that same stretch with a tail joined on: one piece with `dead`.
+
+[43] src/merlin/head.rs:629
+            // Only a tail joins at `next`, and the step reaches it: the level
+            // runs straight on.
+
+[44] src/merlin/head.rs:652
+/// The piece for the stretch `[from, end)` of a run, cut to `[lo, hi)`: `live`
+/// is where its tail starts, `from` if it has none or none is waiting, and
+/// `(a, c, b)` are as they stand at `live`.
+
+[45] src/merlin/head.rs:692
+/// The live [`HeadNote`]s, filed under every partition step they reach.
+///
+/// **Why it is not one list.** `head_pass` used to clip every record in one
+/// `Vec` against every step. A record lives from the block its note-off is
+/// planned in until its end has gone out, which is the emit lag -- 4 blocks, 8
+/// steps -- plus its own length, yet it overlaps only the one or two steps it
+/// sounds in. Measured on the 44.75 M-note test file: **812.6 million records
+/// visited to find 85.8 million that overlapped**, 3.0 s of the pass, 265,000 a
+/// step against 28,000 that mattered, and 7.1 M live at the peak step.
+///
+/// So a record is filed once under each step it reaches ([`HeadNote::steps`])
+/// and a step takes its list whole. A copy per step rather than an id into a
+/// shared store because a record reaches 1.28 steps on average there (85.8 M
+/// filings for the 67.2 M records that reach any step at all) and never many:
+/// it is planned once its note-off is known, and everything of it before
+/// `emit_start` already went out through the open-note path, so what is left is
+/// at most the emit lag and a release. Copies make a step's list one sequential
+/// read and retirement free -- the list is dropped when its step is done --
+/// where an arena would add a random read per record and a free list to manage.
+///
+/// Records that reach no step are not filed at all. 14.1 M of the 81.3 M
+/// records on that file have an empty reach -- a note of no length, or one whose
+/// end is already behind the emit point -- so they play nothing anywhere, and
+/// the single list carried each of them until its end passed. Its peak was
+/// 7.1 M records; this holds 2.1 M filings at its peak.
+///
+/// **The order is the contract.** Each list is in the order its records were
+/// filed, which is the order `plan_note` pushed them, which is the order the
+/// single `Vec` this replaced had them in with the non-overlapping ones taken
+/// out. The first-sighting numbering that the counting sort in `head_pass` is
+/// dense over, and the sequence `HeadCache::bind` evicts pages in, both follow
+/// from that order, and eviction on this backend has been seen to move the
+/// output at -88 dB, so it is reproduced rather than assumed not to matter.
+
+[46] src/merlin/head.rs:726
+    /// The step, as `frame / partition`, that `lists[0]` is. Everything before
+    /// it has been taken.
+
+[47] src/merlin/head.rs:730
+    /// Emptied lists, kept for their capacity: a list is filled over the ~10
+    /// steps before its own and a taken one is the right size for the next.
+
+[48] src/merlin/head.rs:735
+    /// `log2` of the partition when it is a power of two, which it is wherever
+    /// merlin runs. Filing divides two frame numbers by it per record, 81 M
+    /// times, and a shift is the cheaper way to do that.
+
+[49] src/merlin/head.rs:754
+    /// Records held, counted once per step they are filed under. This is the
+    /// number of `HeadNote`s in memory, which is what the host report prices.
+
+[50] src/merlin/head.rs:764
+    /// File `h` under every step it reaches that has not been taken yet.
+    ///
+    /// A record cannot reach an earlier step than the next one to be taken --
+    /// `plan_note` clamps `from` to the emit point, which is where the next step
+    /// starts -- and if one did, the steps already gone are steps the single
+    /// list would not have shown it to either, so they are clipped off here.
+
+[51] src/merlin/head.rs:794
+    /// The records reaching `step`, in the order they were filed, and every
+    /// earlier step is finished with. Hand the `Vec` back to [`Self::recycle`].
+    ///
+    /// Steps are taken in order, once each, so `step` is `base` and this is a
+    /// `pop_front`. A step that is skipped has its list dropped unread, and one
+    /// asked for twice finds nothing: the single list this replaced would have
+    /// shown a record to the same steps.
+
+[52] src/merlin/head.rs:824
+        // Not the capacity of the densest step for ever: a dense step files
+        // hundreds of thousands of 56-byte records, and each of a dozen spare
+        // lists holding that much would be hundreds of megabytes held for the
+        // sake of a step in a thousand.
+
+[53] src/merlin/head.rs:837
+/// Sustaining waveforms, packed into a pool of pages that are **reused**.
+///
+/// A waveform gets a *logical* id the first time it is seen, and that id is
+/// what `HeadNote::wave` and `Voice::wave_id` carry for the rest of the render.
+/// Where it lives is decided per partition step, by [`Self::bind`], and its
+/// pages are taken back off the least valuable waveform when the pool runs out
+/// -- see `residency.rs` for the policy and for why throwing a row away is safe
+/// at all.
+///
+/// **Ragged, not one full-length row per waveform.** A row has to be as long as
+/// the longest note *of that waveform*, which is nothing like as long as the
+/// longest note merlin represents: the repertoire's mean note is 1.11 ms and
+/// its row length is ten seconds, so a rectangular layout charges nine thousand
+/// times what the typical waveform uses. That was affordable while a file used
+/// 512 waveforms and it is not now.
+///
+/// *This has been rewritten twice on 2026-09-07 and both steps were forced by
+/// the same thing. It was one full-length row per waveform for the life of the
+/// render, with the id and the row the same number, which held while a waveform
+/// meant a (sample, envelope, step) triple. Channel bend joined the key -- a
+/// standing bend is a resample -- and one test file passed the 768-row ceiling
+/// inside six seconds of audio. Eviction alone was not enough either: a single
+/// partition step of that file reads **806 distinct waveforms**, and eviction
+/// can do nothing about a step that needs more rows than exist at once. Pages
+/// are what make 806 of them cost 3 MiB instead of 1.55 GiB.*
+
+[54] src/merlin/head.rs:864
+    /// Frames per page. Small, because the point is that the median waveform
+    /// wants one: at 1.11 ms mean the whole note is 53 frames.
+
+[55] src/merlin/head.rs:868
+    /// Frames of each *waveform* any note has asked for, so a row rebound later
+    /// is refilled to what the material needs rather than to what the first
+    /// note that touched it needed.
+    ///
+    /// Rows are filled as far as the longest note yet seen on that waveform,
+    /// not to the full row length. The row is as long as the longest note
+    /// merlin will represent -- seconds of it -- while the overwhelming
+    /// majority of this repertoire's notes are milliseconds, so uploading the
+    /// whole row on first sight would be the render's cost rather than a
+    /// rounding error on it.
+
+[56] src/merlin/head.rs:881
+    /// Frames actually written, per waveform, into the pages it currently
+    /// holds. Reset when it loses them.
+
+[57] src/merlin/head.rs:887
+    /// Bytes uploaded refilling waveforms whose pages had been taken. The cost
+    /// of the policy, in the only currency it spends.
+
+[58] src/merlin/head.rs:894
+    /// `rows` is a budget in *full-length rows*, kept as the unit the flag and
+    /// the VRAM arithmetic are written in; what it buys is that many rows'
+    /// worth of pages, which is far more waveforms than rows.
+
+[59] src/merlin/head.rs:898
+        // 1,024 frames, 4 KiB. Small enough that the median waveform -- a
+        // millisecond note -- wants exactly one, and large enough that the
+        // longest note merlin allows is a few hundred rather than a free list
+        // with six figures in it.
+
+[60] src/merlin/head.rs:924
+    /// Frames of `A[n]` a single waveform may hold.
+    ///
+    /// **This is merlin's longest note.** The delay line has no note-length
+    /// limit any more -- its kernels hold the release tail and the impulse is
+    /// delayed to meet it -- so the ceiling is here instead, in the one buffer
+    /// that has to carry the note's *body*. A note held longer is clamped to it
+    /// rather than dropped, and the count is reported so the choice is visible.
+    ///
+    /// The measured repertoire: mean notes of 1.11 ms and 17.5 ms, longest
+    /// notes of 9.08 s and 16.20 s, with 20 and 10,652 notes past 8 s.
+
+[61] src/merlin/head.rs:948
+    /// The logical id for `wave`, assigning one on first sight.
+    ///
+    /// **No device work.** Uploading here would be uploading frames that may be
+    /// taken back several times before the note they belong to is emitted, and
+    /// on dense material this runs once per note-on: the planner is the hot
+    /// path and it now leaves the cache alone entirely.
+
+[62] src/merlin/head.rs:977
+    /// Give waveform `id` pages and fill them to what has been asked for,
+    /// taking pages off the least valuable waveforms if the pool is out.
+    ///
+    /// Returns `(first frame in the buffer, frames available, was a hit)`.
+    /// `None` means every waveform holding pages is pinned to this step, which
+    /// is the caller's cue to report that one step needs more than the pool has
+    /// rather than to keep asking.
+
+[63] src/merlin/head.rs:991
+        // **Doubled, not exact.** A waveform's longest note only grows -- a
+        // later note of the same key held longer -- and growth means moving,
+        // because the pages have to stay contiguous. Asking for exactly what is
+        // wanted makes every growth a move and every move a full refill from
+        // frame zero, which measured **3,459 MiB of uploads** over thirty
+        // seconds of one test file. Rounding the page count up to a power of
+        // two makes it a handful of moves per waveform instead, at up to 2x the
+        // pages for the ones that actually grow.
+
+[64] src/merlin/head.rs:1001
+        // A waveform whose longest note has grown past what its pages hold
+        // moves rather than extending in place: the pages have to stay
+        // contiguous, and the frames it already has are a prefix of the same
+        // render, so the move is a refill and not a copy.
+
+[65] src/merlin/head.rs:1061
+/// One still-open note's contribution to one partition step: the waveform, with
+/// no correction to make yet.
+///
+/// A note that has not been released is still sustaining, so what it owes the
+/// output is `A[n]` -- no `f`, no release, nothing that depends on `D`. That is
+/// what `dead == len` says to the shader.
+
+[66] src/merlin/head.rs:1086
+    // `gain` is the channel's value at `gain_from`, which is the start of the
+    // block being emitted rather than of this note: an open note's gain has to
+    // follow the channel, and the channel moves on the block's clock.
+
+[67] src/merlin/head.rs:1102
+        // Every frame masked: the delay line has nothing for a note whose
+        // impulse has not been placed yet, so the correction is the whole
+        // waveform.
+
+[68] src/merlin/head.rs:1110
+        // No delay line under an open note -- `dead` masks every frame -- so
+        // this is unused, and equal to the gain is what makes the expression
+        // collapse back to `A * G`.
+
+[69] src/merlin/head.rs:1124
+    /// A tiny deterministic generator, so these tests need no dependency and
+    /// fail the same way every time.
+
+[70] src/merlin/head.rs:1140
+            // Often zero, sometimes past the end of the note: `plan_note`
+            // clamps it to the span, so a record that was open the whole time
+            // reaches nothing.
+
+[71] src/merlin/head.rs:1157
+    /// `steps` is what `HeadSteps` files by, and `clip` is what plays: they
+    /// have to name the same steps, for every kind of record, including the
+    /// ones that reach nothing and the ones the head cache cuts short. And
+    /// `pieces` has to name exactly the pieces `clip` returns.
+
+[72] src/merlin/head.rs:1189
+    /// What `pieces` add to each frame of a step, read through a waveform of
+    /// ones: `kmconv.wgsl`'s `heads` and `f_at`, in f64.
+
+[73] src/merlin/head.rs:1214
+    /// A note released on the head and cut in its tail plays its body, its
+    /// release up to the cut and then a line to nothing, the cut's own frame at
+    /// full level, however steps fall across the three.
+
+[74] src/merlin/head.rs:1283
+    /// `Fold`'s pieces play what each note's own pieces play, for every kind of
+    /// note a run can hold, wherever the step falls across it.
+
+[75] src/merlin/head.rs:1316
+    /// Notes with one length are one piece in the step, however many there are
+    /// and whether or not they have reached their tails.
+
+[76] src/merlin/head.rs:1343
+    /// The contract of `HeadSteps`: step by step, the list it hands over is the
+    /// one a scan of every record in push order would have found, in the same
+    /// order. Order is the point -- see the type.
+
+[77] src/merlin/head.rs:1352
+        // Pushed a few at a time while the steps are taken, as the backend
+        // does: a record can only reach steps that have not been taken.
+
+[78] src/merlin/head.rs:1360
+                // Nothing before the next step to be taken, as `plan_note`'s
+                // `from` guarantees.

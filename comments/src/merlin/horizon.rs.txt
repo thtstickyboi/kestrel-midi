@@ -1,0 +1,131 @@
+# Comments extracted from src/merlin/horizon.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/merlin/horizon.rs:5
+//! Knowing a note's length before rendering the block it starts in.
+//!
+//! This is the piece that makes Merlin offline-only, and the dev notes section 4
+//! says why in one line: section 3b's collapse works in the **note-on-indexed**
+//! form, so the impulse sits at the note-on frame -- but `D` is not known until
+//! the note-off, which arrives later in the stream. A block cannot be convolved
+//! until every note starting in it has been paired.
+//!
+//! So this buffers note-ons, pairs them as note-offs arrive, and reports the
+//! frame through which everything is resolved. The renderer follows that frame
+//! rather than the stream head.
+//!
+//! ## A lookahead by default, with a pre-scan as the escape hatch
+//!
+//! The other option is a whole-file pairing pass, which is what `entry_probe`
+//! already does, spilling the paired list to disk and reading it back to
+//! render. *An earlier version of this comment dismissed that as "cannot hold
+//! the result", which was wrong -- it assumed the list had to live in memory.*
+//! At 16 bytes a note and the user's measured **5 GB/s sustained read**, it
+//! does not:
+//!
+//! | file | notes | paired list | read back |
+//! |---|---|---|---|
+//! | 131 s file | 44.8 M | 0.72 GB | 0.14 s |
+//! | 366 s file | 824.2 M | 13.2 GB | ~2.6 s |
+//! | 20 min file | 2.74 B | 43.9 GB | ~8.8 s |
+//!
+//! Against the render targets that is roughly 3%, 9% and 6% -- affordable, not
+//! free.
+//!
+//! The lookahead is the default because on this repertoire it costs **nothing**:
+//! it holds only the notes currently *open*, and mean note lengths of 1.11 ms
+//! and 17.5 ms mean almost nothing is open at once. The buffer is sized by the
+//! material's polyphony, not by its note count, so the spill would be gigabytes
+//! of I/O to learn what a few kilobytes of state already knows.
+//!
+//! The spill earns its keep on material the lookahead handles badly: many long
+//! notes held simultaneously, where the open set stops being small. That is
+//! detectable at runtime rather than guessable -- [`Horizon::open_notes`] is
+//! the number, and it is exposed for exactly this.
+//!
+//! ## The bound is about the kernel cache, not about the horizon
+//!
+//! A note that is never released would stall the pairing forever, so `max_wait`
+//! caps it: past that the note is emitted with its duration clamped, and a
+//! later note-off is consumed and discarded so the pairing does not slip.
+//!
+//! **But the clamp would still be needed with perfect durations from a
+//! pre-scan**, which is the part worth keeping straight. It is not about the
+//! kernel, though, and this section used to say it was.
+//!
+//! *Superseded 2026-09-06.* The claim was that a note of duration `D` needs a
+//! kernel of `D + release` frames, so a sixty-second note needs a sixty-second
+//! kernel and `max_wait` is really the longest note merlin will convolve. That
+//! was true of the implementation and is not true of the problem. A kernel
+//! holds the note's **release tail**, cached from the reference point `Dj` with
+//! the impulse fired `Dj` frames late to match -- see `Kernel::segment` -- so
+//! its length is the region's release and nothing else, and it does not vary
+//! across a waveform's release buckets either. What a long note costs is the
+//! **head cache**: its body is read from there, 4 bytes a frame per waveform,
+//! and that is what `merlin_head_frames` bounds.
+//!
+//! So the bound is still there, it is just somewhere else and an order of
+//! magnitude cheaper. Past it a note is clamped rather than dropped: it sounds,
+//! and releases, it simply stops early.
+
+[2] src/merlin/horizon.rs:82
+    /// True when `max_wait` ran out before the note-off arrived, so `duration`
+    /// is the clamp rather than the note's real length.
+
+[3] src/merlin/horizon.rs:100
+    /// Open notes in note-on order. Retired from the front once emitted *and*
+    /// paired, so this holds the currently-sounding set rather than the file.
+
+[4] src/merlin/horizon.rs:103
+    /// Absolute index of `open.front()`, so slot entries stay valid as the
+    /// front is retired.
+
+[5] src/merlin/horizon.rs:106
+    /// `channel * 128 + key` -> absolute indices, oldest first, with `channel`
+    /// counted across every MIDI port. Note-offs pair with the oldest matching
+    /// note-on of their own port, which is what `driver.rs` does.
+
+[6] src/merlin/horizon.rs:141
+    /// Pair a note-off. Silently counted if it matches nothing, which real
+    /// files produce in quantity -- one test file has 31 million of them.
+
+[7] src/merlin/horizon.rs:149
+            // Already retired: the note was clamped and emitted, and this is
+            // its late note-off. Consuming the slot entry above is the point --
+            // dropping it here rather than earlier is what stops the next
+            // note-off on this key pairing with the wrong note-on.
+
+[8] src/merlin/horizon.rs:165
+    /// Emit every note that is resolved as of stream position `now`.
+    ///
+    /// Resolved means paired, or open for longer than `max_wait`. Emission is
+    /// in note-on order, which is what the planner and the byte-identity
+    /// requirement both want.
+
+[9] src/merlin/horizon.rs:181
+                // Note-ons are in start order, so once one is unresolved every
+                // later one is too.
+
+[10] src/merlin/horizon.rs:195
+                // Leave it in place: its note-off has not arrived, and the slot
+                // entry still points here.
+
+[11] src/merlin/horizon.rs:204
+    /// Drop entries the front no longer needs. An entry is only safe to retire
+    /// once it has been emitted *and* its slot entry has been consumed, which
+    /// `paired` stands for.
+
+[12] src/merlin/horizon.rs:224
+    /// The frame through which every note-on has been resolved.
+    ///
+    /// Blocks lying entirely below this can be planned and convolved. Above it,
+    /// a note may still be waiting for its length.
+
+[13] src/merlin/horizon.rs:236
+    /// Notes currently held open. The lookahead's real memory cost, and the
+    /// number to watch on material with long notes.

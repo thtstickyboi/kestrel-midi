@@ -1,0 +1,50 @@
+# Comments extracted from shaders/sample.wgsl
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] shaders/sample.wgsl:5
+// What `render.wgsl` and `sustain.wgsl` both read: the sample pool, the
+// interpolation, and the tremolo. One copy, so a sustain cannot drift from the
+// voice it stands for. Whoever includes this declares `u` and `pool`.
+
+[2] shaders/sample.wgsl:9
+// 1 when `a >= b`, else 0, as arithmetic rather than a comparison: for ages and
+// delays, which stay below 2^31, the borrow out of `a - b` is the answer. Why
+// the LFOs avoid comparisons is in the LFO block in `main`.
+
+[3] shaders/sample.wgsl:21
+// The tremolo's linear gain at an age: exactly one while the modulation LFO is
+// still in its delay or the region has no volume depth, because the masked
+// term is then zero times something finite. `modLfoToVolume` is centibels of
+// *attenuation*, so a positive generator with the LFO high makes the voice
+// quieter. Mirrors `cpu.rs`.
+
+[4] shaders/sample.wgsl:39
+// The word `w` and the one after it, which linear interpolation reads
+// together. With the pool in one buffer this is exactly two `word_pair`s.
+// Split, both are read inside one branch whenever they share a part, so the
+// two loads are issued together rather than each behind its own compares.
+
+[5] shaders/sample.wgsl:54
+// The frame right after `idx`. Specialised out of `neighbour_index` because
+// this is the hot one: idx is always below `le`, so the wrap can only ever
+// land exactly on the loop start and the integer modulo is unnecessary. The
+// result is identical to the general path the CPU reference uses.
+
+[6] shaders/sample.wgsl:76
+        // Both taps come out of one word whenever the first one is even, which
+        // is exactly half the time and, because the pool is phase-sorted,
+        // usually the same half for every lane in a warp. So address the pair
+        // from a single word index and only issue a second load on the odd
+        // case, rather than calling `fetch` twice and recomputing the address,
+        // the bounds check and the unpack for a word that is often the one
+        // already in hand.
+
+[7] shaders/sample.wgsl:91
+        // The tap after `idx` is `idx + 1` except where it runs off a loop end
+        // or the end of the sample. That is rare enough to be a fixup instead
+        // of a term in the hot path.

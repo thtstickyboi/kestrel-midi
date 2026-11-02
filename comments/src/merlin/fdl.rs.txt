@@ -1,0 +1,331 @@
+# Comments extracted from src/merlin/fdl.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/merlin/fdl.rs:5
+//! The frequency-domain delay line.
+//!
+//! `shaders/fdl.wgsl` holds the passes and the reasoning; this sequences them
+//! and owns the buffers. One `Fdl` covers a fixed `(partition, lags, entries,
+//! buses)` shape, which is what the development notes section 5 fixes at build time.
+//!
+//! Nothing here decides *which* entries fire or what a kernel contains -- that
+//! is the cache manager and the kernel builder, and neither exists yet. This
+//! is the pass that costs the render time, tested against a CPU convolution.
+
+[2] src/merlin/fdl.rs:19
+/// One impulse: which row of the block's input it lands in, which frame, and
+/// how loud. Matches the WGSL `Impulse`.
+
+[3] src/merlin/fdl.rs:27
+    /// How many identical notes this impulse stands for (THE PLAN, Phase 1:
+    /// per run, not per note). The scatter multiplies its *rounded* fixed-point
+    /// value by this, so N identical notes add exactly what N impulses of one
+    /// did, bit for bit -- integer addition does not care how it is grouped.
+
+[4] src/merlin/fdl.rs:59
+/// Where [`Fdl::reserve_kernel`] put a kernel's pages: which cache buffer and
+/// which bytes of it. Handed back to [`Fdl::copy_kernel`] to fill them.
+
+[5] src/merlin/fdl.rs:75
+/// Cache buffers bound to the multiply-accumulate.
+///
+/// Four rather than a generated count, so the shader is a fixed string and the
+/// bind group layout is a constant. At the 2 GiB binding cap that is 8 GiB of
+/// kernel cache, which is more than the card has.
+
+[6] src/merlin/fdl.rs:97
+    /// The kernel cache, packed. The buffers whose traffic matters.
+    ///
+    /// **Ragged, not `[E][K][bins]`.** Entries no longer share a length: one is
+    /// as long as its region's release tail, which runs 1.25 s to 4.0 s across
+    /// the reference bank's 88 keys. A rectangular cache would have to be as
+    /// deep as the deepest entry for all of them, which is 3.2x the bytes for
+    /// nothing. `kmeta` says where each entry starts and how many partitions it
+    /// has.
+    ///
+    /// **Several buffers, because one storage *binding* caps at 2 GiB** on this
+    /// adapter against ~5.9 GiB of free VRAM. One test file's 2,924 entries at
+    /// their true release lengths come to 2.24 GB, so the cap and the budget
+    /// are now on opposite sides of what real material asks for -- correct
+    /// kernels are about 9% longer than the truncated ones that used to fit.
+    /// `KBUFS` slots are always bound; the unused ones are 8 bytes.
+
+[7] src/merlin/fdl.rs:117
+    /// Buses with rows this step, and the buffer they are staged in. The MAC's
+    /// `z` dimension walks this rather than every bus.
+
+[8] src/merlin/fdl.rs:121
+    /// Free runs of pages in each cache buffer, ascending by start and
+    /// coalesced, so a freed kernel's space is immediately reusable by the next
+    /// one of the same depth.
+    ///
+    /// **A page is one partition**, `bins` complex, and a kernel occupies
+    /// `depth` of them **contiguously inside one buffer** -- the
+    /// multiply-accumulate reads `m.x + k * bins + bin`, so the partitions have
+    /// to be adjacent and the alternative is a page table in the hot loop.
+    ///
+    /// *This replaces a bump allocator and the sentence "entries are interned
+    /// once and never evicted, so there is nothing to free". That held until
+    /// bend joined the cache key on 2026-09-07 and one test file went from
+    /// 3,252 entries to 99,270; see `residency.rs`.*
+
+[9] src/merlin/fdl.rs:151
+    /// Impulses this device binds at once, and how many steps have needed more
+    /// than one pass to scatter them. See `encode_block`.
+
+[10] src/merlin/fdl.rs:159
+    /// `max_fired` and `max_impulses` size the per-block staging buffers. They
+    /// are ceilings, not the values used: a block that fires fewer entries
+    /// dispatches for fewer, which is the whole point of the sparsity result.
+    ///
+    /// `chunk_cap` is how many bytes one storage binding holds. The impulse
+    /// staging list is scattered in as many passes as it takes to fit inside
+    /// it; a test passes a small number to reach that path, a render passes the
+    /// adapter's own limit, and zero means the adapter's.
+
+[11] src/merlin/fdl.rs:183
+        // `max_fired` may exceed `entries`, and routinely does: the firing list
+        // is grouped by bus, so an entry heard on several buses takes a row on
+        // each. Only the per-row buffers are sized by it.
+
+[12] src/merlin/fdl.rs:192
+        // The accumulator ring is one binding and grows with the bus count,
+        // which is the filter count doubled -- and CC71/CC74 make that a
+        // material-dependent number rather than the 128 velocity layers it used
+        // to be. One test file wants 257 distinct biquads. Said here, because
+        // otherwise it surfaces as a wgpu validation panic from inside
+        // `create_bind_group` with a byte count and no clue what asked for it.
+
+[13] src/merlin/fdl.rs:213
+        // The kernel cache is one storage buffer, and a *binding* is capped
+        // well below total VRAM: 2 GiB on this adapter against roughly 5.9 GiB
+        // free. The design's residency budget is written against the free
+        // VRAM and so overstates what a single cache can hold -- its 5.35 GiB
+        // figure for one test file needs three bindings, and even the 2.08 GiB
+        // figure for another is over the limit.
+        //
+        // Splitting the cache across several buffers is the fix and is not
+        // done. Until then this is the ceiling, and it is better said here than
+        // discovered as a validation error inside `create_bind_group`.
+        //
+        // The ceiling is now **bytes, not entries**. It used to be both, since
+        // every entry cost `lags * bins` whether it needed them or not; a ragged
+        // cache spends its budget where the material actually asks for it, so
+        // what a run gets out of the same 2 GiB depends on its note lengths.
+
+[14] src/merlin/fdl.rs:230
+        // Zero asks for the rectangular size -- room for every entry at the
+        // full ring depth, which is what the cache used to be. Nothing on the
+        // render path wants that any more, but it is the right default for a
+        // caller that has not thought about a budget.
+
+[15] src/merlin/fdl.rs:247
+        // Split evenly across as few buffers as will hold it. Even rather than
+        // filling one at a time so the allocator's skip-to-the-next-buffer,
+        // which happens when an entry would straddle a boundary, wastes at most
+        // one kernel per buffer.
+        //
+        // Down to a whole complex, too: the binding cap on this adapter is
+        // `2^31 - 1`, which is not a multiple of anything, and a storage binding
+        // has to align to 4.
+
+[16] src/merlin/fdl.rs:259
+        // Impulses one binding holds, rounded down to the workgroup so only the
+        // last chunk is ragged. 134,217,728 on this adapter; the largest step
+        // measured so far staged past 33 M of them.
+
+[17] src/merlin/fdl.rs:273
+        // uniform, then: h0, kmeta, fired, bus_range, impulses read-only; tin,
+        // data, spec, ring, out read-write; then h1..h3 read-only.
+
+[18] src/merlin/fdl.rs:360
+    /// Steps whose impulses outgrew one storage binding, and the ceiling they
+    /// outgrew.
+
+[19] src/merlin/fdl.rs:366
+    /// The `[buses][2P]` output buffer, so a later pass can add into the block
+    /// this one just produced.
+
+[20] src/merlin/fdl.rs:376
+    /// Install kernel `e`'s transformed partitions and record where they went.
+    ///
+    /// `spectra` is `depth * bins` complex, laid out partition-major, and
+    /// `depth` is this entry's own -- it is the region's release tail rounded up
+    /// to partitions, not a number shared with any other entry.
+    ///
+    /// **Returns `Ok(false)` when there is no room**, rather than failing. The
+    /// caller owns the eviction policy (`residency.rs`) and its answer to a
+    /// full cache is to free something and ask again; a `bail!` here would put
+    /// that decision in the wrong place and there would be nothing useful to
+    /// say at this level anyway.
+
+[21] src/merlin/fdl.rs:400
+            // Already resident. Kernels are immutable once built, so there is
+            // nothing to refresh.
+
+[22] src/merlin/fdl.rs:411
+    /// The first half of [`Fdl::upload_kernel`]: allocate `depth` pages for
+    /// kernel `e`, record where they are in `meta` and in the device's `kmeta`
+    /// row, and say where, **without filling them**.
+    ///
+    /// The render builds the kernels a step is missing as one batch on the
+    /// device, so the allocation decisions -- which are the eviction policy's,
+    /// and have to be made one entry at a time, in order -- cannot wait for the
+    /// spectra to exist. The caller fills the pages with [`Fdl::copy_kernel`]
+    /// before anything reads them.
+    ///
+    /// `Ok(None)` is `upload_kernel`'s `Ok(false)`: no room, nothing changed.
+    /// An entry that is already resident is an error here, since a caller that
+    /// reserves one has lost track of what it holds.
+
+[23] src/merlin/fdl.rs:459
+        // Applied at the next `submit`, like any queued write, which is before
+        // anything recorded after this reads `kmeta`.
+
+[24] src/merlin/fdl.rs:470
+    /// The second half: record a copy of `slot.bytes()` bytes of device memory
+    /// from `src` at `src_offset` into the pages `slot` names. `src` needs
+    /// `COPY_SRC`; the cache buffers have `COPY_DST`.
+    ///
+    /// Lands after every submission already on the queue, as the
+    /// `write_buffer` it replaces did: the pages may be a victim's, and a block
+    /// already submitted may still be reading them. The queue is one timeline,
+    /// so the copy cannot overtake that block.
+
+[25] src/merlin/fdl.rs:494
+    /// Give entry `e`'s pages back. Its `kmeta` row is left as it was: nothing
+    /// reads a row for an entry that is not in the block's firing list, and
+    /// writing it would be a queue operation per eviction for no effect.
+
+[26] src/merlin/fdl.rs:521
+    /// Complex a kernel of `depth` partitions occupies, for the caller's budget
+    /// arithmetic.
+
+[27] src/merlin/fdl.rs:527
+    /// Partitions held for each entry, indexed by entry id. Zero until the
+    /// entry's kernel is uploaded.
+    ///
+    /// The block planner sorts each bus's firing list by this, descending, so
+    /// the multiply-accumulate can stop at the first entry too shallow for the
+    /// lag it is on rather than testing every row.
+
+[28] src/merlin/fdl.rs:537
+    /// Make the per-step staging buffers big enough for this step.
+    ///
+    /// **They grow rather than refuse.** These used to be ceilings set from
+    /// `--merlin-fired` and `--merlin-impulses`, and a ceiling is the wrong
+    /// shape for a quantity that belongs to the material: one test file has
+    /// 178 M note-ons in a single second, so ~15 M impulses land in one 85 ms
+    /// block, and three attempts at it died on three different ceilings at the
+    /// same audio position. Raising one only moves which breaks first, and no
+    /// release build can ask a user for the answer in advance.
+    ///
+    /// Safe to reallocate because none of these carries state between steps:
+    /// `tin` is drained to zero by `to_real` every step, `data` and `spec` are
+    /// scratch for the transforms, and the rest are staged fresh from the host.
+    /// The ring and the kernel cache -- the two that *do* hold state -- are not
+    /// here. Bind groups are built per call, so nothing keeps a stale handle.
+
+[29] src/merlin/fdl.rs:563
+            // Doubling, so a run that keeps climbing reallocates a bounded
+            // number of times rather than once a step.
+
+[30] src/merlin/fdl.rs:575
+        // Capped at what one binding holds, for the same reason `head_pass` is:
+        // past that the buffer is reused and the scatter repeated. At 16 bytes
+        // an `Impulse` the cap is 134,217,728 records, and one step of a merged
+        // black MIDI has already staged more than half of that.
+
+[31] src/merlin/fdl.rs:594
+    /// Widen the bus dimension to `buses`, keeping everything already in it.
+    ///
+    /// **Exact, and the layout is why.** Every buffer here with a bus dimension
+    /// is bus-major with a fixed stride -- the ring is `[buses][K][bins]` and
+    /// `lags` never changes, `out` is `[buses][2P]` -- so the old contents are a
+    /// *prefix* of the new buffer at the same offsets. One copy puts them there,
+    /// and a new bus starts at zero, which is precisely the state of a filter
+    /// nothing has been heard through. The copy is queued behind every block
+    /// already submitted, so it sees their writes. The rest are staged fresh
+    /// each step and only need the room.
+    ///
+    /// The caller keeps `buses` inside what one binding holds at this `lags`,
+    /// and must not call this while an encoder holds a bind group over the old
+    /// buffers -- `MerlinSynth` checks both, since it is the one that knows.
+
+[32] src/merlin/fdl.rs:651
+    /// Run one block.
+    ///
+    /// `fired` is the block's entry ids, ascending **within** each bus and
+    /// grouped by bus; `bus_range` gives each bus's half-open slice of it.
+    /// `impulses` index rows of `fired`, not entry ids.
+    /// `live` is the number of buses actually in use -- `filters * 2`, not the
+    /// ceiling the instance was built for. Every pass that walks buses is
+    /// dispatched over it rather than over `self.buses`, because the rest are
+    /// silent and a workgroup that exits immediately still has to be scheduled.
+
+[33] src/merlin/fdl.rs:675
+        // Ordered **within each bus range**, which is what the MAC reads: it
+        // walks `fired[lo..hi]` for one bus and never crosses the boundary. A
+        // globally-ordered check would be wrong as soon as there is a second
+        // bus, since bus 1 restarts at whatever entry it happens to hear first.
+        //
+        // The order is `(depth descending, entry ascending)`, and both halves
+        // are load-bearing. Descending depth makes the entries alive at lag `k`
+        // a **prefix** of the range, so the MAC breaks out at the first row too
+        // shallow instead of testing all of them -- which is what keeps a
+        // ragged cache from costing `rows * max_depth` iterations to do
+        // `rows * own_depth` of work. Ascending entry inside a depth breaks the
+        // tie, because the MAC sums in this order and an arbitrary tiebreak
+        // would make the output depend on how the host happened to build the
+        // list rather than on the input. See the development notes section 6.
+
+[34] src/merlin/fdl.rs:705
+        // Fixed-point headroom: the largest an accumulator can reach is every
+        // impulse landing on one frame at unit gain, so scale by the count --
+        // of notes, which is the impulses' total weight. One impulse a note
+        // gave the same number, so a run changes no scale and no bit.
+
+[35] src/merlin/fdl.rs:752
+        // `scatter` is grid-strided now, so this clamps rather than overflowing
+        // the 65,535-per-dimension limit -- and the same file that forced that
+        // change also staged more impulses than one binding holds, which is
+        // what the second branch is for.
+        //
+        // **Chunking here is bit-exact**, by the same argument as `head_pass`:
+        // the scatter accumulates through integer atomics into `tin`, so the
+        // order the adds land in was never defined and splitting the dispatch
+        // changes nothing else. `to_real` reads `tin` afterwards from the
+        // caller's encoder, which is submitted after these -- and `tin` was
+        // zeroed by the previous block's `to_real`, in a submission that has
+        // already gone. The uniform's other fields are identical in every
+        // chunk, and `n_impulses` is read by this pass alone.
+        //
+        // The chunks go through one buffer rather than several because several
+        // would be gigabytes of VRAM; the queue is a single ordered timeline,
+        // so chunk i+1's upload cannot overtake chunk i's dispatch.
+
+[36] src/merlin/fdl.rs:796
+            // Put the step's own uniform back: every later pass in `enc` reads
+            // it, and the last chunk left `n_impulses` short.
+
+[37] src/merlin/fdl.rs:804
+        // The multiply-accumulate is dispatched over what actually fires, not
+        // over the shape of the instance.
+        //
+        // It used to be `(bins, K, buses)` unconditionally, which at 94
+        // partitions and 512 buses is **433,152 workgroups every step** whether
+        // 204 entries fire or none -- and 204 a block is the measured mean. The
+        // early exits inside the shader make each of those cheap, but a
+        // workgroup that returns immediately still has to be scheduled, and at
+        // 3,070 steps that is 1.3 billion launches for a pass whose kernel
+        // traffic is 0.35 ms of an 85 ms budget. It is why the GPU sat under
+        // 25% busy while the render ran at 1.29x realtime.
+        //
+        // `z` walks only buses with rows this step, and `y` stops at the
+        // deepest kernel any of them fired -- which the deepest-first sort puts
+        // at the front of each range, so it is a lookup rather than a scan.

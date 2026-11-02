@@ -37,7 +37,7 @@ A session can list GPUs and ffmpeg, describe MIDIs and soundfonts, list every re
 
 | Command | Fields | Result |
 |---|---|---|
-| `adapters` | | `adapters`: every GPU, each with `index`, `name`, `backend`, `type` (`discrete`, `integrated`, ...), `max_voices` (the largest `max_voices` it takes), `software`, and `default` (the one a render uses unless told otherwise) |
+| `adapters` | | `adapters`: every GPU, each with `index`, `name`, `backend`, `type` (`discrete`, `integrated`, ...), `max_voices` (the largest `max_voices` it takes), `software`, and `default` (the one a render uses unless told otherwise). `failed_backends` (1.4.0): each backend whose adapters could not be listed, with `backend` and `how` its listing process ended (crashed, with the module where Windows can say; or stopped after 60 s). Each backend is listed in a process of its own, so a graphics driver that crashes there costs only its backend; a render that names no backend leaves a failed one out. Usually empty |
 | `ffmpeg` | `path` (optional) | `found`. When found: `path`, `source` (where it was found), `version`, and `containers`, each with `ext`, `encoder`, `available`, `lossy`, `preset`. When not: `error` |
 | `options` | | `options`: every render option; see [Render options](#render-options) |
 | `inspect_midi` | `path` | Instant, reads only the header. `valid`, and then `size`, `format`, `tracks`, `division` (`{"ppq": 960}`, or `{"smpte_fps", "ticks_per_frame"}`) and `warnings` (worth showing, never fatal); or `reason` when it is not a usable MIDI |
@@ -58,13 +58,13 @@ A session can list GPUs and ffmpeg, describe MIDIs and soundfonts, list every re
 
 Soundfonts in a list are layered in order: each one replaces whatever the ones before it define at the same bank and program. Put a General MIDI bank first and an instrument after it. `sf_programs` places the last soundfont on those programs of bank 0, spelled as `--sf-programs` takes it: `"0,1"` or `"0-7"`.
 
-A render with no `soundfonts` uses the loaded ones. **A loaded soundfont is reused** by every render that would load it the same way, which saves the load time on each render (seconds on a large library). A render that changes an option marked `reloads_soundfonts`, such as `rate`, loads again, and that becomes the loaded set. (`volume` did too until 1.2.1; it is applied to the output now and never reloads.) A render that names different `soundfonts` does the same. From 1.2.3 there is one more case: without `pool_budget`, the budget is sized from the GPU, so a render whose `gpu_adapter` or `gpu_backend` picks a card with a different budget also loads again.
+A render with no `soundfonts` uses the loaded ones. **A loaded soundfont is reused** by every render that would load it the same way, which saves the load time on each render (seconds on a large library). A render that changes an option marked `reloads_soundfonts`, such as `rate`, loads again, and that becomes the loaded set. (`volume` did too until 1.2.1; it is applied to the output now and never reloads.) A render that names different `soundfonts` does the same.
 
 Analytic phase options, such as `"phase_mode": "analytic"` and `"phase_seed": 42`, reuse the loaded soundfont. Quadrature is prepared separately for each render, with log progress during `loading_soundfont` and cancellation checks inside preparation. Cancellation there creates no output file. See [analytic phase controls](docs/analytic-phase-rotation.md).
 
 ## Batch
 
-`batch` renders several MIDIs, one after another, each with the soundfonts it is given: N MIDIs make N files. One MIDI on several sets is several jobs with the same `midi`. Every job is an ordinary render, so **each file is byte-identical to the same MIDI rendered by itself** with the same options. It is the same feature as `kestrel --force-cli render a.mid b.mid` and `kestrel --force-cli batch jobs.json`, and its rules are the ones in [docs/batch.md](docs/batch.md).
+`batch` renders several MIDIs, one after another, each with the soundfonts it is given: N MIDIs make N files. One MIDI on several sets is several jobs with the same `midi`. Every job is an ordinary render, so **each file is byte-identical to the same MIDI rendered by itself** with the same options. It is the same feature as `kestrel --force-cli render a.mid b.mid` and `kestrel --force-cli batch jobs.json`, and its rules are the ones in `BATCH.md`.
 
 ```json
 {"id": 9, "cmd": "batch", "out": "C:/renders", "options": {"max_voices": 500000},
@@ -114,7 +114,7 @@ It is **refused, with the reason in the error, and nothing starts**, if anything
 ```json
 {"key": "max_voices", "flag": "--max-voices", "kind": "value", "default": "1048576", "values": [],
  "value_name": "MAX_VOICES", "reloads_soundfonts": false, "help": "Most voices sounding at once. ..."}
-{"key": "limiter", "flag": "--limiter", "kind": "value", "default": "brickwall", "values": ["brickwall", "omni", "off"], "...": "..."}
+{"key": "limiter", "flag": "--limiter", "kind": "value", "default": "balanced", "values": ["balanced", "brickwall", "omni", "off"], "...": "..."}
 {"key": "note_grid", "flag": "--note-grid", "kind": "switch", "default": false, "...": "..."}
 ```
 
@@ -139,7 +139,7 @@ While it runs, a render sends these lines, each with its `id`:
 | Type | When | Carries |
 |---|---|---|
 | `config` | after `set_interval` or `cancel` | `interval_ms`, `cancel_requested` |
-| `phase` | each change | `phase`: `loading_soundfont`, `opening_midi`, `preparing_device`, `rendering`, `finishing`, then `finished`, `cancelled` or `failed`; `t`, seconds since the render began |
+| `phase` | each change | `phase`: `loading_soundfont`, `opening_midi`, `preparing_device`, `rendering`, `finishing`, then `finished`, `cancelled` or `failed`; `t`, seconds since the render began. Merlin's per-key render is inside its first block until its last key is done, so its stages are on the progress lines, not here (below) |
 | `setup` | once the GPU is ready | `backend`, `adapter`, `device_bytes`, `tracks`, `max_voices`, `bytes_total` |
 | `progress` | every `interval_ms`, and once at the end | see below |
 | `log` | as they happen | `level` (`info`, `warn`, `error`), `message` |
@@ -156,6 +156,8 @@ Then the `response`. Log lines are written the moment they happen and the other 
 - `eta_secs`: seconds left, once there is enough to estimate from.
 
 Any of these can be `null` before it is known.
+
+A per-key merlin render (`"backend": "merlin"`) reads no events, so its lines add `merlin`: `stage` (`waiting`, for the moment before the pre-pass begins; `arming`, the pre-pass; `rendering`, the keys; `mastering`, the master handed out), `stage_secs`, `pre_bytes`, `pre_total` and `pre_notes` of the pre-pass, `keys_total`, `keys_done`, `notes_total` and `notes_done`, the key in hand (`key`, `key_notes`, `key_frac`, 0 to 1), `overall` (note-ons rendered, 0 to 1), `device_busy`, `store` (bytes and events), `master_blocks` and `windows`. While `stage` is `arming` the line's `phase` is `arming`, which is not an event. Its `progress` is the bytes read in `arming`, `overall` in `rendering` and the blocks handed out in `mastering`; its estimate waits for three keys and a twentieth of the note-ons. Cancelling stops it at any stage, the pre-pass included, and the render ends `cancelled` with nothing written; there is no resume, so a merlin render saves no checkpoint and sends no warning about it, and a batch job on merlin is stopped the same way. **Merlin refuses what it will not take, as an error response and before it loads the soundfont for the size:** a MIDI of 200 GB (200,000,000,000 bytes) or more, and one of more than 25 billion note-ons (found by the pre-pass, which stops as soon as it is past), each saying which limit and by how much; there is no option past them and no fall back to another backend. A 31-EDO file and `min_velocity` are refused by the key parser at the pre-pass.
 
 A per-track render -- the `tracks` option, with `merge` for one file or without it for a folder of stems -- renders many tracks at once, so its lines add `per_track` once it is rendering: `total`, `done` and `running` tracks, `stole` (finished tracks that stole voices), `blocks`, `silent_blocks`, `blocks_total`, `span_blocks`, `span_total`, `notes_total`, `length_secs`, `voices_each`, `merged`, and `now`, up to three of the busiest tracks still going, each with `track` (from 1), `name` and `secs` rendered. Its `progress` is 0.55 × `notes` out of `notes_total` + 0.45 × `span_blocks` out of `span_total`. `span_blocks` counts the blocks each track renders from its first note to its last. The time goes on the notes and on those blocks; the silent blocks outside them never reach the GPU. `notes_total` is 0 when `seconds` cuts the render short, and `progress` is then the spans alone. Its `speed` is of the file being made, `length_secs` times `progress` per second of rendering, which is the figure the summary ends on. The fields above are then summed over the tracks: `audio_secs` counts every track's audio, silence and all, and `peak_level` is the loudest track's. A normal render's lines have no `per_track`.
 

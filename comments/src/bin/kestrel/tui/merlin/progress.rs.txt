@@ -1,0 +1,43 @@
+# Comments extracted from src/bin/kestrel/tui/merlin/progress.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/bin/kestrel/tui/merlin/progress.rs:5
+//! Merlin's render screen: one reader of a `session::Monitor`, as Kestrel's is,
+//! drawing what a per-key render has to say.
+//!
+//! Three stages, which `Snapshot::merlin` says and the monitor puts in the
+//! snapshot's phase while the session thread is inside the render's first
+//! block. **Arming** is the pre-pass over the whole file, a bar of the bytes
+//! read. **Rendering** is the keys, with two bars: the whole render, by the
+//! note-ons of the keys done, and the key in hand, by how far through the song
+//! its windows have got. **Mastering** is the master handed out through the
+//! limiter and the encoder, a bar of its blocks.
+//!
+//! Ctrl+C stops it at any stage, after a second press, and nothing is kept: a
+//! merlin render cannot be resumed, so there is no choice to offer.
+
+[2] src/bin/kestrel/tui/merlin/progress.rs:36
+    /// Its PCI vendor and device: the card's memory is watched by them, since a
+    /// merlin render does not report its adapter to the monitor.
+
+[3] src/bin/kestrel/tui/merlin/progress.rs:53
+/// What the screen is showing, which the snapshot's phase and its merlin stage
+/// settle between them.
+
+[4] src/bin/kestrel/tui/merlin/progress.rs:260
+    /// Every stage is a rectangle, from the widest the panel goes to the
+    /// narrowest, and the footer fits in it.
+
+[5] src/bin/kestrel/tui/merlin/progress.rs:285
+    /// The snapshot's phase and its merlin stage settle what is shown, and a
+    /// finished or stopped render is shown as that whatever its stage was.
+
+[6] src/bin/kestrel/tui/merlin/progress.rs:381
+    /// Not a test: every stage of the screen, as text, to look at.
+    ///
+    ///     cargo test print_the_stages -- --ignored --nocapture

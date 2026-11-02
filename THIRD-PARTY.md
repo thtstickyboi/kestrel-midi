@@ -52,7 +52,9 @@ All are permissive and none are copyleft. Full texts are reproduced by `cargo ab
 | `log` | MIT OR Apache-2.0 |
 | `memory-stats` | MIT OR Apache-2.0 |
 | `pollster` | Apache-2.0/MIT |
+| `rayon` | MIT OR Apache-2.0 |
 | `rfd` | MIT |
+| `rustc-hash` | Apache-2.0/MIT |
 | `serde` | MIT OR Apache-2.0 |
 | `serde_json` | MIT OR Apache-2.0 |
 | `unicode-width` | MIT OR Apache-2.0 |
@@ -61,13 +63,17 @@ All are permissive and none are copyleft. Full texts are reproduced by `cargo ab
 
 `encoding_rs` decodes track names that are not UTF-8, such as Shift-JIS, for per-track rendering. The BSD-3-Clause in its licence covers the WHATWG encoding data it carries, so a distributed binary owes that notice too. It brings five crates of its own, all MIT or Apache-2.0: `simdutf8`, `multiversion`, `multiversion-macros`, `multiversion_no_op` and `core_detect`.
 
+`rayon` spreads Merlin's planning and packing, and the MIDI reader, over the CPU's cores, only through calls that keep the order of their results, so the output does not depend on the thread count. It brings three crates of its own, all MIT or Apache-2.0: `rayon-core`, `crossbeam-deque` (with `crossbeam-epoch` and `crossbeam-utils`) and `either`.
+
+`rustc-hash` is a fast hasher for Merlin's per-note maps, whose iteration order never reaches the output.
+
 `fs4` checks the free space on the drive a per-track render writes its stems to, before it starts.
 
 `rfd` opens the native file pickers. On Linux it is built against the desktop portal rather than GTK, so it links no system library there either.
 
 `claxon` is the FLAC decoder and is the one dependency here that is Apache-2.0 only rather than dual-licensed. It is also the only decoder in the project that is not hand-written; everything in `src/wav.rs` is Kestrel's own.
 
-`windows` is used only by `src/gpu/vram.rs`, to read whole-GPU memory figures on Windows.
+`windows` is used by `src/gpu/vram.rs`, to read whole-GPU memory figures on Windows, and by FalconEye in `src/falconeye/winsys.rs`, for crash details, the machine report, and reading the output of Windows' own tools in the system's code page.
 
 ---
 

@@ -26,6 +26,7 @@ use kestrel::{gpu, load_bank};
 use kestrel::{testkit, wav};
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::time::Instant;
 
 /// The version `--version` prints, marked when this is a dev build so a bug
 /// report says which option set it came from. See the `dev` feature.
@@ -125,6 +126,35 @@ enum Cmd {
         #[arg(short = 's', long = "soundfont")]
         soundfont: Option<PathBuf>,
     },
+    /// Cut a MIDI into N note-slice streams, for material too dense to render
+    /// whole.
+    ///
+    /// Merlin's host memory scales with notes *sounding at once*, and a file
+    /// whose peak is instantaneous cannot be split by time -- rendering that
+    /// one second alone costs what rendering the file costs. Splitting the
+    /// note set does bound it, and because merlin's mixdown is linear and it
+    /// drops nothing, the slices sum back to the whole render exactly.
+    ///
+    /// This is the parse half, and it exists because deciding slice membership
+    /// in the event loop would cost a full MIDI parse per slice: 600 s a pass
+    /// on a 15.8 GB file, or 2.7 hours across sixteen, against a render that
+    /// is minutes. Reading once and writing N compact streams is one
+    /// sequential pass over the file.
+    ///
+    /// Render each stream with `render --note-slice`, then sum the stems with
+    /// `cargo run --release --example merge_stems`.
+    Slice {
+        /// Input MIDI file.
+        midi: PathBuf,
+        /// How many slices to cut it into. Memory scales down by roughly this
+        /// factor and parse time does not scale up, so the only cost is disk
+        /// and the per-pass fixed overhead.
+        #[arg(short = 'n', long = "slices")]
+        slices: u16,
+        /// Directory for the streams and the manifest. Created if absent.
+        #[arg(short = 'o', long = "out")]
+        out: PathBuf,
+    },
     /// List a MIDI's tracks: how many notes each holds and at which
     /// velocities, its channels, when its notes start and stop, and which
     /// tracks carry only controllers. Every track is read on its own and in
@@ -153,8 +183,14 @@ enum Cmd {
         #[arg(long, default_value_t = -80.0)]
         threshold: f64,
     },
-    /// List the GPU adapters wgpu can see.
-    GpuInfo,
+    /// List the GPU adapters wgpu can see. Each backend is listed in a process
+    /// of its own, so a graphics driver that crashes while listing costs only
+    /// its backend, which is then named with how its listing ended.
+    GpuInfo {
+        /// Only this backend: vulkan, dx12, metal or gl.
+        #[arg(long = "gpu-backend", value_name = "NAME")]
+        gpu_backend: Option<String>,
+    },
     /// Report which ffmpeg encoded output would use, where it was found, and
     /// which containers this build can write. Exits non-zero if ffmpeg is
     /// missing or an encoder a preset needs is absent, so it works as a setup
@@ -195,6 +231,10 @@ enum Cmd {
         /// reads, and copies no dump.
         #[arg(long)]
         system: bool,
+        /// Only this backend's adapters, and the self-test only on them: vulkan,
+        /// dx12, metal or gl.
+        #[arg(long = "gpu-backend", value_name = "NAME")]
+        gpu_backend: Option<String>,
     },
     /// The machine report's administrator step, run elevated by `report
     /// --system`; never by hand. See `kestrel::falconeye::system`.
@@ -228,6 +268,17 @@ enum Cmd {
         /// The render's log.
         #[arg(long)]
         log: PathBuf,
+        /// What the log is the log of: a render, or the guided renderer's
+        /// environment check.
+        #[arg(long, default_value = kestrel::falconeye::renderlog::RENDER)]
+        subject: String,
+    },
+    /// One backend's GPU adapters, as JSON lines, for a listing in another
+    /// process to read; never by hand. See `kestrel::gpu::listing`.
+    #[command(hide = true)]
+    ListAdapters {
+        #[arg(long)]
+        backend: String,
     },
     /// Download an ffmpeg into an `ffmpeg/` directory beside this executable.
     ///
@@ -277,10 +328,31 @@ struct RenderArgs {
     /// Input MIDI file. Give several to render a batch: each becomes a file of
     /// its own in the folder -o names, all with the same soundfonts, one after
     /// another. For different soundfonts per MIDI, see `kestrel batch`.
-    midi: PathBuf,
+    #[arg(required_unless_present = "note_slice")]
+    midi: Option<PathBuf>,
     /// More MIDI files, for a batch. See `midi`.
     #[arg(value_name = "MORE_MIDI")]
     more_midi: Vec<PathBuf>,
+    /// Render one note-slice stream written by `kestrel slice` instead of a
+    /// MIDI file, and write it as a stem to be summed later.
+    ///
+    /// Opt-in, and off every ordinary render's path: a file that fits is
+    /// rendered whole, and nothing here changes what that does. This is for
+    /// material whose notes-sounding-at-once will not fit in RAM, where the
+    /// only way through is to render a partition of the note set a part at a
+    /// time and add the parts up.
+    ///
+    /// Use `--limiter off --format float32` with it. The limiter is not a
+    /// linear operator, so it has to run once on the sum -- limiting each
+    /// slice and adding them neither bounds the total nor sounds like the mix.
+    /// `examples/merge_stems.rs` does the sum and runs the same limiter a
+    /// whole render would have.
+    ///
+    /// Exact on `--backend merlin`, which has no pool and drops nothing.
+    /// The per-voice backends admit and steal by what is present, so a slice
+    /// of one is not a part of the whole; the renderer warns.
+    #[arg(long = "note-slice", value_name = "FILE", conflicts_with = "midi")]
+    note_slice: Option<PathBuf>,
     /// Soundfont, .sf2 or .sfz. Repeat to layer: each one is merged on top of
     /// the ones before it, and its presets replace anything already at the same
     /// bank and program. A General MIDI .sf2 followed by a piano .sfz gives GM
@@ -315,10 +387,10 @@ struct RenderArgs {
     #[arg(long = "ffmpeg", value_name = "PATH")]
     ffmpeg: Option<PathBuf>,
 
-    /// Which renderer: the GPU, or the single-threaded CPU reference the GPU
-    /// is checked against. The CPU path exists for null tests and is far too
-    /// slow for real material.
-    #[arg(long, default_value = "gpu", value_parser = ["cpu", "gpu"])]
+    /// Which renderer: the GPU, the single-threaded CPU reference the GPU is
+    /// checked against, or merlin, the experimental convolution backend. The
+    /// CPU path exists for null tests and is far too slow for real material.
+    #[arg(long, default_value = "gpu", value_parser = ["cpu", "gpu", "merlin"])]
     backend: String,
     /// Output sample rate in Hz. Every sample in the soundfont is converted to
     /// it when the soundfont loads.
@@ -381,6 +453,16 @@ struct RenderArgs {
     /// notes, which render silent without it. Costs about 12% of the render.
     #[arg(long = "note-grid")]
     note_grid: bool,
+    /// How tempo changes are timed: bassmidi (the default) as BASSMIDI's own
+    /// MIDI player does, where a change takes effect on the next whole sample
+    /// and the ticks it ran past carry over; or exact, the tempo map as written,
+    /// as OmniConverter plays it. They differ only on files with many tempo
+    /// changes, such as tempo tricks: by a few milliseconds, or by seconds over
+    /// a song when the tempo jumps by thousands of times. Exact is also the
+    /// same length at every --rate.
+    #[arg(long = "tempo-timing", value_name = "bassmidi|exact", default_value = "bassmidi",
+        value_parser = ["bassmidi", "exact"])]
+    tempo_timing: String,
     /// Play the file as the 31-EDO template writes it: note keys 0 to 255,
     /// one step of the 31-step octave each, sounded on three channels that the
     /// file's own tuning messages set a few tens of cents apart. A file written
@@ -480,9 +562,21 @@ struct RenderArgs {
     /// the limiter still spends its headroom on; this takes them out.
     #[arg(long = "dc-blocker")]
     dc_blocker: bool,
-    /// Which limiter: brickwall (lookahead true-peak, the default), off, or
+    /// Render duplicate notes -- the same channel, key, velocity, tick and
+    /// release, as layered tracks write them -- as one voice at their summed
+    /// gain: on (the default) or off. The same sound to within float rounding;
+    /// on a dense file far more of it is heard, because fewer voices are stolen
+    /// or dropped.
+    #[arg(long = "coalesce", value_name = "on|off", default_value = "on", num_args = 0..=1,
+        default_missing_value = "on", value_parser = parse_on_off)]
+    coalesce: bool,
+    /// Which limiter: balanced (the default: the mix goes in 2.5 dB lower, sustained
+    /// loud passages are levelled before the brickwall so the peaks are not
+    /// pinned at the ceiling, about omni's level and 3 dB under the brickwall's,
+    /// and a loud burst is let go of in about 150 ms where omni takes half a
+    /// second), brickwall (lookahead true-peak, the default until balanced), off, or
     /// omni (the OmniConverter port, deprecated for rendering).
-    #[arg(long, default_value = "brickwall", value_parser = ["brickwall", "omni", "off"])]
+    #[arg(long, default_value = "balanced", value_parser = ["balanced", "brickwall", "omni", "off"])]
     limiter: String,
     /// Brickwall ceiling in dBFS. Defaults to 0 (flat full scale) for .wav and
     /// .flac, and to -1 for the lossy containers, which need headroom because
@@ -602,6 +696,12 @@ struct DevArgs {
     /// Brickwall release in ms.
     #[arg(long = "limiter-release-ms", default_value_t = 60.0)]
     limiter_release_ms: f64,
+    /// How long the brickwall keeps its gain after a peak before it lets go, in
+    /// ms. It stops a steady low note from modulating the gain once a half-cycle,
+    /// which is distortion: -31 dB at 30 Hz without it. 0 is the limiter as it
+    /// was before the hold existed, exactly.
+    #[arg(long = "limiter-hold-ms", default_value_t = 20.0)]
+    limiter_hold_ms: f64,
     /// Time constant of the brickwall's sustained stage, in ms. 0, the default,
     /// disables it: it measured worse on saturated black MIDI.
     #[arg(long = "limiter-sustain-ms", default_value_t = 0.0)]
@@ -654,12 +754,162 @@ struct DevArgs {
     /// anything upstream miscounts.
     #[arg(long = "unchecked-shaders")]
     unchecked_shaders: bool,
+    /// Distinct cached entries --`(waveform, release reference)` pairs --
+    /// merlin may hold. Also sets the default kernel cache budget.
+    #[arg(long = "merlin-entries")]
+    merlin_entries: Option<u32>,
+    /// Distinct cached waveforms merlin may hold. Far fewer than entries: a
+    /// waveform's release buckets share one.
+    #[arg(long = "merlin-waves")]
+    merlin_waves: Option<u32>,
+    /// Kernel cache budget in MiB. Default derives it from `--merlin-entries`.
+    #[arg(long = "merlin-cache-mb")]
+    merlin_cache_mb: Option<u32>,
+    /// Host budget for cached sustain renders in MiB, which is a different
+    /// cache from `--merlin-cache-mb`: those are the device's kernel spectra,
+    /// these are the CPU renders they are built from. One f32 per frame per
+    /// waveform, so a file wanting 76,912 of them held 21.5 GiB before this
+    /// existed. Zero is unlimited. Lowering it trades RAM for build time.
+    #[arg(long = "merlin-host-mb")]
+    merlin_host_mb: Option<u32>,
+    /// Build merlin's sustain waveforms on the device in batches (on) or one at
+    /// a time on the CPU (off, the default until the device is faster).
+    #[arg(long = "merlin-gpu-build", value_name = "on|off", value_parser = parse_on_off)]
+    merlin_gpu_build: Option<bool>,
+    /// Notes a waveform must be asked for before merlin gives it a kernel;
+    /// everything below this renders on the ordinary per-voice path. This is
+    /// the per-voice fallback. 0 convolves everything, which is what a null
+    /// test against the pure convolution path wants. Default 256, from the
+    /// measured use-count distribution: it routes 87% of one test file's
+    /// entries and moves 2.5% of its notes.
+    #[arg(long = "merlin-promote-after")]
+    merlin_promote_after: Option<u32>,
+    /// Price the per-entry tail correction for CC7 without changing a sample:
+    /// counts the impulses it would fire and the (entry, channel) pairs live
+    /// when a channel's gain moves. See option 2 of the design.
+    #[arg(long = "merlin-probe-tails")]
+    merlin_probe_tails: bool,
+    /// Cap one kernel at this many milliseconds. Default takes the bank's
+    /// longest release, which is what a kernel actually holds; capping below it
+    /// truncates the release rather than shortening the note.
+    #[arg(long = "merlin-kernel-ms")]
+    merlin_kernel_ms: Option<f64>,
+    /// Merlin's longest note, in milliseconds. Notes held longer are clamped to
+    /// it, never dropped. Costs `waves * ms * 48 * 4 B` of VRAM.
+    #[arg(long = "merlin-head-ms")]
+    merlin_head_ms: Option<f64>,
+    /// Ceiling on firing *rows* in one partition step -- not the entry count,
+    /// and larger, since an entry heard on several velocity buses takes a row
+    /// on each. Costs about 50 MiB per thousand rows across three buffers.
+    #[arg(long = "merlin-fired")]
+    merlin_fired: Option<u32>,
+    /// Ceiling on impulses in one partition step. A note is one impulse per
+    /// stereo layer per bus, so four, and head corrections share the buffer.
+    #[arg(long = "merlin-impulses")]
+    merlin_impulses: Option<u32>,
+    /// Release buckets per waveform. More buckets means a narrower bucket, which
+    /// is a shorter emit lag and so less host memory held in flight -- and more
+    /// distinct entries, which is more kernel cache. Nothing else in merlin
+    /// trades those two against each other.
+    #[arg(long = "merlin-release-buckets")]
+    merlin_release_buckets: Option<u32>,
+    /// Seconds of release the buckets span. Notes held longer all land in the
+    /// last bucket, so lowering this caps `Dj` for long notes and makes section
+    /// 3b's scalar amplify harder; raising it widens every bucket.
+    #[arg(long = "merlin-release-tail")]
+    merlin_release_tail: Option<f64>,
+    /// Pretend one storage binding holds only this many KiB, forcing merlin's
+    /// two note-sized staging lists to scatter in several passes. A debugging
+    /// knob: the default is the adapter's real limit, and the chunked path is
+    /// bit-identical to the single-pass one.
+    #[arg(long = "merlin-max-binding-kb")]
+    merlin_max_binding_kb: Option<u32>,
+    /// Round channel bend to this many cents before it reaches merlin's cache
+    /// key. Zero, the default, is exact. Trades pitch accuracy for entries, and
+    /// a null test measures this knob rather than the convolution unless it is
+    /// zero.
+    #[arg(long = "merlin-bend-cents")]
+    merlin_bend_cents: Option<f64>,
+    /// Round merlin's filter cutoffs to this many cents, so notes share
+    /// buses. The default is 400, which the per-key render measured and the
+    /// user could not tell from exact; zero is exact. A null test measures this
+    /// knob rather than the render unless it is zero.
+    #[arg(long = "merlin-filter-cents")]
+    merlin_filter_cents: Option<f64>,
+    /// Run key-major merlin's bucket pass instead of merlin: every note filed
+    /// by key with its length, silence written, a summary logged. No GPU.
+    #[arg(long = "merlin-bucket-pass")]
+    merlin_bucket_pass: bool,
+    /// Render with the older time-major merlin, which walks the file in order
+    /// and holds the voices that sound together, in place of the per-key render
+    /// that `--backend merlin` is. Kept for comparison until it is retired.
+    #[arg(long = "merlin-time-major", hide = true)]
+    merlin_time_major: bool,
+    /// Merlin: a (block, entry) pair with fewer impulses than
+    /// this is added in the time domain, not transformed. 0 transforms all.
+    #[arg(long = "merlin-km-direct-below")]
+    merlin_km_direct_below: Option<u32>,
+    /// Merlin: frames of a sustain segment, which plays a still
+    /// note's body as kernels. 0 leaves every body on its head.
+    #[arg(long = "merlin-km-segment")]
+    merlin_km_segment: Option<u32>,
+    /// Merlin: frames of sustains one pool on the device holds.
+    #[arg(long = "merlin-km-pool-frames")]
+    merlin_km_pool_frames: Option<u32>,
+    /// Merlin: records of a key planned at once.
+    #[arg(long = "merlin-km-plan-records")]
+    merlin_km_plan_records: Option<u32>,
+    /// Merlin's notes under a bend keep it as it moves, read back through the
+    /// channel's warped time (a user's resampling idea), so their envelopes stretch
+    /// with it. On by default; this is the way back to a bend fixed at the
+    /// note-on, for comparing.
+    #[arg(long = "merlin-no-warp", hide = true)]
+    merlin_no_warp: bool,
+    /// Merlin: note-ons of one key past which it is streamed.
+    #[arg(long = "merlin-km-stream-notes")]
+    merlin_km_stream_notes: Option<u32>,
+    /// Merlin: records of a streamed key held in memory.
+    #[arg(long = "merlin-km-stream-held")]
+    merlin_km_stream_held: Option<u32>,
+    /// Merlin: records of a streamed key handed over at a time.
+    #[arg(long = "merlin-km-stream-part")]
+    merlin_km_stream_part: Option<u32>,
+    /// The bucket store's memory in MiB, past which it spills to a file. Zero,
+    /// the default, is a sixteenth of total RAM, 256 MiB to 2 GiB.
+    #[arg(long = "merlin-bucket-mb")]
+    merlin_bucket_mb: Option<u32>,
+    /// Log an order-free digest of every note merlin plans (or, with
+    /// --merlin-bucket-pass, of every note it says merlin would plan).
+    #[arg(long = "merlin-digest")]
+    merlin_digest: bool,
+    /// Pin how many distinct biquads merlin holds. Leave it out: by default the
+    /// count starts at the soundfont's own filters and grows as a file needs
+    /// more, up to what the card's ring holds at the soundfont's deepest
+    /// kernel. Pinning allocates every bus up front, and a count too high for
+    /// the soundfont cuts its release tails short.
+    #[arg(long = "merlin-filters")]
+    merlin_filters: Option<u32>,
     /// Hold each of the sample pool's device buffers to this many MiB, so a
     /// pool that fits one binding is split anyway; 0 is the adapter's binding.
     /// For checking a split render against the one-buffer render it must
     /// match byte for byte.
     #[arg(long = "pool-part-mib", default_value_t = 0)]
     pool_part_mib: u64,
+    /// With coalescing on: how many note-ons the look-ahead reads past a note it
+    /// is still waiting to see released before it renders that one unmerged.
+    /// 16 bytes a note-on at most.
+    #[arg(long = "coalesce-window", value_name = "NOTES", default_value_t = 1 << 22,
+        value_parser = clap::value_parser!(u32).range(1..))]
+    coalesce_window: u32,
+    /// Threads beside the drain's own that read the MIDI for it. 0 reads it all
+    /// on the drain's thread, as before 2026-10-16. The same bytes on any number.
+    #[arg(long = "drain-threads", value_name = "N", default_value_t = kestrel::Config::default().drain_threads)]
+    drain_threads: usize,
+    /// Tracks one of those threads merges before a reading of the file gets
+    /// another, up to --drain-threads. 1 (or 0) gives every file all of them.
+    #[arg(long = "drain-tracks-per-worker", value_name = "TRACKS",
+        default_value_t = kestrel::Config::default().drain_tracks_per_worker)]
+    drain_tracks_per_worker: usize,
 }
 
 impl DevArgs {
@@ -672,6 +922,16 @@ impl DevArgs {
         let cmd = DevArgs::augment_args(clap::Command::new("dev"));
         DevArgs::from_arg_matches(&cmd.get_matches_from(["dev"]))
             .expect("every developer option has a default")
+    }
+}
+
+/// `--coalesce on|off`. A bare `--coalesce` is `on`, which is what it meant when
+/// it was a switch, so a command line written then still parses.
+fn parse_on_off(s: &str) -> std::result::Result<bool, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "on" | "yes" | "true" => Ok(true),
+        "off" | "no" | "false" => Ok(false),
+        _ => Err(format!("'{s}' is not on or off")),
     }
 }
 
@@ -750,6 +1010,8 @@ impl RenderArgs {
             max_steal_percent: self.steal_percent,
             min_velocity: self.min_velocity,
             note_grid: self.note_grid,
+            tempo_timing: kestrel::midi::TempoTiming::parse(&self.tempo_timing)
+                .with_context(|| format!("unknown tempo timing {:?}", self.tempo_timing))?,
             edo31: self.edo31,
             // No flag lays a tuning over every key: `--edo`, `--scala`, `--kbm` and
             // `--tuning-ref` were retired before 1.3.0 shipped, since the only files
@@ -768,6 +1030,7 @@ impl RenderArgs {
             limiter_lookahead_ms: dev.lookahead_ms,
             limiter_release_ms: dev.limiter_release_ms,
             limiter_sustain_ms: dev.limiter_sustain_ms,
+            limiter_hold_ms: dev.limiter_hold_ms,
             limiter_true_peak: !dev.no_true_peak,
             filter_enabled: !dev.no_filter,
             gain_ramp: !dev.no_gain_ramp,
@@ -776,6 +1039,10 @@ impl RenderArgs {
             mod_env_enabled: !dev.no_mod_env,
             sort_voices: !dev.no_sort,
             skip_silence: !dev.no_skip_silence,
+            coalesce: self.coalesce,
+            coalesce_window: dev.coalesce_window,
+            drain_threads: dev.drain_threads,
+            drain_tracks_per_worker: dev.drain_tracks_per_worker,
             resample_pool: !self.no_resample_pool,
             profile: self.profile,
             gpu_backend: self.gpu_backend.clone(),
@@ -796,6 +1063,95 @@ impl RenderArgs {
             cfg.nan_guard = true;
         }
         cfg.unchecked_shaders = dev.unchecked_shaders;
+        if let Some(e) = dev.merlin_entries {
+            cfg.merlin_max_entries = e;
+        }
+        if let Some(w) = dev.merlin_waves {
+            cfg.merlin_max_waves = w;
+        }
+        if let Some(mb) = dev.merlin_host_mb {
+            cfg.merlin_host_mb = mb;
+        }
+        if let Some(on) = dev.merlin_gpu_build {
+            cfg.merlin_gpu_build = on;
+        }
+        if let Some(n) = dev.merlin_promote_after {
+            cfg.merlin_promote_after = n;
+        }
+        cfg.merlin_probe_tails = dev.merlin_probe_tails;
+        if let Some(mb) = dev.merlin_cache_mb {
+            cfg.merlin_cache_mb = mb;
+        }
+        if let Some(ms) = dev.merlin_kernel_ms {
+            cfg.merlin_kernel_frames = (ms * cfg.sample_rate as f64 / 1000.0) as u32;
+        }
+        if let Some(ms) = dev.merlin_head_ms {
+            cfg.merlin_head_frames = (ms * cfg.sample_rate as f64 / 1000.0) as u32;
+        }
+        if let Some(f) = dev.merlin_fired {
+            cfg.merlin_max_fired = f;
+        }
+        if let Some(i) = dev.merlin_impulses {
+            cfg.merlin_max_impulses = i;
+        }
+        if let Some(k) = dev.merlin_max_binding_kb {
+            cfg.merlin_max_binding_kb = k;
+        }
+        if let Some(b) = dev.merlin_release_buckets {
+            cfg.merlin_release_buckets = b;
+        }
+        if let Some(t) = dev.merlin_release_tail {
+            cfg.merlin_release_tail = t;
+        }
+        if let Some(c) = dev.merlin_bend_cents {
+            cfg.merlin_bend_cents = c;
+        }
+        // What `--backend merlin` is: the per-key render on the device, from
+        // merlin's own key parser, with the filters on a grid of 400 cents
+        // (`merlin::plan::bus_filter`; the user could not tell it from exact,
+        // 2026-10-31). `Config::default()` keeps the older path for library
+        // callers and tests, as it keeps the brickwall limiter.
+        let per_key = self.backend == "merlin" && !dev.merlin_time_major;
+        if per_key {
+            cfg.merlin_key_major = true;
+            cfg.merlin_key_major_gpu = true;
+            cfg.merlin_key_parse = true;
+            cfg.merlin_filter_cents = 400.0;
+            // A note under a moving bend follows it (the user, 2026-11-02).
+            cfg.merlin_km_warp = !dev.merlin_no_warp;
+        }
+        if let Some(c) = dev.merlin_filter_cents {
+            cfg.merlin_filter_cents = c;
+        }
+        cfg.merlin_bucket_pass = dev.merlin_bucket_pass;
+        if let Some(n) = dev.merlin_km_direct_below {
+            cfg.merlin_km_direct_below = n;
+        }
+        if let Some(n) = dev.merlin_km_segment {
+            cfg.merlin_km_segment = n;
+        }
+        if let Some(n) = dev.merlin_km_pool_frames {
+            cfg.merlin_km_pool_frames = n;
+        }
+        if let Some(n) = dev.merlin_km_plan_records {
+            cfg.merlin_km_plan_records = n;
+        }
+        if let Some(n) = dev.merlin_km_stream_notes {
+            cfg.merlin_km_stream_notes = n;
+        }
+        if let Some(n) = dev.merlin_km_stream_held {
+            cfg.merlin_km_stream_held = n;
+        }
+        if let Some(n) = dev.merlin_km_stream_part {
+            cfg.merlin_km_stream_part = n;
+        }
+        if let Some(mb) = dev.merlin_bucket_mb {
+            cfg.merlin_bucket_mb = mb;
+        }
+        cfg.merlin_digest = dev.merlin_digest;
+        if let Some(f) = dev.merlin_filters {
+            cfg.merlin_max_filters = f;
+        }
         cfg.pool_part_bytes = dev.pool_part_mib << 20;
         // After the adapter flags, which it sizes for.
         cfg.sample_pool_budget = match self.pool_budget {
@@ -830,10 +1186,10 @@ impl RenderArgs {
         cfg.admit_rule = AdmitRule::parse(&dev.admit)
             .with_context(|| format!("unknown admit rule {:?}", dev.admit))?;
         cfg.validate()?;
-        let kind = if self.backend == "cpu" {
-            BackendKind::Cpu
-        } else {
-            BackendKind::Gpu
+        let kind = match self.backend.as_str() {
+            "cpu" => BackendKind::Cpu,
+            "merlin" => BackendKind::Merlin,
+            _ => BackendKind::Gpu,
         };
         Ok((cfg, kind))
     }
@@ -844,8 +1200,11 @@ impl RenderArgs {
 enum Route {
     /// No arguments: the guided renderer.
     Guided,
-    /// The Extras window the guided renderer opens.
-    Extras,
+    /// The Extras window the guided renderer opens, and the process it came
+    /// from.
+    Extras(Option<u32>),
+    /// Merlin's own window.
+    Merlin,
     /// Arguments without `--force-cli`: a pointer to the guided renderer.
     Notice,
     /// `--force-cli`, or a request for help or the version.
@@ -858,7 +1217,15 @@ fn route(args: &[OsString]) -> Route {
         return Route::Guided;
     }
     if args.len() == 1 && is(&args[0], tui::extras::FLAG) {
-        return Route::Extras;
+        return Route::Extras(None);
+    }
+    if args.len() == 3 && is(&args[0], tui::extras::FLAG) && is(&args[1], tui::extras::PARENT) {
+        if let Some(pid) = args[2].to_str().and_then(|p| p.parse().ok()) {
+            return Route::Extras(Some(pid));
+        }
+    }
+    if args.len() == 1 && is(&args[0], tui::merlin::FLAG) {
+        return Route::Merlin;
     }
     if args.iter().any(|a| is(a, "--force-cli")) {
         return Route::Cli;
@@ -904,10 +1271,16 @@ impl log::Log for Tee {
 }
 
 fn main() -> Result<()> {
+    // Every front end lists GPU adapters a backend a process, so a driver that
+    // crashes while listing costs that backend and not Kestrel (`gpu::listing`).
+    if let Ok(exe) = std::env::current_exe() {
+        kestrel::gpu::listing::isolate_with(exe);
+    }
     let raw: Vec<OsString> = std::env::args_os().skip(1).collect();
     match route(&raw) {
         Route::Guided => return tui::run(),
-        Route::Extras => return tui::extras::run(),
+        Route::Extras(parent) => return tui::extras::run(parent),
+        Route::Merlin => return tui::merlin::run(),
         Route::Notice => {
             tui::notice(&raw);
             std::process::exit(2);
@@ -942,6 +1315,7 @@ fn main() -> Result<()> {
             sf_release,
             soundfont,
         } => info(path, block, rate, sf_layers, sf_release, soundfont),
+        Cmd::Slice { midi, slices, out } => slice(midi, slices, out),
         Cmd::Tracks {
             midi,
             jobs,
@@ -950,7 +1324,7 @@ fn main() -> Result<()> {
         } => tracks(midi, jobs, rate, min_velocity),
         #[cfg(feature = "dev")]
         Cmd::Null { a, b, threshold } => null(a, b, threshold),
-        Cmd::GpuInfo => gpu::print_adapters(),
+        Cmd::GpuInfo { gpu_backend } => gpu::print_adapters(gpu_backend.as_deref()),
         Cmd::FfmpegInfo { ffmpeg } => ffmpeg_info(ffmpeg),
         Cmd::CheckUpdate => update::run_cli(),
         Cmd::GetFfmpeg {
@@ -959,12 +1333,13 @@ fn main() -> Result<()> {
             accept_hash,
             dir,
         } => get_ffmpeg(dry_run, yes, accept_hash, dir),
-        Cmd::Falconeye { pid, log } => kestrel::falconeye::watch::run(&log, pid),
+        Cmd::Falconeye { pid, log, subject } => kestrel::falconeye::watch::run(&log, pid, &subject),
+        Cmd::ListAdapters { backend } => kestrel::gpu::listing::serve(&backend),
         Cmd::FalconeyeSystem { out } => kestrel::falconeye::system::collect(&out),
         Cmd::FalconeyeSelftest { adapter, backend, max_voices, sf } => {
             kestrel::falconeye::selftest::serve(&sf, &adapter, &backend, max_voices)
         }
-        Cmd::Report { no_self_test, out, system } => {
+        Cmd::Report { no_self_test, out, system, gpu_backend } => {
             eprintln!("{}\n", kestrel::falconeye::report::HEADER);
             let path = kestrel::falconeye::report::build(
                 kestrel::falconeye::report::Options {
@@ -973,6 +1348,7 @@ fn main() -> Result<()> {
                     out_dir: out,
                     elevate_with: if system { Some(std::env::current_exe()?) } else { None },
                     isolate_with: std::env::current_exe().ok(),
+                    gpu_backend,
                 },
                 &mut |l| eprintln!("{l}"),
             )?;
@@ -1174,7 +1550,7 @@ fn tracks(midi: PathBuf, jobs: usize, rate: u32, min_velocity: Option<u8>) -> Re
         ticks.push(t.first_note.unwrap_or(0));
         ticks.push(t.last_note.unwrap_or(0));
     }
-    let secs: Vec<f64> = s.frames_at(&ticks, rate).iter().map(|f| f / rate as f64).collect();
+    let secs: Vec<f64> = s.frames_at(&ticks, rate, kestrel::midi::TempoTiming::default()).iter().map(|f| f / rate as f64).collect();
 
     let name = midi
         .file_name()
@@ -1410,6 +1786,9 @@ fn info(
         // block is admitted as a whole, so every note-on inside it is held
         // until the block ends, whether or not the pool can take it.
         let mut clock = kestrel::midi::TempoClock::new(s.division, rate);
+        // The other timing, only for the length: a file whose tempo map makes
+        // the two differ says so (`--tempo-timing`).
+        let mut exact = kestrel::midi::TempoClock::with_timing(s.division, rate, kestrel::midi::TempoTiming::Exact);
         let mut cur_block = 0u64;
         let mut in_block = 0u64;
         // One note-on count per block, kept so a sliding window over it can
@@ -1420,6 +1799,7 @@ fn info(
             last_tick = tick;
             if let kestrel::midi::Event::Tempo(us) = ev {
                 clock.set_tempo(tick, us);
+                exact.set_tempo(tick, us);
             }
             let b = clock.frame_at(tick) as u64 / block as u64;
             if b != cur_block {
@@ -1500,6 +1880,18 @@ fn info(
         }
         per_block[cur_block as usize] = in_block;
         println!("last tick {last_tick}");
+        let (played, written) = (clock.frame_at(last_tick), exact.frame_at(last_tick));
+        if played == written {
+            println!("length {:.3} s", played / rate as f64);
+        } else {
+            println!(
+                "length {:.3} s as BASSMIDI's player times it (the default); {:.3} s with --tempo-timing exact, \
+                 the tempo map as written. The {} tempo changes fall between samples",
+                played / rate as f64,
+                written / rate as f64,
+                counts[5]
+            );
+        }
 
         let (peak_block, peak_at) = per_block
             .iter()
@@ -1587,6 +1979,92 @@ fn info(
             p.regions.len()
         );
     }
+    Ok(())
+}
+
+/// The note-slice pre-pass: one read of the MIDI, N streams out.
+fn slice(midi: PathBuf, slices: u16, out: PathBuf) -> Result<()> {
+    if slices < 2 {
+        bail!(
+            "--slices {slices} would not split anything; use 2 or more. \
+             A file that renders whole should be rendered whole -- slicing \
+             costs a pass of fixed overhead each and buys nothing back."
+        );
+    }
+    let t0 = Instant::now();
+    let size = std::fs::metadata(&midi).map(|m| m.len()).unwrap_or(0);
+    log::info!(
+        "slicing {} ({}) into {} streams under {}",
+        midi.display(),
+        fmt_bytes(size),
+        slices,
+        out.display()
+    );
+
+    let mut last = Instant::now();
+    let sum = kestrel::slice::slice_file(&midi, &out, slices, |notes| {
+        if last.elapsed().as_secs_f64() > 1.0 {
+            let secs = t0.elapsed().as_secs_f64();
+            log::info!(
+                "{:>15} notes | {:.1} M notes/s",
+                notes,
+                notes as f64 / secs.max(1e-9) / 1e6
+            );
+            last = Instant::now();
+        }
+    })?;
+
+    let wall = t0.elapsed().as_secs_f64();
+    let written: u64 = sum.slices.iter().map(|s| s.bytes).sum();
+    log::info!(
+        "read {} events, {} notes in {:.2}s ({:.1} M notes/s)",
+        sum.source_events,
+        sum.source_notes,
+        wall,
+        sum.source_notes as f64 / wall.max(1e-9) / 1e6
+    );
+    if sum.strays > 0 {
+        // Not a warning: files do this, and `GateTable` has always ignored
+        // them. It is reported because a large count would mean the source
+        // pairs its notes in some way the slicer has not anticipated, and
+        // that *would* be a correctness problem.
+        log::info!(
+            "{} note-offs had nothing sounding and were dropped, as a whole render drops them",
+            sum.strays
+        );
+    }
+
+    // The evenness claim, checked rather than asserted. Striping within each
+    // (channel, key) slot bounds the spread by the slot count, so anything
+    // wider than a rounding error means the pairing state is wrong.
+    let counts: Vec<u64> = sum.slices.iter().map(|s| s.header.notes).collect();
+    let (lo, hi) = (
+        counts.iter().copied().min().unwrap_or(0),
+        counts.iter().copied().max().unwrap_or(0),
+    );
+    log::info!(
+        "wrote {} ({} total), {} to {} notes a slice, spread {}",
+        sum.slices.len(),
+        fmt_bytes(written),
+        lo,
+        hi,
+        hi - lo
+    );
+    log::info!("manifest: {}", sum.manifest.display());
+
+    let first = sum
+        .slices
+        .first()
+        .map(|s| s.path.display().to_string())
+        .unwrap_or_default();
+    log::info!(
+        "render each with: kestrel --force-cli render --note-slice {first} -s <soundfont> \
+         --backend merlin --merlin-promote-after 0 --limiter off --format float32 \
+         -o <stem>.wav"
+    );
+    log::info!(
+        "then sum them once: cargo run --release --example merge_stems -- -o mix.wav <stems>"
+    );
     Ok(())
 }
 
@@ -1763,7 +2241,19 @@ mod tests {
     #[test]
     fn a_command_line_goes_to_the_front_end_it_asked_for() {
         assert_eq!(r(&[]), Route::Guided);
-        assert_eq!(r(&["--extras-window"]), Route::Extras);
+        assert_eq!(r(&["--extras-window"]), Route::Extras(None));
+        assert_eq!(r(&["--extras-window", "--parent", "4242"]), Route::Extras(Some(4242)));
+        // A parent that is not a process id is not a route to Extras.
+        assert_eq!(r(&["--extras-window", "--parent", "me"]), Route::Notice);
+        assert_eq!(r(&["--extras-window", "--parent"]), Route::Notice);
+        assert_eq!(r(&["--merlin-window"]), Route::Merlin);
+        // What the windows are opened with is what the route answers to: a
+        // flag that drifted from its route would open a window that says "use
+        // --force-cli".
+        let args = |v: Vec<String>| v.iter().map(OsString::from).collect::<Vec<_>>();
+        assert_eq!(super::route(&args(super::tui::extras::window_args(77))), Route::Extras(Some(77)));
+        assert_eq!(super::route(&args(super::tui::merlin::window_args())), Route::Merlin);
+        assert_eq!(r(&["--merlin-window", "render"]), Route::Notice);
         assert_eq!(r(&["render", "a.mid", "-s", "f.sf2", "-o", "a.wav"]), Route::Notice);
         assert_eq!(r(&["gpu-info"]), Route::Notice);
         assert_eq!(r(&["--force-cli", "render", "a.mid"]), Route::Cli);
@@ -1796,6 +2286,50 @@ mod tests {
             super::Cmd::Render(args) => Ok(args),
             _ => unreachable!("the argument list names the render subcommand"),
         }
+    }
+
+    /// `--backend merlin` is the per-key render on the device, from merlin's own
+    /// parser, with the filters on a 400-cent grid: no flag asks for it, and no
+    /// other backend gets it. The older time-major render, and exact filters,
+    /// are what a dev build can still ask for.
+    #[test]
+    fn backend_merlin_is_the_per_key_render() {
+        let cfg = |extra: &[&str]| render_args(extra).unwrap().to_config().unwrap().0;
+        let m = cfg(&["--backend", "merlin"]);
+        assert!(m.merlin_key_major && m.merlin_key_major_gpu && m.merlin_key_parse);
+        assert_eq!(m.merlin_filter_cents, 400.0);
+        assert!(m.merlin_km_warp, "a bend is followed by default");
+        for other in ["gpu", "cpu"] {
+            let o = cfg(&["--backend", other]);
+            assert!(!o.merlin_key_major && !o.merlin_key_major_gpu && !o.merlin_key_parse && !o.merlin_km_warp, "{other}");
+            assert_eq!(o.merlin_filter_cents, 0.0, "{other}");
+        }
+        #[cfg(feature = "dev")]
+        {
+            let t = cfg(&["--backend", "merlin", "--merlin-time-major"]);
+            assert!(!t.merlin_key_major && !t.merlin_key_major_gpu && !t.merlin_key_parse && !t.merlin_km_warp);
+            assert_eq!(t.merlin_filter_cents, 0.0);
+            assert!(!cfg(&["--backend", "merlin", "--merlin-no-warp"]).merlin_km_warp);
+            assert_eq!(cfg(&["--backend", "merlin", "--merlin-filter-cents", "0"]).merlin_filter_cents, 0.0);
+        }
+        // The three flags that used to ask for it are gone.
+        for gone in ["--merlin-key-major", "--merlin-km-gpu", "--merlin-key-parse"] {
+            assert!(render_args(&["--backend", "merlin", gone]).is_err(), "{gone}");
+        }
+    }
+
+    /// A render saves its progress unless it is a merlin one, which cannot be
+    /// resumed and would only warn about it every time.
+    #[test]
+    fn a_merlin_render_asks_for_no_checkpoint_and_the_others_do() {
+        let checkpoint = |backend: &str| {
+            let args = render_args(&["--backend", backend]).unwrap();
+            let mut job = args.to_job().unwrap();
+            args.with_checkpoints(&mut job, ["kestrel", "render"]);
+            job.checkpoint.is_some()
+        };
+        assert!(!checkpoint("merlin"));
+        assert!(checkpoint("gpu") && checkpoint("cpu"));
     }
 
     /// `--merge` belongs to `--tracks`, and a stem format means nothing to it.

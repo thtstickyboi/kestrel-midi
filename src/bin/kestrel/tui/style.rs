@@ -195,11 +195,15 @@ pub fn wrap(text: &str, cols: usize) -> Vec<String> {
 
 /// Write one line's spans, without a newline.
 pub fn queue_line(out: &mut impl Write, line: &[Span]) -> io::Result<()> {
-    let colour = colour_enabled();
+    queue_line_in(out, line, theme(), colour_enabled())
+}
+
+/// `queue_line` in a given theme, with colour on or off.
+fn queue_line_in(out: &mut impl Write, line: &[Span], theme: Theme, colour: bool) -> io::Result<()> {
     for sp in line {
         let styled = colour && (sp.fg.is_some() || sp.bold);
         if colour {
-            if let Some((r, g, b)) = sp.fg {
+            if let Some((r, g, b)) = sp.fg.map(|c| theme.remap(c)) {
                 queue!(out, SetForegroundColor(Color::Rgb { r, g, b }))?;
             }
             if sp.bold {
@@ -267,26 +271,87 @@ pub fn detail(text: Line) {
     say(line);
 }
 
+/// The colours a window is drawn in. Every screen is written in Kestrel's \[8\]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Theme {
+    /// The ends and middle of the gradient, light to deep.
+    pub light: Rgb,
+    pub base: Rgb,
+    pub deep: Rgb,
+    /// Box borders, the unfilled part of a bar, and secondary text.
+    pub frame: Rgb,
+    pub track: Rgb,
+    pub dim: Rgb,
+    /// The name in block letters, and what is written under it.
+    pub banner: &'static [&'static str; 6],
+    pub tagline: &'static str,
+}
+
+impl Theme {
+    /// Kestrel's own: what every constant above says.
+    pub const KESTREL: Theme = Theme { light: GOLD, base: AMBER, deep: EMBER, frame: FRAME, track: TRACK, dim: DIM, banner: &BANNER, tagline: "GPU-accelerated MIDI renderer" };
+    /// Merlin's: `#179e97` in the middle, with the deep end turned toward blue \[9\]
+    pub const MERLIN: Theme = Theme {
+        light: (0x6f, 0xe6, 0xd8),
+        base: (0x17, 0x9e, 0x97),
+        deep: (0x0e, 0x5f, 0x86),
+        frame: (0x1d, 0x6b, 0x66),
+        track: (0x2a, 0x45, 0x44),
+        dim: (0x86, 0x9a, 0x98),
+        banner: &MERLIN_BANNER,
+        tagline: "Convolution renderer",
+    };
+
+    /// Light through the middle to deep, over `t` in 0..=1.
+    pub fn gradient(&self, t: f32) -> Rgb {
+        if t < 0.5 {
+            lerp(self.light, self.base, t * 2.0)
+        } else {
+            lerp(self.base, self.deep, (t - 0.5) * 2.0)
+        }
+    }
+
+    /// What a colour written as one of Kestrel's names is in this theme. \[10\]
+    pub fn remap(&self, c: Rgb) -> Rgb {
+        match c {
+            AMBER => self.base,
+            GOLD => self.light,
+            EMBER => self.deep,
+            FRAME => self.frame,
+            TRACK => self.track,
+            DIM => self.dim,
+            other => other,
+        }
+    }
+}
+
+static THEME: OnceLock<Theme> = OnceLock::new();
+
+/// Set the window's theme. Once: the first call is the one.
+pub fn set_theme(theme: Theme) {
+    let _ = THEME.set(theme);
+}
+
+pub fn theme() -> Theme {
+    THEME.get().copied().unwrap_or(Theme::KESTREL)
+}
+
 pub fn lerp(a: Rgb, b: Rgb, t: f32) -> Rgb {
     let t = t.clamp(0.0, 1.0);
     let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
     (m(a.0, b.0), m(a.1, b.1), m(a.2, b.2))
 }
 
-/// Gold through amber to ember, over `t` in 0..=1.
+/// The window's gradient over `t` in 0..=1: gold through amber to ember in \[11\]
 pub fn gradient(t: f32) -> Rgb {
-    if t < 0.5 {
-        lerp(GOLD, AMBER, t * 2.0)
-    } else {
-        lerp(AMBER, EMBER, (t - 0.5) * 2.0)
-    }
+    theme().gradient(t)
 }
 
 pub fn shade(c: Rgb, k: f32) -> Rgb {
     lerp((0, 0, 0), c, k)
 }
 
-const BANNER: [&str; 6] = [
+pub const BANNER: [&str; 6] = [
     "██╗  ██╗███████╗███████╗████████╗██████╗ ███████╗██╗     ",
     "██║ ██╔╝██╔════╝██╔════╝╚══██╔══╝██╔══██╗██╔════╝██║     ",
     "█████╔╝ █████╗  ███████╗   ██║   ██████╔╝█████╗  ██║     ",
@@ -295,15 +360,27 @@ const BANNER: [&str; 6] = [
     "╚═╝  ╚═╝╚══════╝╚══════╝   ╚═╝   ╚═╝  ╚═╝╚══════╝╚══════╝",
 ];
 
+/// Merlin's name, in the same block letters.
+pub const MERLIN_BANNER: [&str; 6] = [
+    "███╗   ███╗███████╗██████╗ ██╗     ██╗███╗   ██╗",
+    "████╗ ████║██╔════╝██╔══██╗██║     ██║████╗  ██║",
+    "██╔████╔██║█████╗  ██████╔╝██║     ██║██╔██╗ ██║",
+    "██║╚██╔╝██║██╔══╝  ██╔══██╗██║     ██║██║╚██╗██║",
+    "██║ ╚═╝ ██║███████╗██║  ██║███████╗██║██║ ╚████║",
+    "╚═╝     ╚═╝╚══════╝╚═╝  ╚═╝╚══════╝╚═╝╚═╝  ╚═══╝",
+];
+
 /// Rows the banner takes, tagline and the blank line under it included.
 pub const BANNER_ROWS: u16 = 8;
 
-/// The KESTREL banner. The gradient runs diagonally, and the outline glyphs \[8\]
+/// The KESTREL banner. The gradient runs diagonally, and the outline glyphs \[12\]
 pub fn banner() -> Vec<Line> {
-    let cols = BANNER[0].chars().count() as f32;
-    let span = cols + BANNER.len() as f32 * 2.0;
+    let theme = theme();
+    let rows = theme.banner;
+    let cols = rows[0].chars().count() as f32;
+    let span = cols + rows.len() as f32 * 2.0;
     let mut lines = Vec::new();
-    for (row, text) in BANNER.iter().enumerate() {
+    for (row, text) in rows.iter().enumerate() {
         let mut line = Line::new();
         for (col, ch) in text.chars().enumerate() {
             let base = gradient((col as f32 + row as f32 * 2.0) / span);
@@ -316,7 +393,7 @@ pub fn banner() -> Vec<Line> {
         lines.push(line);
     }
     lines.push(vec![
-        c("GPU-accelerated MIDI renderer", DIM),
+        c(theme.tagline, DIM),
         c("  \u{00B7}  ", FRAME),
         c(format!("v{}", env!("CARGO_PKG_VERSION")), AMBER),
     ]);
@@ -324,7 +401,7 @@ pub fn banner() -> Vec<Line> {
     lines
 }
 
-/// The banner at the top of a screen. Its trailing blank row is dropped here, \[9\]
+/// The banner at the top of a screen. Its trailing blank row is dropped here, \[13\]
 pub fn print_banner() {
     blank();
     let mut lines = banner();
@@ -334,7 +411,7 @@ pub fn print_banner() {
     }
 }
 
-/// A box around `body`, `inner` columns wide, with a title in the top edge and \[10\]
+/// A box around `body`, `inner` columns wide, with a title in the top edge and \[14\]
 pub fn panel(title: Line, body: &[Line], inner: usize, footer: Option<Line>) -> Vec<Line> {
     let edge = |t: &str| c(t, FRAME);
     let mut out = Vec::with_capacity(body.len() + 2);
@@ -370,7 +447,7 @@ pub fn panel(title: Line, body: &[Line], inner: usize, footer: Option<Line>) -> 
     out
 }
 
-/// A bar `cells` wide filled to `frac`, at half-cell resolution, coloured along \[11\]
+/// A bar `cells` wide filled to `frac`, at half-cell resolution, coloured along \[15\]
 pub fn bar(frac: f64, cells: usize) -> Line {
     let halves = (frac.clamp(0.0, 1.0) * (cells * 2) as f64).round() as usize;
     let mut line = Line::new();
@@ -455,15 +532,26 @@ mod tests {
 
     #[test]
     fn the_banner_rows_line_up() {
-        let w: Vec<usize> = BANNER.iter().map(|r| r.chars().count()).collect();
-        assert!(w.iter().all(|&x| x == w[0]), "{w:?}");
+        for rows in [&BANNER, &MERLIN_BANNER] {
+            let w: Vec<usize> = rows.iter().map(|r| r.chars().count()).collect();
+            assert!(w.iter().all(|&x| x == w[0]), "{w:?}");
+        }
+    }
+
+    /// Each theme has its own name over the same height, and the first row of \[16\]
+    #[test]
+    fn each_theme_has_its_own_banner_of_the_same_height() {
+        assert_eq!(BANNER.len(), MERLIN_BANNER.len());
+        assert_ne!(Theme::KESTREL.banner, Theme::MERLIN.banner);
+        assert_eq!(Theme::KESTREL.tagline, "GPU-accelerated MIDI renderer", "Kestrel's own tagline");
+        assert_eq!(Theme::MERLIN.tagline, "Convolution renderer");
     }
 
     #[test]
     fn fit_pads_and_truncates_by_display_width() {
         assert_eq!(plain(&fit(&[s("abc")], 5)), "abc  ");
         assert_eq!(plain(&fit(&[s("abcdef")], 4)), "abc\u{2026}");
-        // [12]
+        // [17]
         let jp = fit(&[s("東方紅魔郷")], 8);
         assert_eq!(width(&jp), 8);
         assert_eq!(plain(&jp), "東方紅\u{2026} ");
@@ -490,6 +578,59 @@ mod tests {
         assert_eq!(clock(3725.0), "1:02:05");
         assert_eq!(audio_clock(195.33), "03:15.3");
         assert_eq!(compact(21_213.0), "21.2k");
+    }
+
+    /// What reaches the terminal is the theme's colour for each of Kestrel's \[18\]
+    #[test]
+    fn the_colours_written_are_the_themes() {
+        let escape = |(r, g, b): Rgb| format!("38;2;{r};{g};{b}");
+        let line = [c("a", AMBER), c("b", DIM), c("c", OK)];
+        let mut merlin = Vec::new();
+        queue_line_in(&mut merlin, &line, Theme::MERLIN, true).unwrap();
+        let merlin = String::from_utf8(merlin).unwrap();
+        let mut kestrel = Vec::new();
+        queue_line_in(&mut kestrel, &line, Theme::KESTREL, true).unwrap();
+        let kestrel = String::from_utf8(kestrel).unwrap();
+        for (colour, text) in [(Theme::MERLIN.base, "a"), (Theme::MERLIN.dim, "b"), (OK, "c")] {
+            assert!(merlin.contains(&format!("{}m{text}", escape(colour))), "{merlin:?}");
+        }
+        assert!(!merlin.contains(&escape(AMBER)) && !merlin.contains(&escape(DIM)), "Kestrel's amber in Merlin's window");
+        for (colour, text) in [(AMBER, "a"), (DIM, "b"), (OK, "c")] {
+            assert!(kestrel.contains(&format!("{}m{text}", escape(colour))), "{kestrel:?}");
+        }
+        let mut plain = Vec::new();
+        queue_line_in(&mut plain, &line, Theme::MERLIN, false).unwrap();
+        assert_eq!(plain, b"abc", "no colour is no escapes");
+    }
+
+    /// Kestrel's theme is the colours the constants name, the gradient is the \[19\]
+    #[test]
+    fn kestrels_theme_is_the_colours_it_always_had() {
+        let k = Theme::KESTREL;
+        for c in [AMBER, GOLD, EMBER, DIM, FRAME, TRACK, OK, WARN, ERR, (1, 2, 3)] {
+            assert_eq!(k.remap(c), c);
+        }
+        for i in 0..=20 {
+            let t = i as f32 / 20.0;
+            let old = if t < 0.5 { lerp(GOLD, AMBER, t * 2.0) } else { lerp(AMBER, EMBER, (t - 0.5) * 2.0) };
+            assert_eq!(k.gradient(t), old, "t = {t}");
+        }
+        assert_eq!(theme(), Theme::KESTREL, "no test sets the window's theme");
+    }
+
+    /// Merlin's: each of Kestrel's names is its own colour, the status colours \[20\]
+    #[test]
+    fn merlins_theme_remaps_kestrels_names_and_leaves_the_status_colours() {
+        let m = Theme::MERLIN;
+        assert_eq!(m.base, (0x17, 0x9e, 0x97), "the user's #179e97");
+        assert_eq!([AMBER, GOLD, EMBER, FRAME, TRACK, DIM].map(|c| m.remap(c)), [m.base, m.light, m.deep, m.frame, m.track, m.dim]);
+        assert_eq!([OK, WARN, ERR].map(|c| m.remap(c)), [OK, WARN, ERR]);
+        assert_eq!((m.gradient(0.0), m.gradient(0.5), m.gradient(1.0)), (m.light, m.base, m.deep));
+        // The names are all different, or two things would be drawn alike.
+        let all = [m.light, m.base, m.deep, m.frame, m.track, m.dim];
+        for (i, a) in all.iter().enumerate() {
+            assert!(all[i + 1..].iter().all(|b| a != b), "{a:?} twice");
+        }
     }
 
     #[test]

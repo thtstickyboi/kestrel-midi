@@ -78,49 +78,65 @@
 /// An open render log. Dropping it closes the log, noting a panic if one is
 /// unwinding through it.
 
-[13] src/falconeye/renderlog.rs:241
+[13] src/falconeye/renderlog.rs:203
+    /// Close the log and delete it: for a log that turned out to hold nothing
+    /// worth keeping, such as an environment check that found nothing wrong.
+
+[14] src/falconeye/renderlog.rs:253
             // No console, so closing the render's window does not close the
             // watcher too, and Ctrl+C there does not reach it.
 
-[14] src/falconeye/renderlog.rs:250
+[15] src/falconeye/renderlog.rs:262
             // The same on Linux and macOS: a process group of its own, so
             // Ctrl+C in the render's terminal, and the hangup when that
             // terminal closes, reach the render and not the watcher.
 
-[15] src/falconeye/renderlog.rs:265
+[16] src/falconeye/renderlog.rs:277
         // A thread of its own, so a render stuck waiting on the device still
         // beats, and the watcher can tell stuck from gone.
 
-[16] src/falconeye/renderlog.rs:293
+[17] src/falconeye/renderlog.rs:305
         // Before the pipe closes: the filter must never write to a handle
         // that is gone.
 
-[17] src/falconeye/renderlog.rs:307
+[18] src/falconeye/renderlog.rs:319
 /// Open a log for the render `midi` names, if logging is on. `header` is
 /// written first, one line at a time; see `session`.
 
-[18] src/falconeye/renderlog.rs:366
+[19] src/falconeye/renderlog.rs:329
+/// What a render's log is the log of, as its header and its watcher's report
+/// name it.
+
+[20] src/falconeye/renderlog.rs:335
+/// Open a log for the guided renderer's environment check, with a watcher, if
+/// logging is on. The check is the first thing to open the graphics drivers, and
+/// before 1.4.0 a driver that crashed there left nothing (a user's laptop GPU,
+/// 2026-10-23): no log opened before a render's. A check that finds nothing
+/// wrong discards it ([`Guard::discard`]), so the folder holds only logs worth
+/// reading.
+
+[21] src/falconeye/renderlog.rs:398
 /// Where this function was loaded. A backtrace's addresses are only useful
 /// against the build's .pdb once the module's base is known; this function's
 /// address in the .pdb, subtracted from this, gives it, with no system call.
 
-[19] src/falconeye/renderlog.rs:383
+[22] src/falconeye/renderlog.rs:415
 /// Where logs go by default: `logs/` beside the executable, or, where that
 /// cannot be written, the user's local application data.
 
-[20] src/falconeye/renderlog.rs:430
+[23] src/falconeye/renderlog.rs:462
 /// Delete all but the newest `keep` render logs in `dir`. Only `.log` files:
 /// nothing else in the folder is touched.
 
-[21] src/falconeye/renderlog.rs:449
+[24] src/falconeye/renderlog.rs:481
 /// Delete all but the newest watcher reports in `dir`: `KEEP` of the crash
 /// and hang reports, and five minidumps, which can be large.
 
-[22] src/falconeye/renderlog.rs:475
+[25] src/falconeye/renderlog.rs:507
 /// Write a panic to the open log from the panic hook, with a backtrace,
 /// before unwinding reaches anything that might fail on the way out. Chained
 /// ahead of whatever hook the front end set, which still runs.
 
-[23] src/falconeye/renderlog.rs:499
+[26] src/falconeye/renderlog.rs:531
         // `{:#}` prints each frame's address as well as its symbol, which is
         // what a release build without its .pdb has to go on.

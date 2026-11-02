@@ -49,6 +49,7 @@ const COMMANDS: &[&str] = &[
 
 /// Render arguments a request does not pass as options: the ones it names \[3\]
 const NOT_OPTIONS: &[&str] = &[
+    "note-slice",
     "soundfont",
     "sf-programs",
     "out",
@@ -654,7 +655,7 @@ fn render(job: RenderJob, id: &Value, state: &Shared, monitor: Arc<Monitor>, rx:
         .map(|l| Arc::clone(&l.bank));
     let bank = match cached {
         Some(bank) => Ok(bank),
-        None => {
+        None => session::merlin_takes(&job, &plan).and_then(|()| {
             monitor.observer().phase(Phase::LoadingSoundfont);
             load_into(key.clone(), &plan.cfg, state).and_then(|_| {
                 lock(state)
@@ -663,7 +664,7 @@ fn render(job: RenderJob, id: &Value, state: &Shared, monitor: Arc<Monitor>, rx:
                     .map(|l| Arc::clone(&l.bank))
                     .context("the soundfont was loaded and then unloaded before the render began")
             })
-        }
+        }),
     };
 
     let out = job.out.clone();
@@ -900,8 +901,10 @@ fn scan(job: ScanJob, id: &Value, cancel: &AtomicBool, state: &Shared) -> Result
 // ---- Quick requests -------------------------------------------------------
 
 fn adapters() -> Result<Value> {
-    let (list, default) = kestrel::gpu::survey(&Config::default())?;
-    let adapters: Vec<Value> = list
+    let survey = kestrel::gpu::survey(&Config::default())?;
+    let default = survey.default;
+    let adapters: Vec<Value> = survey
+        .adapters
         .iter()
         .enumerate()
         .map(|(i, a)| {
@@ -916,10 +919,16 @@ fn adapters() -> Result<Value> {
             })
         })
         .collect();
-    Ok(json!({"adapters": adapters}))
+    // [29]
+    let failed: Vec<Value> = survey
+        .failed
+        .iter()
+        .map(|f| json!({"backend": crate::tui::backend_flag(f.backend), "how": f.how}))
+        .collect();
+    Ok(json!({"adapters": adapters, "failed_backends": failed}))
 }
 
-/// The guided renderer's update check, on the person's update ring from \[29\]
+/// The guided renderer's update check, on the person's update ring from \[30\]
 fn check_update() -> Result<Value> {
     if crate::update::opted_out() {
         bail!("update checks are turned off by {}", crate::update::OPT_OUT);
@@ -979,7 +988,7 @@ fn inspect_midi(req: &Map<String, Value>) -> Result<Value> {
             "format": m.format,
             "tracks": m.tracks,
             "division": division_value(m.division),
-            // [30]
+            // [31]
             "warnings": m.notes,
         }),
         Verdict::Invalid { path, reason } => json!({
@@ -1010,7 +1019,7 @@ struct OptionSpec {
     help: String,
 }
 
-/// Every option `render` takes that a request passes in `options`, read off \[31\]
+/// Every option `render` takes that a request passes in `options`, read off \[32\]
 fn option_specs() -> Vec<OptionSpec> {
     let cli = Cli::command();
     let render = cli
@@ -1080,7 +1089,7 @@ fn options() -> Value {
 
 // ---- Options to arguments -------------------------------------------------
 
-/// Turn `options` into the arguments the command line would have been given. \[32\]
+/// Turn `options` into the arguments the command line would have been given. \[33\]
 fn option_flags(options: Option<&Value>) -> Result<Vec<String>> {
     let map = match options {
         None | Some(Value::Null) => return Ok(Vec::new()),
@@ -1113,7 +1122,7 @@ fn option_flags(options: Option<&Value>) -> Result<Vec<String>> {
             Value::Null => continue,
             Value::String(s) => s.clone(),
             Value::Bool(b) => b.to_string(),
-            // [33]
+            // [34]
             Value::Number(n) => match n.as_f64() {
                 Some(f) if !n.is_i64() && !n.is_u64() && f.fract() == 0.0 && f.abs() < 9.0e15 => {
                     format!("{}", f as i64)
@@ -1131,7 +1140,7 @@ fn adapter_flags(value: &Value) -> Result<Vec<String>> {
     let index = value
         .as_u64()
         .context("\"adapter\" is an index from the adapters command")? as usize;
-    let (list, _) = kestrel::gpu::survey(&Config::default())?;
+    let list = kestrel::gpu::survey(&Config::default())?.adapters;
     let a = list
         .get(index)
         .with_context(|| format!("no adapter {index}; the adapters command lists {}", list.len()))?;
@@ -1195,7 +1204,7 @@ fn parse_render(argv: Vec<OsString>) -> Result<RenderArgs> {
             _ => unreachable!("the argument list names the render subcommand"),
         },
         Err(e) => {
-            // [34]
+            // [35]
             let text = e.render().to_string();
             let kept: Vec<&str> = text
                 .lines()
@@ -1210,7 +1219,7 @@ fn parse_render(argv: Vec<OsString>) -> Result<RenderArgs> {
 
 // ---- Controls -------------------------------------------------------------
 
-/// `cancel`. With `"discard": true` a render or a resume that saves its progress \[35\]
+/// `cancel`. With `"discard": true` a render or a resume that saves its progress \[36\]
 fn cancel(id: &Value, req: &Map<String, Value>, state: &Shared) {
     let discard = match req.get("discard") {
         None => false,
@@ -1301,7 +1310,7 @@ mod tests {
         assert!(!voices.switch);
         assert!(specs.iter().find(|s| s.long == "note-grid").unwrap().switch);
         let backend = specs.iter().find(|s| s.long == "backend").unwrap();
-        assert_eq!(backend.values, ["cpu", "gpu"]);
+        assert_eq!(backend.values, ["cpu", "gpu", "merlin"]);
     }
 
     #[test]
@@ -1337,7 +1346,7 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(args.max_voices, 4194304);
-        assert_eq!(args.midi, PathBuf::from("-dash.mid"));
+        assert_eq!(args.midi, Some(PathBuf::from("-dash.mid")));
         assert_eq!(args.ceiling_db, Some(-1.5));
         assert!(args.note_grid && !args.nan_guard);
     }

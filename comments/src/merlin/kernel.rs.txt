@@ -1,0 +1,337 @@
+# Comments extracted from src/merlin/kernel.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/merlin/kernel.rs:5
+//! Building the cached waveforms the FDL convolves against.
+//!
+//! the development notes section 7: kernels come from **running the existing render
+//! pass** with one voice. The point is not convenience -- it is that the two
+//! backends then cannot disagree about what a note sounds like, because one is
+//! defined in terms of the other. The null test stops testing the DSP and
+//! starts testing the summation, which is the only thing Merlin actually
+//! changes.
+//!
+//! ## One render per entry, not one per release bucket
+//!
+//! The obvious builder renders a note per `(region, key, velocity, release
+//! bucket)`, issuing a note-off at each bucket's reference point `Dj`. That is
+//! about ten renders per key for nothing, because section 3b's collapse says
+//! what the release *is*:
+//!
+//! ```text
+//! kernel_j[n] = sustain[n] * (1 for n < Dj, r^(n - Dj) for n >= Dj)
+//! ```
+//!
+//! So render the voice **once with no note-off at all** and apply the release
+//! on the host. Every bucket is then a multiply over the same buffer.
+//!
+//! **This is exact only while the amplitude envelope is flat at `Dj`**, which
+//! is section 3b's stated premise and is why `ampeg_sustain=100` keeps
+//! appearing in the development notes. If a region's decay is still running when
+//! the note is released, the real synth releases from the level the decay
+//! reached and stops decaying, while this multiplies a still-decaying curve --
+//! two different envelopes. `Kernel::build` checks for that and refuses rather
+//! than producing something that would null at some unhelpful -30 dB and leave
+//! someone hunting the summation for it.
+
+[2] src/merlin/kernel.rs:49
+    /// Mono, unit gain, unpanned, and **still sounding**: no note-off was
+    /// issued, so this is the note's `sustain[n]`.
+    ///
+    /// Mono and unpanned because pan and channel gain fold into the impulse
+    /// gain (the dev notes section 6, first row), so baking them here would make
+    /// one kernel per pan position.
+    ///
+    /// **Grown on demand**, not rendered once at a fixed length. A waveform
+    /// heard only in short notes needs its release tail and nothing more; one
+    /// held for six seconds needs six seconds of it. Rendering every waveform
+    /// at the ceiling would put the whole ceiling into the build time, and the
+    /// build time is 0.66 s of a render targeting five.
+
+[3] src/merlin/kernel.rs:62
+    /// The command this was rendered from, kept so [`Kernel::grown`] can
+    /// re-render the same voice longer.
+
+[4] src/merlin/kernel.rs:65
+    /// Per-frame release ratio, read from the region's own params so the
+    /// analytic release below is the same curve the render pass would apply.
+
+[5] src/merlin/kernel.rs:68
+    /// Frames the release takes to reach the envelope floor from here. This is
+    /// the entry's kernel length; see [`release_frames`].
+
+[6] src/merlin/kernel.rs:71
+    /// First frame at which the amplitude envelope has stopped moving.
+    ///
+    /// The analytic release is exact only from here on. Before it the voice is
+    /// still in attack or decay, and the real synth releases from whatever
+    /// level it reached and *stops* the decay, where multiplying this buffer
+    /// would keep decaying underneath the release -- two different envelopes.
+
+[7] src/merlin/kernel.rs:96
+    /// The same, from an already-resolved spawn command.
+    ///
+    /// `nofilter` is a copy of the params table with `RP_FILTER` cleared,
+    /// installed as the render's base params so the kernel carries the envelope
+    /// but not the biquad -- see the note at the call to `set_base_params`
+    /// below. `None` renders exactly what the bank says.
+    ///
+    /// **It is also how a CC71-CC75 variant reaches the kernel.** The table
+    /// passed in is the variant's own, so it is the effective params for this
+    /// render and therefore where the envelope, the release coefficient and
+    /// `flat_from` have to be read from -- reading them from `bank.params`
+    /// instead would build a kernel whose analytic release did not match the
+    /// envelope it was rendered with. The command is pinned to variant 0 for
+    /// the same reason: the table is installed as the base, and the inner
+    /// `CpuSynth` has no variants of its own to select.
+    ///
+    /// This is the one the backend uses. Building from the command the driver
+    /// actually produced -- rather than re-resolving `(region, key, velocity)`
+    /// -- is what stops the cache and the voice from disagreeing about pitch,
+    /// params variant or flags. The gains are overridden to unit-left so the
+    /// result is the raw mono waveform; pan folds into the impulse instead.
+
+[8] src/merlin/kernel.rs:135
+        // Unit gain, hard left: the render pass writes `gain_l` into the left
+        // channel and `gain_r` into the right, so this reads back as the raw
+        // mono waveform with no pan baked in.
+        //
+        // Gate slot 0 with no gates published: `CpuSynth` starts with a zeroed
+        // off table, so nothing ever releases this voice and the render is the
+        // sustaining note the collapse wants.
+
+[9] src/merlin/kernel.rs:151
+            // The variant is already in `table`; see the doc comment. Leaving
+            // it set would make the inner synth ask for a variant it was never
+            // given and silently fall back to the base -- the same table, by a
+            // route that only works by accident.
+
+[10] src/merlin/kernel.rs:160
+        // Build with the filter off. Velocity's cutoff is an LTI filter and
+        // moves to a per-bus biquad (the development notes section 3(c)); leaving it
+        // in the kernel is what made the reference bank's 128 velocity layers
+        // into 128 separate waveforms instead of one.
+        //
+        // Through `set_base_params` rather than by editing the bank: the params
+        // table lives in an `Arc<Bank>` beside a 757 MiB sample pool, so it
+        // cannot be cloned per kernel.
+        //
+        // **And nor can the no-filter table, which this used to do.** It is
+        // 22,528 rows on the reference bank, 1.35 MiB, and one render rebuilds
+        // thousands of kernels -- 6.5 GiB of allocate-and-free churn for a table that
+        // is identical every time. Both sides already held it in an `Arc` and
+        // only the signature forced the copy; see `CpuSynth::set_base_params`.
+        //
+        // Not `set_params_variant`, which was the first attempt and is wrong:
+        // `born_variant` only steers the block a voice is born in, so a
+        // 43-block kernel came out unfiltered for one block and filtered for
+        // the other 42. Double-filtered against the bus biquad, that nulls at
+        // -18.8 dB.
+
+[11] src/merlin/kernel.rs:200
+    /// A kernel whose sustain was rendered somewhere else -- the device's
+    /// kernel builder, `merlin::gpubuild` -- from the same command and table
+    /// [`Kernel::from_cmd`] would have rendered it from.
+    ///
+    /// Everything but the samples is read exactly as `from_cmd` reads it, and
+    /// the command is rewritten the same way, so the two constructors give the
+    /// same kernel to within what two renders of one note differ by.
+
+[12] src/merlin/kernel.rs:237
+    /// The same waveform rendered to at least `frames`.
+    ///
+    /// Re-rendered from the start rather than continued, because continuing
+    /// means keeping a `CpuSynth` alive per waveform. Callers double, so the
+    /// restarts are amortised.
+
+[13] src/merlin/kernel.rs:256
+    /// The kernel for release reference point `dj`, per section 3b.
+    ///
+    /// A note released at any `D` in this bucket is then this waveform scaled
+    /// by `r^(Dj - D)` on its impulse gain -- no second kernel, and no
+    /// bucketing error in the envelope.
+
+[14] src/merlin/kernel.rs:265
+    /// The same kernel, but only `[from, from + len)` of it.
+    ///
+    /// **This is what the frequency-domain delay line actually caches**, and
+    /// the reason it does is the whole of the variable-kernel-length fix.
+    ///
+    /// `kernel_j` is the sustaining waveform out to `Dj` and its release after
+    /// that, so cached whole its length is `Dj + tail` -- it grows with how
+    /// long the note was held, and a nine-second note would want a
+    /// thirteen-second kernel in every one of the delay line's per-bus ring
+    /// slots. Storing it from `from = (Dj / P) * P` instead drops the leading
+    /// partitions, whose content the head correction already reconstructs: it
+    /// covers `[0, max(D, Dj))` regardless, and needs only to be told that the
+    /// delay line contributes nothing there.
+    ///
+    /// The impulse is delayed by the same `from` to compensate, which is exact
+    /// because convolution is shift-invariant. What is left to cache is the
+    /// release tail, whose length is a property of the **region** and not of
+    /// the note -- so the ring depth stops depending on how long a note is held
+    /// and there is no longest note any more.
+
+[15] src/merlin/kernel.rs:290
+    /// [`Kernel::segment`] and [`partition`] in one pass: the segment
+    /// `[from, from + lags * p)` laid straight into `out` as `lags` partitions
+    /// of `p` frames, each zero-padded to `2p`, which is the `lags * 2p` reals
+    /// the real transform reads.
+    ///
+    /// **Bit-identical to `partition(&segment(..), p, lags)`**, because both
+    /// run the same `segment_rows`, and `tests/merlin_kernel.rs` asserts it.
+    /// What it saves is the intermediates: `segment` allocates and zeroes a
+    /// `lags * p` vector per entry and `partition` a second one twice the size,
+    /// which is a megabyte or so of fresh pages per entry on the reference
+    /// bank, and the batched build in `MerlinSynth::ensure_kernels` is the
+    /// reason that mattered.
+    ///
+    /// Every element of `out` is written, the padding included, so `out` may be
+    /// memory whose prior contents are unspecified -- which is what a mapped
+    /// staging buffer is. It is also only ever written, never read back, since
+    /// that memory is write-combined on some drivers and a read from it is slow.
+
+[16] src/merlin/kernel.rs:318
+    /// The shared core: `rows` rows of `row` frames of the kernel starting at
+    /// `from`, row `k` written at `out[k * stride..]`, with the rest of its
+    /// stride and every frame past the end of the render zero.
+    ///
+    /// `segment` is the one-row case with no padding.
+
+[17] src/merlin/kernel.rs:354
+        // The release multiplies **at** frame `dj`, not after it: `cpu.rs`
+        // advances the envelope before scaling the sample, so the first
+        // released frame already carries one factor of `release_coef`. Getting
+        // this backwards costs one frame at the release edge, which nulls at
+        // about -11 dB and looks like a convolution bug rather than an
+        // envelope one.
+
+[18] src/merlin/kernel.rs:371
+            // Frames before the reference point are the sustain as it is. The
+            // rest are scaled by the running release factor, which is carried
+            // from one row into the next so it is the product the unsplit loop
+            // forms and not a fresh `powi` per row.
+
+[19] src/merlin/kernel.rs:387
+/// Split a kernel into `lags` partitions of `p` frames, each zero-padded to
+/// `2p`, laid out as the `lags * 2p` reals `Fft::r2c` wants.
+///
+/// The zero padding is what makes the circular convolution the transform
+/// performs equal the linear one the audio needs: a `p`-frame input block
+/// against a `p`-frame partition is `2p-1` long and fits.
+
+[20] src/merlin/kernel.rs:406
+/// Partition a kernel and transform it into the `lags * bins` complex the FDL
+/// indexes as `[k][bin]`.
+///
+/// **One kernel, one submission and a blocking readback**, so this is for tests
+/// and tools. The render builds every kernel a step is missing in one batch
+/// instead -- `MerlinSynth::ensure_kernels`, through
+/// [`crate::merlin::fft::R2cBatch`] and [`Kernel::segment_partitioned`] -- and
+/// the spectra never come back to the host: they are copied from the batch's
+/// output into the cache pages on the device. At ~1.1 ms a kernel this path
+/// was 5.2 s of a 48 s render, most of it the submit and the wait.
+
+[21] src/merlin/kernel.rs:426
+/// A spawn command for one freshly-built voice, for the `(region, key, vel)`
+/// entry point above.
+
+[22] src/merlin/kernel.rs:455
+/// The first frame at which a region's amplitude envelope has stopped moving.
+///
+/// Section 3b's analytic release is exact only from here on, so this is what
+/// [`Kernel::at_release`] refuses below and what
+/// `ReleaseBuckets::reference` clamps `Dj` up to.
+///
+/// An earlier version compared `sustain` against `decay_target` and could never
+/// fire: `decay_target` is `max(sustain, env_floor)`, so the two are equal for
+/// every region whose sustain clears the floor. What matters is not the levels
+/// but the **rates**.
+///
+/// **And a second one started the decay from `attack_end`, which is not a
+/// level.** `attack_end` is `1.0 + hold_frames * attack_rate` -- the hold phase
+/// is expressed by moving the attack's *target*, not by a stage of its own --
+/// so it is far above 1.0 for any region with a hold. `cpu.rs` sets
+/// `level = 1.0` when the attack ends (see its `ENV_ATTACK` arm) and decays
+/// from there, so dividing by `attack_end` invents
+/// `ln(attack_end) / |ln(decay_coef)|` frames of decay that never happen.
+///
+/// It is not a rounding error. On one General MIDI bank, measured 2026-09-10,
+/// the median param set claimed **8.27 s** to settle and the worst claimed
+/// **442.8 s**, of which 227 s was this. `flat_from` sets `Dj` and `Dj` sizes
+/// the accumulator ring, so the bank could not start at any sensible
+/// `--merlin-filters` -- see `examples/merlin_flat.rs`, which is what found it.
+///
+/// Public so `examples/merlin_flat.rs` can measure it against a real bank
+/// using this code rather than a copy of it.
+
+[23] src/merlin/kernel.rs:505
+/// The amplitude envelope of a **sustaining** note at frame `n`.
+///
+/// This is `cpu.rs`'s `ENV_ATTACK` / `ENV_DECAY` / `ENV_SUSTAIN` arms in closed
+/// form, and it has to stay that: `env_at_matches_the_reference_envelope` in
+/// `tests/merlin_kernel.rs` renders a DC sample through `CpuSynth` and asserts
+/// the two agree frame for frame, because everything below turns on the two not
+/// drifting apart.
+///
+/// Three things about the reference are easy to get wrong and are why this is
+/// not two lines:
+///
+/// * **The envelope advances before the sample is scaled**, so frame `n` sees
+///   the level after `n + 1` steps. An instant attack is therefore at full
+///   level on frame 0.
+/// * **`attack_end` is not a level.** It is `1.0 + hold_frames * attack_rate`
+///   -- hold is expressed by moving the attack's target -- so the counter runs
+///   *past* 1.0 during the hold and `cpu.rs` applies `level.min(1.0)`. The same
+///   clamp is here.
+/// * **The decay starts from exactly 1.0**, not from wherever the counter got
+///   to. `cpu.rs` assigns `level = 1.0` on the crossing frame.
+///
+/// A region whose sustain is at or below the floor dies at the end of its decay
+/// rather than sustaining, and this returns zero there -- which is what the
+/// reference plays.
+
+[24] src/merlin/kernel.rs:531
+    // Frames spent in `ENV_ATTACK`, hold included. The counter crosses on the
+    // last of them and the level is pinned to 1.0 there.
+
+[25] src/merlin/kernel.rs:557
+        // `cpu.rs` kills the voice here when the sustain is at the floor, and
+        // pins it to `sustain` otherwise.
+
+[26] src/merlin/kernel.rs:569
+/// How many frames a region's release takes to reach the envelope floor.
+///
+/// **This is the kernel's length, and it is per region.** `merlin_kernel_frames`
+/// used to be one constant for every entry -- 88,064 frames, 1.83 s -- and the
+/// reference bank's release runs 1.25 s on 54 keys, 1.95 to 3.0 s on 28 more
+/// and 4.0 s on 6. So the long keys were cut at 46% of their tail, mid-decay,
+/// which is exactly the "notes cut off abruptly" the first full render was
+/// reported as having. Five separate records deferred this; it is the fix.
+///
+/// The level the release starts from is `sustain`, not 1.0: `Kernel::segment`
+/// refuses any reference point below `flat_from`, so the decay has settled by
+/// then and `cpu.rs` sets the level to `sustain` when it does. The voice dies
+/// when that level times the release reaches `env_floor`, which is the frame
+/// this returns -- the same condition `cpu.rs::render` applies, so the kernel
+/// ends exactly where the per-voice backend's note would.
+///
+/// A release that never reaches the floor -- a coefficient of 1.0 or above,
+/// which a bank should not produce -- returns `usize::MAX`, and the caller
+/// clamps and says so rather than allocating for it.
+
+[27] src/merlin/kernel.rs:592
+        // The decay already ran to the floor and `cpu.rs` killed the voice
+        // there, so there is no release to cache. `flat_from` is the whole
+        // note.
+
+[28] src/merlin/kernel.rs:618
+/// A copy of `params` with every filter disabled.
+///
+/// Built once and reused: the reference bank's table is 22,528 rows, and
+/// `set_params_variant` copies it per install.

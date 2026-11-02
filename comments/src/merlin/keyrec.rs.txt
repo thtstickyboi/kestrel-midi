@@ -1,0 +1,78 @@
+# Comments extracted from src/merlin/keyrec.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/merlin/keyrec.rs:5
+//! What merlin's key parser (`keyparse`) needs to turn a paired note into the
+//! records key-major renders: each channel's state as the stream stands at an
+//! event ([`Channels`]), and a note's layers built as the driver builds them
+//! ([`Layers`]).
+//!
+//! **The state is read where the event sits, not by tile.** The driver
+//! publishes channel state in rows at gate tiles, with a bit to say a note on
+//! a controller's own tick reads the next row; a note-off's gain is read from
+//! its tile's row, and a CC120 cut from whether a cut is in that tile. Merlin
+//! does not follow it there: a note takes the channel as it stands at its
+//! note-on, its release tail the channel as it stands at its release, and a
+//! note is cut when a CC120 released it. Where no controller moves within a
+//! tile the two agree to the bit, which is what the digest checks.
+//!
+//! **Restated here, exactly:** presets (programs, CC0, the GS drum part and
+//! resets), channel gain (CC7, CC10, CC11, CC67 and their fine halves, as
+//! `Driver::refresh_gain` folds them) and the pitch the channel adds (bend,
+//! RPN 0-2, as `Driver::refresh_bend` sums it, then merlin's bend grid as the
+//! bucket pass applies it). **Built by the driver's own code:** the layers,
+//! `PreviewMemo::preview`, `Bank::build_layer` and `Driver::make_cmd`, and
+//! the sound controllers' params tables, `Bank::build_variant`.
+//!
+//! **A params variant is built from the raw CC71-75 values a note is struck
+//! under**, one table per distinct set. The driver keys its variants by the
+//! values quantised, builds each from whichever raw values first asked for it,
+//! and past `max_param_variants` rebuilds or falls back; so its params depend
+//! on the file's history, and merlin's on the note. They agree wherever each
+//! quantised set only ever had one raw set behind it.
+//!
+//! **Not yet, and flagged when a file needs it** ([`unsupported`]):
+//! portamento, the modulation LFOs, MIDI tuning, analytic phase, and banks
+//! with random regions (whose draw the driver seeds from a note id counted
+//! over every key).
+
+[2] src/merlin/keyrec.rs:65
+/// `Driver`'s RPN selection when an NRPN is selected or the selection is
+/// cleared.
+
+[3] src/merlin/keyrec.rs:90
+    /// The pitch as `Driver::refresh_bend` publishes it: `fixed::bend_factor`
+    /// of the semitones summed.
+
+[4] src/merlin/keyrec.rs:314
+    /// The channel as a note struck now takes it, and whatever it asks for
+    /// that is not built yet into `flags`.
+
+[5] src/merlin/keyrec.rs:354
+/// One layer of a note, as key-major files it: the command with the
+/// channel's bend in its step and gain folded in, the params it reads as they
+/// stood at the note-on, where it starts and how long it is held, and the
+/// gain its release tail is fired at.
+
+[6] src/merlin/keyrec.rs:372
+/// A gain this far under the other side is the rounding of a hard pan: a
+/// constant-power pan's `cos(pi / 2)` in `f32` is about 4e-8, not zero.
+
+[7] src/merlin/keyrec.rs:376
+/// The two halves of a stereo sample as one layer, wherever a note has them.
+///
+/// A stereo file is two hard-panned regions, so a note is two layers that
+/// differ only in which samples they read: two records, two waveforms, two
+/// kernels and two heads for what is one sound, each using one side of its
+/// stereo bus. Two layers merge when everything but the sample and the side
+/// they pan to is the same; anything else stays as it is, so a bank this does
+/// not fit still renders.
+
+[8] src/merlin/keyrec.rs:441
+    /// The params row `base` reads under `sound`, and its modulation envelope
+    /// as `MerlinSynth::menv_of` gives it.

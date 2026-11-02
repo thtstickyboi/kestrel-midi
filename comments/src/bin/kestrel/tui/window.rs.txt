@@ -1,0 +1,61 @@
+# Comments extracted from src/bin/kestrel/tui/window.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/bin/kestrel/tui/window.rs:5
+//! Windows of their own: how Extras and Merlin open one, and how a window
+//! hands over to another and goes.
+//!
+//! **Opening.** A new terminal window running this executable with a flag. On
+//! Windows it goes through `start`, not by spawning the child into a new
+//! console: the standard library always hands a child this process's standard
+//! handles, so a child spawned straight into a new console gets the window but
+//! reads its keys from this one, where the main menu is already waiting on
+//! them. That shipped, and Extras could not be typed into (reported
+//! 2026-09-12). `start` gives the process in the new window that window's own
+//! input and output.
+//!
+//! **Closing the window a person came from.** Extras is a window of its own,
+//! and so Merlin, started from it, has two windows behind it: Extras, which
+//! just exits, and the main one, which is another process waiting for a line.
+//! Killing it would leave its tab open on "process exited with code 1", so it
+//! is asked instead, through a file: the window that wants it gone makes
+//! `kestrel-quit-<pid>` in the temporary folder, and the guided renderer's
+//! watcher thread (`serve_quit`) answers by removing the file and exiting
+//! with 0, which closes the tab. A render under way refuses, by renaming the
+//! file `.refused`, since what is on the screen is not for the person who
+//! asked to throw away. A window that does not answer in time (an older
+//! Kestrel, a process that is gone) is left as it is.
+
+[2] src/bin/kestrel/tui/window.rs:55
+/// Open a new terminal window running this executable with `args`, titled
+/// `title` where the platform lets it be.
+
+[3] src/bin/kestrel/tui/window.rs:97
+    // No standard way to ask for a terminal, so try the usual ones in turn,
+    // starting with whatever the session says it prefers.
+
+[4] src/bin/kestrel/tui/window.rs:129
+/// Renders and batches under way in this process. A window with any is not
+/// asked to go.
+
+[5] src/bin/kestrel/tui/window.rs:153
+/// How often a window looks for a request to go, and how long a window that
+/// asked waits for the answer.
+
+[6] src/bin/kestrel/tui/window.rs:166
+/// This process answers a request to go, for as long as it lives: on a thread
+/// of its own, through `exit(0)`, so the window closes. Called by the guided
+/// renderer, the window Extras is opened from.
+
+[7] src/bin/kestrel/tui/window.rs:222
+/// Open a window and see the one it was started from out: `parent`, when
+/// there is one, is asked to go. The caller then exits, which closes its own.
+
+[8] src/bin/kestrel/tui/window.rs:243
+    /// Plays the window being asked: looks until there is a request, as the
+    /// watcher does, and says whether it would have exited.

@@ -219,16 +219,22 @@
     // in the mix, which nothing here can check; stems, a finished stem is a file,
     // and one that is missing or not the size it was is rendered again.
 
-[37] src/stems.rs:936
+[37] src/stems.rs:931
+        // Merlin has no per-track path: its host memory is bounded by note
+        // slicing (`kestrel slice`), which is a partition of the note set, not
+        // of the tracks. `session::plan` refuses it first; this is for a caller
+        // that did not go through it.
+
+[38] src/stems.rs:943
             // Opened with one voice, so that a share too big for one binding
             // is held down here with a warning rather than refused as if the
             // user had asked for it directly.
 
-[38] src/stems.rs:942
+[39] src/stems.rs:949
             // What one lane holds alone: half what a render alone does,
             // because a batch keeps both halves of a lane's pool in one buffer.
 
-[39] src/stems.rs:955
+[40] src/stems.rs:962
             // One job, holding as many stems at once as it can, with the
             // host's share of them spread over the threads --track-jobs asks
             // for. Every job is another stream of submissions the one queue
@@ -239,69 +245,69 @@
             // 7.7 s, two of 64 6.9 s, one of 137 on one thread 8.9 to 10.4 s
             // with its host work 4 s of that.
 
-[40] src/stems.rs:973
+[41] src/stems.rs:980
             // And no more than share one binding: every lane's pool is a
             // region of one voice buffer. Fewer at once, rather than refused,
             // because a render past the guided renderer's device max -- or one
             // whose --min-velocity left fewer tracks to share the total --
             // still renders, only with fewer tracks on the device at a time.
 
-[41] src/stems.rs:980
+[42] src/stems.rs:987
             // The smaller of the two decides, and one line says so: the two
             // used to be applied one after the other with a warning each, and
             // 256 lanes became 174 and then 105 as if it were two decisions.
 
-[42] src/stems.rs:1022
+[43] src/stems.rs:1029
     // Where the checkpoint was made, against where this runs: DX12 and Vulkan
     // write different bytes for the same render, and so may two cards, and the
     // voice limit each track ran under is part of what it rendered.
 
-[43] src/stems.rs:1061
+[44] src/stems.rs:1068
     // Merged, every track renders raw and the mix goes through the output
     // stage `cfg` describes, once. See the module comment.
 
-[44] src/stems.rs:1080
+[45] src/stems.rs:1089
             // The tracks that were whole, and the part of each that was not,
             // are in it already.
 
-[45] src/stems.rs:1122
+[46] src/stems.rs:1131
     // Busiest first, so the long renders start at once and the short ones
     // fill in around them; ties by track. A stem already whole is not run again.
 
-[46] src/stems.rs:1150
+[47] src/stems.rs:1159
     // What `Progress::span` reaches once every track is done: each span, as
     // far as the render runs.
 
-[47] src/stems.rs:1265
+[48] src/stems.rs:1274
         // The observer is not shared with the jobs; it stays on this thread,
         // which watches for a cancel and reports until they are done. It also
         // saves the progress against a crash, as often as it was asked to.
 
-[48] src/stems.rs:1293
+[49] src/stems.rs:1302
     // A render that did not finish keeps what it did: stopped or failed, its
     // checkpoint is written now that nothing is running, and the files of the
     // stems it cut off are taken away.
 
-[49] src/stems.rs:1301
+[50] src/stems.rs:1310
     // A stop that is not to be resumed leaves no checkpoint: this one is not
     // written and an earlier one goes. A failure is not such a stop, however it
     // was asked for. What was finished stays, as it does without one.
 
-[50] src/stems.rs:1350
+[51] src/stems.rs:1359
         // A mix missing tracks is not the file that was asked for, so a
         // stopped merge writes nothing rather than something that looks done.
 
-[51] src/stems.rs:1364
+[52] src/stems.rs:1373
             // Written under a name no finished file has, and renamed when whole;
             // and if it cannot be written -- a full disk, after hours -- the
             // tracks are not lost: the checkpoint is saved with all of them in.
 
-[52] src/stems.rs:1464
+[53] src/stems.rs:1473
     // The loop `session::run` runs, less what only one render at a time can
     // report: the same blocks through the same sink, so a stem is the bytes
     // `--track` writes for that track.
 
-[53] src/stems.rs:1508
+[54] src/stems.rs:1517
 /// Say how much the stems will take and refuse to start a WAV render that
 /// cannot fit. Every stem runs to the end of the whole file, so a WAV stem's
 /// size is known to within its release tail; the other formats are estimated

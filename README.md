@@ -4,7 +4,7 @@
 
 A GPU-accelerated SoundFont/SFZ synthesizer for Black MIDI.
 
-Kestrel renders a MIDI file offline to WAV, FLAC, Opus, MP3, OGG or M4A, doing the synthesis in compute shaders instead of on the CPU. It is built for files where the note count is absurd -- hundreds of millions of notes, with a hundred thousand to several million voices sounding at once -- which is the point where conventional synths stop being fast enough. It can also render every track of a MIDI on its own, as stems or summed into one file, render several MIDIs in one command, pick a stopped render up where it left off, and play MIDIs written for the 31-EDO template.
+Kestrel renders a MIDI file offline to WAV, FLAC, Opus, MP3, OGG or M4A, doing the synthesis in compute shaders instead of on the CPU. It is built for files where the note count is absurd -- hundreds of millions of notes, with a hundred thousand to several million voices sounding at once -- which is the point where conventional synths stop being fast enough. It can also render every track of a MIDI on its own, as stems or summed into one file, render several MIDIs in one command, pick a stopped render up where it left off, and play MIDIs written for the 31-EDO template. It also carries **Merlin**, an experimental second renderer that drops no note at all, at a heavy price in time and disk; see *Merlin*.
 
 On an RTX 5060 Laptop it sustains **1,048,576 concurrent voices at 0.93x realtime**, and renders a 44.7M-note file against a 22,528-region piano at 1.87x realtime.
 
@@ -78,7 +78,7 @@ Start `kestrel` with no arguments -- double-clicking it does exactly that -- and
 5. **Additional flags**, one free-form line for anything the steps do not ask about -- `--seconds 30`, `--volume 80`, `--min-velocity 10`.
 6. **Progress**, then a summary with the flags the render ran with, and **Home** to go back to the menu.
 
-A guided render writes a file byte-identical to the equivalent `--force-cli render`. On the progress screen, **Ctrl+C twice** (or Esc twice) stops the render and saves its progress so it can be resumed, and **Ctrl+C, then Ctrl+D** stops it and keeps nothing; see *Stopping and resuming*. **Extras** has GPU info, file info, help for every flag, the machine report, the update ring and the remembered folders.
+A guided render writes a file byte-identical to the equivalent `--force-cli render`. On the progress screen, **Ctrl+C twice** (or Esc twice) stops the render and saves its progress so it can be resumed, and **Ctrl+C, then Ctrl+D** stops it and keeps nothing; see *Stopping and resuming*. **Extras** has GPU info, file info, help for every flag, the machine report, the update ring, the remembered folders and **Merlin (Convolution)**, which opens a window of its own; see *Merlin*.
 
 **Updates.** At startup the guided renderer asks GitHub whether a newer release is out. It never downloads or installs anything. The **Fast Ring** (default) tells you about every release and the **Slow Ring** only about feature releases; set `KESTREL_NO_UPDATE_CHECK=1` to turn the check off. `ktrl.ini`, next to the executable, keeps the ring and the folders the pickers last opened.
 
@@ -104,8 +104,10 @@ kestrel --force-cli render input.mid -s soundfont.sfz -o output.wav
 | `--min-velocity N` | `0` | Skip every note quieter than velocity N, as if the file did not contain it. On black MIDI full of ghost notes this can make a render many times faster. |
 | `--volume P` | `100` | Volume of the finished file as a percentage, 0 to 200. Up to 100 it applies after the limiter, so 50 is half as loud, dense passages included. Above 100 the extra goes in before the limiter, which still holds the ceiling, so the mix gets denser rather than louder. |
 | `--dc-blocker` | off | Filter out everything below 15 Hz before the limiter. Very dense mixes build up an inaudible low-frequency rumble that the limiter spends its headroom on; with this on, the music gets that headroom back. |
-| `--limiter` | `brickwall` | `brickwall` never exceeds its ceiling. `omni` is kept only for level-matching against OmniConverter, BASS or XSynth. `off` clips, and is refused for encoded output. |
+| `--limiter` | `balanced` | `balanced` takes the mix in 2.5 dB lower and levels sustained loud passages before the brickwall, so peaks are not pinned at the ceiling. `brickwall` never exceeds its ceiling and holds its gain for 20 ms, which keeps it from distorting low notes. `omni` is kept only for level-matching against OmniConverter, BASS or XSynth. `off` clips, and is refused for encoded output. |
 | `--ceiling-db` | `0`, or `-1` for lossy | The limiter's ceiling in dBFS. |
+| `--coalesce on\|off` | `on` | Render duplicate notes (the same channel, key, velocity, tick and release, as layered tracks write them) as one voice at their summed gain. The same sound to within float rounding, and on a dense file far more of it is heard, because fewer voices are stolen or dropped. `off` renders every note as its own voice. |
+| `--tempo-timing` | `bassmidi` | How a tempo change is timed. `bassmidi` times it as BASSMIDI's own player does: on the next whole sample, the ticks it ran past carried over. `exact` plays the tempo map as written, as OmniConverter does, and is the same length at every `--rate`. They differ only on files with many tempo changes. `info` prints both lengths when a file's differ. |
 | `--note-grid` | off | Hold notes to BASSMIDI's 4 ms envelope grid, so notes shorter than 4 ms still sound. Only for files that rely on it. |
 | `--phase-mode` | `baseline` | `analytic` is experimental phase rotation: stacked copies of a note get different phases. Needs extra memory and minutes of preparation; see [its guide](https://github.com/thtstickyboi/kestrel-midi/blob/main/docs/analytic-phase-rotation.md). |
 | `--interp` | `linear` | `nearest`, `linear` or `cubic`. Cubic reads twice as many samples per voice. |
@@ -116,7 +118,7 @@ kestrel --force-cli render input.mid -s soundfont.sfz -o output.wav
 | `--no-resume` | off | Keep no progress file at all: nothing saved as it goes or when it stops, and the audio goes straight to the output. |
 | `--31edo` | off | Play a MIDI as the 31-EDO template writes it. A MIDI with a note key over 127 is detected and played this way without it; the flag is for one that has none in the part of each track that is looked at. |
 | `--format` | `float32` | `float32` or `pcm16`, for WAV. |
-| `--backend` | `gpu` | `cpu` is the reference implementation: correct, slow, single-threaded. |
+| `--backend` | `gpu` | `cpu` is the reference implementation: correct, slow, single-threaded. `merlin` is the experimental convolution renderer; see *Merlin*. |
 | `--gpu-backend NAME` | automatic | `vulkan`, `dx12`, `metal` or `gl`. Kestrel prefers Vulkan, which is also the faster one on Windows. |
 | `--gpu-adapter TEXT` | automatic | Which card, by any part of its name: `--gpu-adapter intel`. In the guided renderer, `--adapter N` picks card N from its list. |
 | `--nan-guard` | off | Check every block for NaN and Inf. |
@@ -161,6 +163,14 @@ kestrel --force-cli render song.mid -s piano.sfz --track 3 -o track3.wav
 - **Stems** go in a folder named after the MIDI, as `003 Piano.flac`, in the format `--stem-format` names. 32-bit float WAV stems skip the limiter so they add back up to the mix. Every stem runs the file's whole length, so WAV stems of a big file can reach hundreds of gigabytes; Kestrel checks the free space first. FLAC makes the silence nearly free.
 - **One file** (`--merge`) sums the tracks exactly, then applies `--volume`, the limiter and the encode once. The mix is held in memory, about 92 MB per minute of audio, and a stopped merge writes no file.
 - **Speed:** up to 256 tracks render together, and `--track-jobs N` sets the CPU threads that prepare them (8 by default). A silent stretch of a track never reaches the GPU. The progress screen's speed is of the file being made, so a big merge can honestly read below 1x realtime.
+
+### Merlin (experimental)
+
+New in 1.4.0. Merlin is a second renderer, started from **Extras → Merlin (Convolution)** in the guided renderer, or with `--backend merlin`. Kestrel keeps a pool of sounding voices and steps through the song a block at a time. Merlin renders **one key at a time for the whole song** and mixes the keys afterwards, so it has no voice pool and steals or drops nothing: every note of the file is rendered. A render is not the same file as Kestrel's of the same MIDI, because where Kestrel's pool saturates it lets notes go and Merlin does not.
+
+- **It is very intensive, and it does not promise to finish.** It makes a pass over the file to arm itself, then keeps what it renders for each key on disk while it works, in the output's folder or wherever there is room. That store grows with the note count: over a hundred gigabytes for the largest file tested, which took about 23 minutes on an RTX 5060 Laptop. It wants a capable GPU and several gigabytes of RAM. The guided renderer says this and asks before it starts; any fault a render causes is yours.
+- **What it refuses,** before it loads the soundfont: a file of 200 GB or more, or with more than 25 billion notes, to spare your drive and your power bill; a 31-EDO file; `--min-velocity`; `--track` and `--tracks`; analytic phase; and more than one soundfont. `--max-voices` and the stealing flags mean nothing to it. Kestrel does all of those.
+- **No resume.** A Merlin render cannot be saved part-way. Ctrl+C stops it and keeps nothing, and the partial file is removed.
 
 ### Several MIDIs at once
 
@@ -226,6 +236,7 @@ FalconEye is Kestrel's error catching and logging, new in 1.2.2. Nothing it writ
 ## Known limitations
 
 - **No effects.** No reverb or chorus; CC91 and CC93 do nothing.
+- **Merlin is experimental.** Channel volume and/or expression (CC7, CC11) are not properly applied by it yet, a file that bends a lot renders slower than one that does not, and it does not yet do 31-EDO files, `--min-velocity`, per-track renders or more than one soundfont. These are known and next on the list.
 - **Note boundaries can click on presets with no attack or release**, such as synth leads and square-wave basses, because Kestrel starts and stops a voice on its exact frame. It is the largest known audible gap.
 - **A merge isn't the whole file.** It is the sum of the tracks as each sounds alone, so a file whose tracks drive each other's channels merges noticeably differently from a normal render. That's by design.
 - **On the densest files the host is the bottleneck.** MIDI reading runs on one CPU core, and a block carrying around a billion note-ons takes minutes of host work while the GPU waits.
@@ -235,7 +246,9 @@ FalconEye is Kestrel's error catching and logging, new in 1.2.2. Nothing it writ
 - **VRAM figures** in the progress screen and the JSON feed are Windows only. **NaN checking is off** unless you pass `--nan-guard`.
 - **FalconEye on Linux and macOS is new, and a crash on purpose hasn't been tried on either.** The machine report has run on Linux. There, the watcher reads how a render ended from the system's own crash records and logs, not from the render itself. There are no minidumps, and some Linux distributions only let certain groups read the kernel log. macOS has never run it, and Kestrel has never been run on a Mac at all. If you use either, a machine report and your impressions would help.
 - **Resume is exact, so it is strict.** A checkpoint is refused after an update or a rebuild of Kestrel, and after any change to the MIDI, the soundfonts or the settings. A resume of a per-track render renders the tracks that were under way again from their start.
-- **A batch cannot render a 31-EDO file,** and a template file whose note keys over 127 come later than the start of each track, or never, needs `--31edo`.- **A soundfont over 2 GB renders about 4% slower,** because its samples are split across GPU buffers. Past 8 GB of samples, it doesn't load.
+- **A file with note keys over 127 that is not a 31-EDO template is still played as one.** Kestrel takes such a key for the template's, so a file that merely has one is retuned. Known, and next on the list.
+- **A batch cannot render a 31-EDO file,** and a template file whose note keys over 127 come later than the start of each track, or never, needs `--31edo`.
+- **A soundfont over 2 GB renders about 4% slower,** because its samples are split across GPU buffers. Past 8 GB of samples, it doesn't load.
 
 ## Planned
 

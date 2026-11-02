@@ -88,11 +88,11 @@
     // Analytic phase is prepared per render from the loaded bank, not by the
     // loader, so none of its flags needs the soundfont loaded again.
 
-[14] src/bin/kestrel/tui/checks.rs:531
+[14] src/bin/kestrel/tui/checks.rs:534
     // A gain on the output since 1.2.1. It used to be baked into every
     // voice's gain, which made a loaded bank depend on it.
 
-[15] src/bin/kestrel/tui/checks.rs:536
+[15] src/bin/kestrel/tui/checks.rs:539
 /// Check typed flags against what the earlier steps already chose.
 ///
 /// Anything clap itself would reject is left for clap, which says why better
@@ -100,22 +100,22 @@
 /// step -- a second MIDI, soundfont or output -- plus `--adapter`, which only
 /// exists here.
 
-[16] src/bin/kestrel/tui/checks.rs:576
+[16] src/bin/kestrel/tui/checks.rs:579
         // The environment check numbers its adapters, and a number typed after
         // --gpu-backend is someone reaching for one of them (reported
         // 2026-09-20: `--gpu-backend 5`, then `--gpu-backend 3`). Say which
         // flag takes the number.
 
-[17] src/bin/kestrel/tui/checks.rs:698
+[17] src/bin/kestrel/tui/checks.rs:701
     /// Every character the timestamp puts in a name has to be legal on
     /// Windows, which is why it is not literally `mm-dd-yyyy | hh:mm:ss`.
 
-[18] src/bin/kestrel/tui/checks.rs:809
+[18] src/bin/kestrel/tui/checks.rs:812
     /// Several files picked together are a batch, which does not render a file
     /// written for the 31-EDO template yet: that one is reported as a file that
     /// can't be rendered, with the way out, and the rest are as they were.
 
-[19] src/bin/kestrel/tui/checks.rs:834
+[19] src/bin/kestrel/tui/checks.rs:837
     /// A per-track render's steps choose the tracks, the output and the
     /// format, so typing them is refused there; typed into a normal render
     /// they would turn it into a per-track one, so they are refused there too,

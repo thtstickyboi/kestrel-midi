@@ -76,40 +76,45 @@
     /// ranked, partition long and the work is wasted. Kept here so the three
     /// call sites cannot drift apart.
 
-[12] src/config.rs:169
+[12] src/config.rs:165
+    /// The convolution backend. Offline only, and see
+    /// the development notes for what it does and does not
+    /// do yet -- notably it has no head correction, so long notes are wrong.
+
+[13] src/config.rs:173
     /// Optional analytic sample rotation (`--phase-mode analytic`, contributed
     /// by @DixelU). Baseline by default, and baseline allocates nothing for it.
 
-[13] src/config.rs:173
+[14] src/config.rs:177
     // ---- stream ----------------------------------------------------------
     /// Output sample rate in Hz.
 
-[14] src/config.rs:176
+[15] src/config.rs:180
     /// Output channel count. Only 2 is implemented; kept here so the constant
     /// never gets hardcoded at a call site.
 
-[15] src/config.rs:180
+[16] src/config.rs:184
     // ---- block scheduling ------------------------------------------------
     /// Frames rendered per dispatch. At 48 kHz, 4096 frames is about 85 ms,
     /// which makes per-block dispatch overhead irrelevant.
 
-[16] src/config.rs:184
+[17] src/config.rs:188
     /// Frames handled per workgroup reduction step inside the render shader.
     /// `block_frames` must be a multiple of this.
 
-[17] src/config.rs:187
+[18] src/config.rs:191
     /// Frames between note-off gate checks, and so the granularity of a
     /// note-off. Must be a multiple of `reduce_tile`. Every voice reads one
     /// gate entry per gate tile, which measured 6.8 ms per block at a million
     /// voices when it was tied to the reduce tile; at 32 frames the check
     /// costs a quarter of that and a note still releases within 0.7 ms.
 
-[18] src/config.rs:195
+[19] src/config.rs:199
     /// Upper bound on workgroups dispatched by the render pass. Voices beyond
     /// `max_render_workgroups * workgroup_size` are handled by looping inside
     /// the shader. This directly sizes the partial-sum buffer.
 
-[19] src/config.rs:199
+[20] src/config.rs:203
     /// The most voices one submission to the device renders, to start from. A
     /// block that covers more goes up as several submissions, its render pass
     /// split by workgroup range and a batch's lanes split between them.
@@ -134,7 +139,7 @@
     /// 4,194,304 a part is about 0.46 s on that card, four times under
     /// Windows' limit.
 
-[20] src/config.rs:223
+[21] src/config.rs:227
     /// Upper bound on the grid taken by every *per-voice* pass: spawn, steal
     /// selection, compaction, and the radix sort. All of them grid-stride over
     /// the pool, so this decides how many workgroups walk it and never what
@@ -144,22 +149,22 @@
     /// way. Only the tests set it, to force the striding path on a pool small
     /// enough to fit on a test machine.
 
-[21] src/config.rs:233
+[22] src/config.rs:237
     // ---- voice pool ------------------------------------------------------
     /// Hard ceiling on concurrent voices.
 
-[22] src/config.rs:236
+[23] src/config.rs:240
     /// Voices per (channel, key) note-on. SoundFont layers spawn one voice
     /// each; this caps runaway presets.
 
-[23] src/config.rs:242
+[24] src/config.rs:246
     /// Note-ons quieter than this are not rendered at all. Each is skipped on
     /// the host before it is previewed or offered to admission, together with
     /// the note-off that pairs with it, so the render is the render of the
     /// file with those notes taken out. 0, the default, keeps every note;
     /// velocity 0 is a note-off and never reaches this.
 
-[24] src/config.rs:248
+[25] src/config.rs:252
     /// Hold notes to BASSMIDI's 4 ms envelope grid: a note-off takes effect at
     /// the voice's first grid point at or after it, and a release shorter
     /// than a step fades over one step. See `env_step_frames`. Off by default,
@@ -168,7 +173,12 @@
     /// BASSMIDI sounding notes shorter than 4 ms, such as audio encoded as
     /// one-sample notes, which render silent without it.
 
-[25] src/config.rs:256
+[26] src/config.rs:260
+    /// How a tempo change moves the clock: BASSMIDI's file player (the
+    /// default), or the tempo map exactly, as OmniConverter plays it. They part
+    /// only where a change falls between two samples. See `midi::TempoClock`.
+
+[27] src/config.rs:264
     /// Play the file as the 31-EDO template writes it: note keys read as
     /// 0 to 255, one step of 31 each, and played on three tuned channels.
     /// Off unless asked, but a render turns it on for a file that has a note key
@@ -177,14 +187,14 @@
     /// BASSMIDI does with it. `--31edo` is for a template file that has none in the
     /// part that is looked at. See `edo31`.
 
-[26] src/config.rs:264
+[28] src/config.rs:272
     /// A tuning that gives every key a pitch of its own: see `tuning`. `None` is
     /// 12-tone, and then nothing is changed. Not for drum parts. **For a program
     /// that uses the library: no command-line flag sets it.** `--edo`, `--scala`,
     /// `--kbm` and `--tuning-ref` were retired before 1.3.0 shipped, because the only
     /// files played are written for the 31-EDO template.
 
-[27] src/config.rs:270
+[29] src/config.rs:278
     /// Apply MIDI Tuning Standard single-note tuning changes and bulk dumps, which
     /// retune individual keys from the file's own messages. **Off, and no command-line
     /// flag turns it on** (`--mts-notes` was retired before 1.3.0 shipped): BASSMIDI
@@ -192,7 +202,7 @@
     /// renders untuned there and here. The scale/octave form, which BASSMIDI reads, is
     /// always read.
 
-[28] src/config.rs:277
+[30] src/config.rs:285
     /// Admission candidates one block may hold before they are thinned.
     ///
     /// Admission cannot choose until a block's last note-on is in, so every
@@ -209,7 +219,59 @@
     /// (98.5M note-ons), and it never counts for less than twice
     /// `pool_slots()`, so thinning cannot starve admission.
 
-[29] src/config.rs:293
+[31] src/config.rs:301
+    /// Build a pool-less backend's (merlin's) spawn commands for the next
+    /// block on the thread that prepares it, while the backend finishes the
+    /// current one, rather than on the render thread once it is committed.
+    /// The per-voice backends cannot: their admission waits on the device's
+    /// live count. The output is the same bytes either way; off exists so a
+    /// test can hold the two paths to that.
+    ///
+    /// Built into the same buffer the backend was given, once its `spawn` has
+    /// returned, so it costs no memory: a second buffer alive beside the first
+    /// measured +190 MiB of peak on the 44.75 M-note test file, 2026-09-19,
+    /// and would duplicate gigabytes on a file whose densest block holds
+    /// hundreds of millions of note-ons.
+
+[32] src/config.rs:314
+    /// Duplicate-note coalescing: note-ons that would build voices identical
+    /// in everything but their gain build one, at the summed gain. **Off by
+    /// default**, and turning it on by default is the user's decision after a
+    /// listen: it is the same sound up to float rounding (`N * g` against
+    /// `g + ... + g`), not the same bytes. `coalesce` has what "identical"
+    /// means and how a note-on's release is known before its note-off arrives;
+    /// the development notes have the brief.
+
+[33] src/config.rs:322
+    /// How many note-ons the coalescing look-ahead reads past one whose release
+    /// it is still waiting for, before it gives up and renders that one
+    /// unmerged. Bounds the look-ahead's memory at 16 bytes a note-on, so 64 MiB
+    /// at the default; it changes which notes merge, never whether a merge is
+    /// right. A function of the file alone, so the same on every run.
+
+[34] src/config.rs:328
+    /// Threads beside the drain's own that read the MIDI file for it
+    /// (the development notes). **0 reads everything on the drain's thread**, as
+    /// every render did before 2026-10-16. Any other number N puts the
+    /// coalescing look-ahead (`coalesce::Lookahead`) on a thread of its own,
+    /// and has each reading of the file -- the drain's, and the look-ahead's --
+    /// decoded and merged by workers, each over a run of neighbouring tracks
+    /// (`MidiStream::set_threads`): one per `drain_tracks_per_worker` tracks,
+    /// and at most N. The output is the same bytes on any number: what is
+    /// read ahead is a function of the file alone.
+
+[35] src/config.rs:338
+    /// Tracks one worker merges before a reading of the file gets another
+    /// (`drain_threads`). 8,192, set 2026-10-20 from a sweep on the user's
+    /// 16-thread laptop (the development notes, "Checked on real material"): one
+    /// worker a reading was the fastest on every real file there, up to 6,292
+    /// tracks, because with one there is no heap over the workers' chunks for
+    /// the drain or for the look-ahead that holds it up; it stopped keeping up
+    /// between 6,000 and 16,000 tracks that all play at once. It was 1,536,
+    /// set on four cores, which gave 3 to 5 workers to files that ran 7-15%
+    /// faster on one.
+
+[36] src/config.rs:348
     /// Threads that build a block's admitted voices, `Driver::materialise`.
     /// The output is the same bytes on any number: each thread builds its own
     /// runs of candidates into their own places in the list.
@@ -222,7 +284,15 @@
     /// measured the same. A per-track render sets 1, because its tracks
     /// already run on `--track-jobs` threads.
 
-[30] src/config.rs:305
+[37] src/config.rs:360
+    /// The most spawn commands the driver builds at once for a backend that
+    /// takes a block in parts (`Backend::spawn_parts`, merlin). A block with
+    /// more is built and handed over this many at a time, so the commands of
+    /// one block never all exist together -- ~100 bytes a command, so the
+    /// default holds ~100 MiB. A block with fewer goes as one, as it always did.
+    /// The output does not depend on it.
+
+[38] src/config.rs:367
     /// Ceiling on how much of the pool one block may steal, in percent.
     ///
     /// Without this, a block whose note-ons outnumber the pool steals *every*
@@ -242,7 +312,7 @@
     /// sample regions and therefore sorts worse. The development notes have
     /// both curves.
 
-[31] src/config.rs:324
+[39] src/config.rs:386
     /// Frames a stolen voice fades over instead of being cut.
     ///
     /// A steal used to take effect at frame zero for every victim at once,
@@ -253,28 +323,28 @@
     /// has to be back under `max_voices` by the end of the block and a
     /// release rate read from the region could take arbitrarily long.
 
-[32] src/config.rs:334
+[40] src/config.rs:396
     /// Re-sort the voice pool by (region, envelope stage, phase) during
     /// compaction. This is the single biggest performance lever in the whole
     /// renderer and it is nearly free, because compaction already has to copy
     /// the pool. Off only for measuring what it buys.
 
-[33] src/config.rs:339
+[41] src/config.rs:401
     /// Skip the device for a block in which no voice is alive and none is
     /// admitted, writing its zeros on the host instead. The output is the same
     /// bytes either way -- such a block renders exact zeros -- and the limiter
     /// still runs over it, so its lookahead drains as it would. Off only to
     /// check that it is.
 
-[34] src/config.rs:350
+[42] src/config.rs:412
     /// Envelope level below which a releasing voice is considered dead.
     /// -100 dB by default.
 
-[35] src/config.rs:353
+[43] src/config.rs:415
     /// Enable the per-voice low-pass filter. SoundFonts that leave the cutoff
     /// at its default (13500 cents) bypass it anyway.
 
-[36] src/config.rs:356
+[44] src/config.rs:418
     /// `--volume` as a factor: 1 leaves the output as it is.
     ///
     /// Applied by `limiter::OutputStage`, not per voice, in two parts. At or
@@ -288,7 +358,7 @@
     /// still peaked at the ceiling: it eased the limiting rather than lowering
     /// the file. It also made the loaded bank depend on it.
 
-[37] src/config.rs:369
+[45] src/config.rs:431
     /// High-pass the mix ahead of the limiter, removing the sub-audio
     /// pedestal a high voice count builds up.
     ///
@@ -300,26 +370,37 @@
     /// library and 38.2% with a sampled piano (2026-08-23). Off by default,
     /// because it changes the bytes of every render it is on for.
 
-[38] src/config.rs:382
+[46] src/config.rs:444
     /// How many copies of the params table the sound controllers CC71-CC75 may
     /// build. Each is a full rebuild of the table, so this trades host and
     /// device memory for how finely a file can sweep those controllers; past
     /// the cap a channel reuses the nearest copy it already has.
 
-[39] src/config.rs:389
-    /// Which limiter runs. `Brickwall` is the default: a lookahead true-peak
-    /// limiter that never exceeds the ceiling, so `clamp_block` never has to
-    /// hard-clip, and that only pulls the gain down around the peak that needs
-    /// it instead of for a third of a second afterwards. `Omni` is the port of
-    /// the one OmniConverter ships, kept for level-matching against BASS and
-    /// XSynth but deprecated for rendering.
+[47] src/config.rs:451
+    /// Which limiter runs. **A render from the command line, the guided
+    /// renderer or the API gets `Balanced`**, because that is what `--limiter`
+    /// defaults to; `Config::default()` keeps `Brickwall`, for library callers
+    /// and the tests, whose hashes it would move. `Balanced` takes the mix in
+    /// 2.5 dB lower, levels sustained loud passages ahead of the brickwall so
+    /// the peaks are not pinned at the ceiling, to about omni's level, and lets
+    /// go of a loud burst in about 150 ms rather than omni's half second; see
+    /// `leveler`. `Brickwall` is a lookahead true-peak limiter that never
+    /// exceeds the ceiling, so `clamp_block` never has to hard-clip, and that
+    /// only pulls the gain down around the peak that needs it instead of for a
+    /// third of a second afterwards. `Omni` is the port of the one OmniConverter
+    /// ships, kept for level-matching against BASS and XSynth but deprecated
+    /// for rendering.
 
-[40] src/config.rs:400
+[48] src/config.rs:465
+    /// What `LimiterMode::Balanced` is tuned to. A preset with no flags: it
+    /// is here so that the numbers sit with the other tunables.
+
+[49] src/config.rs:472
     /// Brickwall release in milliseconds. Short keeps the material after a
     /// transient at full level; too short modulates the gain at audio rate on
     /// sustained loud material, which is its own distortion.
 
-[41] src/config.rs:404
+[50] src/config.rs:476
     /// Time constant of the brickwall's sustained stage, in milliseconds.
     ///
     /// A single release time has to choose between pumping, if it is long, and
@@ -336,22 +417,30 @@
     /// the development notes and the README. Kept because material with real transients
     /// is a different question.
 
-[42] src/config.rs:420
+[51] src/config.rs:492
+    /// How long the brickwall keeps its gain, in milliseconds, after the
+    /// requirement last reached it, before it lets go. A steady low note makes
+    /// the requirement dip at each peak and recover between them, and a release
+    /// that starts in between modulates the gain once a half-cycle: -31 dB
+    /// distortion at 30 Hz. 20 ms covers the lowest piano note with margin; 0 is
+    /// the limiter as it was before the hold, exactly.
+
+[52] src/config.rs:499
     /// Detect inter-sample peaks by 4x oversampling rather than looking at the
     /// samples alone. Costs a little; catches overshoot that a sample-peak
     /// limiter lets through.
 
-[43] src/config.rs:428
+[53] src/config.rs:507
     // ---- sample pool -----------------------------------------------------
     /// Resample every sample to a single rate at load time. When false, the
     /// per-sample rate ratio is folded into
     /// the phase step instead, which is lossless but leaves the pool mixed-rate.
 
-[44] src/config.rs:433
+[54] src/config.rs:512
     /// Soft ceiling on sample-pool bytes on the device. When the pool does not
     /// fit, its rate is halved until it does rather than failing outright.
 
-[45] src/config.rs:436
+[55] src/config.rs:515
     /// The most bytes of the sample pool one device buffer holds; 0, the
     /// default, is as much as the adapter binds to a shader. A pool bigger
     /// than that is split across up to `gpu::POOL_PARTS_MAX` buffers (1.2.3).
@@ -359,7 +448,7 @@
     /// Set lower only to make a small pool split, which is how the split is
     /// tested against the single buffer it must match byte for byte.
 
-[46] src/config.rs:444
+[56] src/config.rs:523
     // ---- numerics --------------------------------------------------------
     /// Clamp the final mix into [-1, 1] as the last step of every block.
     ///
@@ -370,7 +459,7 @@
     /// [-1, 1] exactly, so clamping there destroys the measurement rather
     /// than protecting anything. The CLI turns it off for exactly that pair.
 
-[47] src/config.rs:455
+[57] src/config.rs:534
     /// Ramp channel gain across a gate tile instead of stepping it.
     ///
     /// Channel volume and expression are published once per gate tile and were
@@ -388,7 +477,7 @@
     ///
     /// Off restores the stepped behaviour exactly, for A/B and for reverting.
 
-[48] src/config.rs:473
+[58] src/config.rs:552
     /// Ramp biquad coefficients across a gate tile instead of switching them.
     ///
     /// CC71 and CC74 move the filter, and a voice re-reads its coefficients
@@ -406,7 +495,7 @@
     /// Off restores the instant switch exactly. Independent of
     /// [`Config::gain_ramp`] so the two can be reverted separately.
 
-[49] src/config.rs:491
+[59] src/config.rs:570
     /// Evaluate SF2 vibrato and tremolo LFOs.
     ///
     /// Real General MIDI sets lean on these: the font behind the Microsoft GS
@@ -415,7 +504,7 @@
     /// the pre-0.2.5 behaviour, which is also the cheapest path: the whole
     /// evaluation compiles away.
 
-[50] src/config.rs:500
+[60] src/config.rs:579
     /// Evaluate the SF2 modulation envelope and its pitch and filter
     /// destinations.
     ///
@@ -427,7 +516,7 @@
     /// cheapest path -- the evaluation compiles away and the voice pool drops
     /// its release-age field.
 
-[51] src/config.rs:512
+[61] src/config.rs:591
     /// Use Kahan compensation for the per-thread partial sums in the reduce
     /// pass.
     ///
@@ -438,7 +527,7 @@
     /// test still shows error with the tree in place. It does not change
     /// determinism either way: the order is fixed in both branches.
 
-[52] src/config.rs:522
+[62] src/config.rs:601
     /// The most render workgroups a block may have for the reduce pass to give
     /// each output sample a thread, rather than a workgroup. It makes no
     /// difference to a byte -- the thread does the workgroup's adds in the
@@ -447,18 +536,369 @@
     /// a per-track render of thin stems waits for. Held to the workgroup size
     /// and to 256. 0 turns it off, which the tests use to compare the two.
 
-[53] src/config.rs:532
+[63] src/config.rs:611
     /// Compile the shaders without naga's automatic bounds clamps and loop
     /// bounding counters. Every index in the shaders comes from a count the
     /// host controls, so the clamps are dead weight, but turning them off
     /// means a bug becomes an out-of-bounds access rather than a clamped one.
     /// Off by default; measure before turning it on.
 
-[54] src/config.rs:539
+[64] src/config.rs:618
+    // ---- merlin, the convolution backend ---------------------------------
+    //
+    // See the development notes. These only bite when the
+    // merlin backend is selected.
+    /// Ceiling on one kernel's length in frames. **Zero means derive it from
+    /// the bank**, which is what it should normally be.
+    ///
+    /// This is no longer the longest note. A kernel holds a note's *release
+    /// tail* -- the body is the head correction's, and the impulse is delayed
+    /// to meet the tail -- so its length is a property of the region and not of
+    /// the material. Deriving it from the bank's longest release is therefore
+    /// exact rather than a guess, and it is per entry: the reference bank runs
+    /// 1.25 s on 54 keys and 4.0 s on 6.
+    ///
+    /// *It used to be a single constant of 88,064 frames (1.83 s) for every
+    /// entry, which cut the 4.0 s keys off at 46% of their tail and was the
+    /// "some notes are cut off abruptly" of the first full render. Five
+    /// separate records deferred it before it was audible.*
+    ///
+    /// Setting it non-zero clamps the derived value, which truncates any
+    /// region whose release is longer. It is a memory lever, and the ring costs
+    /// `buses * lags * bins * 8 B` -- 4.2 MB per partition at 256 buses.
+
+[65] src/config.rs:643
+    /// Reference points per release span. Ten is the development notes section 3b's
+    /// ~10 dB dynamic-range cap; fewer is cheaper and less accurate.
+
+[66] src/config.rs:646
+    /// Ceiling on distinct entries -- `(waveform, release reference)` pairs --
+    /// merlin will hand out ids for.
+    ///
+    /// **This stopped being a memory budget on 2026-09-07**, when the kernel
+    /// cache started evicting. It is now the size of the id space and costs 16
+    /// bytes of `kmeta` per entry whether or not that entry's kernel is
+    /// resident, so a million entries is 16 MiB and the default is generous on
+    /// purpose: the thing that actually has to fit is the *peak block*, and
+    /// `merlin_cache_mb` is where that is said.
+    ///
+    /// *It used to default to 2,048 and also set the cache budget, because an
+    /// entry seen once stayed resident for the whole render. Channel bend broke
+    /// that: a standing bend is a resample and does not collapse, so one test
+    /// file goes from 3,252 distinct entries to 99,270 when bend is exact.*
+
+[67] src/config.rs:661
+    /// Ceiling on distinct cached **waveforms**, which is not the same number
+    /// and is much smaller: a waveform's release buckets share it. Both test
+    /// files come to 512 waveforms against 2,718 and 2,924 entries.
+    ///
+    /// This sizes the head correction's cache, at
+    /// `waves * merlin_head_frames * 4 B`. It used to be sized by the entry
+    /// ceiling, which was a 4x overcharge on the one buffer whose length is the
+    /// longest note merlin can render.
+
+[68] src/config.rs:670
+    /// Kernel cache budget in MiB. **Zero derives it** from the entry ceiling
+    /// and the mean release tail, which is what a bucket-0 entry costs.
+    ///
+    /// A ragged cache spends its budget where the material asks for it, so the
+    /// old `entries * lags` sizing no longer describes it: two runs with the
+    /// same entry count can want very different amounts. One storage binding
+    /// caps this at 2 GiB on this adapter whatever is asked for.
+
+[69] src/config.rs:678
+    /// **Host** budget for cached sustain renders, in MiB.
+    ///
+    /// Not the same cache as `merlin_cache_mb`, which is the device's kernel
+    /// spectra. This one is the CPU renders those spectra are transformed
+    /// *from*, and the head correction reads its rows from the same buffers --
+    /// one `f32` per frame per waveform, so a region with a 1.5 s release tail
+    /// is 288 KiB and a file wanting 76,912 waveforms is **21.5 GiB**. That was
+    /// measured on 2026-09-09 and it is why this exists: the 2026-09-07
+    /// residency work gave both *device* caches eviction and left the host side
+    /// growing without limit.
+    ///
+    /// A rebuild is a `CpuSynth` render, so this trades RAM for build time --
+    /// but far less sharply than the device cache does, because a host entry is
+    /// several times smaller than the kernel spectra it produces. The same file
+    /// holds ~1,465 kernels in 2.32 GiB of device cache and fits roughly 14,000
+    /// sustain renders in 4 GiB here.
+    ///
+    /// Zero means no limit, which is the pre-2026-09-09 behaviour and is kept
+    /// only for measuring what the budget costs.
+
+[70] src/config.rs:698
+    /// Render merlin's sustain waveforms -- what its kernels and head rows are
+    /// cut from -- on the device, many at a time, through the per-voice render
+    /// pass (`merlin::gpubuild`), rather than one at a time on a core with
+    /// `CpuSynth`. The two agree to -140 dB of a note's peak; they are not the
+    /// same bytes.
+    ///
+    /// **Off by default, because it is not faster yet.** Measured 2026-10-16 on
+    /// the first 30 s of the 44.75 M-note test file with every note convolved:
+    /// building 5.4 s on the device against 6.0 s on one core, and on the whole
+    /// file at default routing slower than the CPU's ~1.6 s. Each voice renders
+    /// as one thread walking through time, and a block's batch is a handful of
+    /// voices, so the device waits on latency, not work. See the development notes.
+
+[71] src/config.rs:711
+    /// Notes a waveform must be asked for before merlin builds it a kernel.
+    /// Everything below the threshold renders on the ordinary per-voice path.
+    ///
+    /// **This is the per-voice fallback, and it is promotion rather than
+    /// selection.** The design notes (section 6, and section 5 pass 8)
+    /// both call for routing entries that are heard too few times to be worth a
+    /// kernel -- an entry heard once costs a `CpuSynth` render plus an FFT to
+    /// save one impulse's worth of convolution, which is a straight loss. What
+    /// neither says is how to know the count in advance, and merlin cannot:
+    /// it is a streaming `Backend` that learns a note when `spawn` hands it
+    /// over. So every waveform starts on the per-voice path and the `N`th note
+    /// to ask for one promotes it, which reaches the same population without a
+    /// pre-scan.
+    ///
+    /// **Measured, 2026-09-09** (`entry_probe --post-3b` on the 44.75 M-note
+    /// test file): uses per entry are median 18, p95 424, max 707,522. At 256
+    /// that routes 87.1% of entries to the per-voice path and moves 2.47% of
+    /// the notes -- 4,905 entries left against the 3,682 the same file has with
+    /// bend neutralised, which renders in 78.2 s against 574.7 s as written.
+    /// The per-voice backend renders the whole file in 193 s, so the 2.47% it
+    /// picks up is about five seconds of work.
+    ///
+    /// Zero disables it: every waveform is convolved, which is the behaviour
+    /// before this existed and is what a null test against the pure convolution
+    /// path wants.
+
+[72] src/config.rs:737
+    /// Count what the per-entry tail correction for CC7 would cost, and report
+    /// it at the end without changing a sample.
+    ///
+    /// The design's option 2 for the per-channel bus: a released kernel is a
+    /// pure exponential, so a step in channel gain can be corrected by one
+    /// extra impulse per `(entry, channel)` rather than per note. Whether that
+    /// is affordable turns on how many such pairs are live when a channel's
+    /// gain moves, which nothing measured -- this measures it. Off by default;
+    /// it costs a hash per impulse.
+
+[73] src/config.rs:749
+    /// Pretend one storage binding holds only this many KiB. **Zero means the
+    /// adapter's own limit**, which is what a render uses.
+    ///
+    /// The two staging lists that scale with *notes in one step* rather than
+    /// with entries -- the head corrections and the delay line's impulses --
+    /// are scattered in as many passes as it takes to fit. Their sizes are the
+    /// material's to decide, and one merged black MIDI staged 33 M corrections
+    /// in a single 85 ms step, which is 2.375 GiB against a 2 GiB binding cap
+    /// that no flag can raise.
+    ///
+    /// This exists so that path is reachable on ordinary material: chunking is
+    /// only bit-exact because both scatters accumulate through integer atomics,
+    /// and a claim like that needs a test rather than an argument. See
+    /// `tests/merlin_chunked_scatter.rs`.
+
+[74] src/config.rs:764
+    /// Ceiling on firing *rows* in one partition step.
+    ///
+    /// Not the same as the entry count, and larger: the firing list is grouped
+    /// by bus, so one entry heard on several velocity buses takes a row on each.
+    /// A 35 s passage of one test file fires 3,024 rows against 2,346 distinct
+    /// entries.
+
+[75] src/config.rs:771
+    /// Distinct biquads merlin will hold, each owning two output buses.
+    ///
+    /// the development notes section 3(c): velocity's cutoff is an LTI filter, so it
+    /// belongs on a bus rather than in the cached waveform. The reference bank
+    /// has 128 velocity layers, all playing the same 88 samples -- keying the
+    /// cache on velocity multiplies it by 128 for nothing.
+    ///
+    /// **Zero, the default, sizes it from the bank and grows it on demand.**
+    /// No constant is right for every bank. The ring is `buses * lags * bins *
+    /// 8 B` in one storage binding, so each filter shortens the deepest kernel
+    /// the ring can hold: 384 left the reference bank's 4 s kernels whole and
+    /// cut a compact GM bank's 38.9 s tails at 7.3 s, and that bank's own
+    /// number, 64, was refused by a controller-heavy file that wanted 65. Too
+    /// few failed loudly; too many truncated quietly.
+    ///
+    /// Automatic sizing allocates the bank's own distinct filters, keeps the
+    /// ring deep enough for its deepest kernel, and doubles when a file interns
+    /// more -- up to what one binding holds at that depth, which is a property
+    /// of the card rather than a setting. Extra buses cost no GPU time, since
+    /// every pass dispatches over the filters actually seen; a fixed count only
+    /// ever bought VRAM held for buses nothing used.
+    ///
+    /// Non-zero pins the count, allocated up front and refused past.
+
+[76] src/config.rs:795
+    /// Frames of the sustaining waveform cached per distinct waveform, for the
+    /// head correction. **Zero means ten seconds.**
+    ///
+    /// **This is merlin's longest note**, and the only such limit left. The
+    /// delay line stopped having one when its kernels became release tails with
+    /// the impulse delayed to meet them; what remains is that a note's *body*
+    /// is read from here, so the row has to be as long as the note.
+    ///
+    /// A note held longer is clamped to it -- it sounds, and releases normally,
+    /// it just stops early -- and the count is reported. It is not dropped:
+    /// dropping is what the fixed kernel length used to do, and it lost 18,814
+    /// notes of one test file.
+    ///
+    /// Measured against the repertoire: longest notes of 9.08 s and 16.20 s,
+    /// out of 44.75 M and 824.17 M notes. Ten seconds clamps **nothing** on the
+    /// first, whose 20 longest notes all sit between 8 and 9.08 s, and
+    /// somewhere between 180 and 10,652 on the second -- those are its counts
+    /// past 16 s and past 8 s. `--merlin-head-ms` buys the rest at 4 B per
+    /// frame per waveform.
+    ///
+    /// The cost is `merlin_max_waves * frames * 4 B`: 1.37 GiB at the defaults,
+    /// which fits one storage binding.
+
+[77] src/config.rs:818
+    /// Round channel bend to this many cents before it reaches the cache key.
+    /// **Zero is exact**, and is the default.
+    ///
+    /// A bent note is a resample, so bend does not collapse: it multiplies the
+    /// entry count directly, and the development notes section 11 ranks it second among
+    /// the things that kill merlin -- roughly two thirds of one test file's
+    /// entries. Rounding the factor to a grid is the only lever, and 25 cents
+    /// nearly halves that file's cache.
+    ///
+    /// It is a **residency lever traded against pitch**, and the trade is
+    /// unusually sharp: a `w`-cent grid puts a note up to `w/2` cents off, and
+    /// half a cent of pitch error decorrelates a sustained note inside a
+    /// second. So a null test measures this knob and not the convolution unless
+    /// it is zero, which is why the default is zero rather than the 5 cents
+    /// section 10 measured with.
+
+[78] src/config.rs:834
+    /// Round each filter's cutoff to a grid of this many cents before it picks
+    /// its bus in key-major merlin. **Zero is exact**, and is the default.
+    ///
+    /// A bank that sweeps its cutoff with velocity has about one filter a
+    /// velocity, and each is a bus to filter and mix and a group that splits a
+    /// key's notes, so transforms too. Notes on one grid step share a bus. It
+    /// is an approximation traded for speed: a 2-pole slope puts a `w`-cent grid
+    /// at most about `w / 200` dB off above the cutoff, so a null test measures
+    /// this knob rather than the render unless it is zero.
+
+[79] src/config.rs:844
+    /// Key-major merlin's bucket pass in place of merlin: every note filed by
+    /// key with its length, nothing rendered, silence written. See
+    /// `merlin::bucket`. A diagnostic until key-major renders.
+
+[80] src/config.rs:848
+    /// Key-major merlin in place of time-major merlin: every key rendered over
+    /// the whole song into one master. Off here, as `Config::default()` is for
+    /// library callers and tests; the command line's `--backend merlin` turns
+    /// it, `merlin_key_major_gpu` and `merlin_key_parse` on, and
+    /// `--merlin-time-major` leaves them off. Alone it is the CPU reference
+    /// (`merlin::keymajor`), the oracle the device is nulled against, so short
+    /// files only.
+
+[81] src/config.rs:856
+    /// Key-major on the device (`merlin::kmgpu`): the convolution, the heads,
+    /// the biquads and the mix, where the reference adds every kernel frame on
+    /// the host.
+
+[82] src/config.rs:860
+    /// With `merlin_key_major_gpu`: the records come from merlin's own MIDI
+    /// front end (`merlin::keyparse`, `merlin::keyrec`), key group by key
+    /// group, with no driver, bucket store or spill. Without it, from the
+    /// driver and the bucket store, the oracle for the parser.
+
+[83] src/config.rs:865
+    /// On the device, a (block, entry) pair with fewer impulses than this is
+    /// added in the time domain instead of transformed. Zero transforms every
+    /// pair; `u32::MAX` adds every one directly. Either way the result is the
+    /// same convolution, rounded differently.
+
+[84] src/config.rs:870
+    /// Frames of a sustain segment on the device, rounded up to a partition.
+    /// A still note's body is played by kernels this long, one impulse each,
+    /// as far as it holds whole ones, where the head would read it a frame at
+    /// a time for every note sounding. Zero leaves every body on its head.
+
+[85] src/config.rs:875
+    /// Frames of sustains one pool on the device holds. Past it a key's windows
+    /// take another pool, and a window that alone needs more is read through
+    /// several, cut by waveform. Changes what is held, and the bits of a window
+    /// that is cut, by rounding.
+
+[86] src/config.rs:880
+    /// Records of a key planned at once, past which the rest wait for the
+    /// packing thread. Changes what is held, not what is rendered.
+
+[87] src/config.rs:883
+    /// The most of one key's records in one plan of the parsed render. A
+    /// window denser than this is planned in slices.
+
+[88] src/config.rs:886
+    /// The longest window of the per-key render, in frames. Zero is the most
+    /// the render takes on its own. Never below the carry.
+
+[89] src/config.rs:889
+    /// Note-ons of one key past which it comes from the parser a part at a
+    /// time, so its windows go on as its notes are released. Changes what is
+    /// held, not what is rendered.
+
+[90] src/config.rs:895
+    /// Records of a streamed key held in memory, past which those its windows
+    /// cannot take yet go to disk.
+
+[91] src/config.rs:898
+    /// Controllers the key parser holds in memory, past which they go to disk
+    /// in sorted runs. Changes what is held, not what is rendered.
+
+[92] src/config.rs:901
+    /// Merlin refuses a MIDI file of this many bytes or more, before anything
+    /// is loaded. Above what has been rendered and measured, a render's toll on
+    /// the disk and on power is not something to find out by accident.
+
+[93] src/config.rs:905
+    /// Bytes of prepared windows merlin's packing thread may have handed the
+    /// device's thread and not yet had put. Changes how far ahead the host
+    /// works, nothing that is rendered.
+
+[94] src/config.rs:909
+    /// For tests: the device's thread fails at its Nth window, to see what the
+    /// rest of the render does when it does. Zero, never.
+
+[95] src/config.rs:912
+    /// Events a worker of merlin's pre-pass reads before it tells the render
+    /// how far it has got, counts its note-ons toward the limit and looks to see
+    /// whether it was stopped. Changes how soon a stop is heard, nothing else.
+
+[96] src/config.rs:916
+    /// Merlin refuses a file of more note-ons than this. The pre-pass counts
+    /// them and stops as soon as it is past.
+
+[97] src/config.rs:919
+    /// Bytes the key store leaves free on its disk. It stops there and the
+    /// parser reads the file a group at a time, rather than fill the disk.
+
+[98] src/config.rs:922
+    /// Notes a bend moves under follow it: each channel's are rendered unbent
+    /// in warped time, a pass of their own for each key, and read back at the
+    /// bend's speed, so their envelopes stretch with it. Off, a note keeps the
+    /// bend it was struck with.
+
+[99] src/config.rs:927
+    /// The bucket store's memory, in MiB, past which its records go to a file.
+    /// **Zero means automatic**: a sixteenth of the machine's total RAM, from
+    /// 256 MiB to 2 GiB. Fixed per machine and never taken from what is free,
+    /// so one command files the same records the same way on one machine. It
+    /// moves where a record is held, never which records there are.
+
+[100] src/config.rs:933
+    /// Keep an order-free digest of every note merlin plans, copy by copy, and
+    /// log it at the end; the bucket pass logs what it says merlin would plan.
+    /// The two agreeing on a file is key-major step 1's gate. Costs a hash a
+    /// planned note.
+
+[101] src/config.rs:939
     // ---- diagnostics -----------------------------------------------------
     /// Log per-pass timings.
 
-[55] src/config.rs:556
+[102] src/config.rs:956
             // Swept on an RTX 5060 at a million voices. The pairing matters
             // more than either value alone, because `workgroup_size /
             // (reduce_tile * 2)` is how many threads cooperate on one output
@@ -467,7 +907,7 @@
             // 95.6 ms and 512/4, at the same workgroup storage as 256/8, took
             // 104 ms.
 
-[56] src/config.rs:566
+[103] src/config.rs:966
             // 2048 workgroups of 256 is 524288 voices in flight; past that the
             // render pass loops. Wider dispatches keep winning here (84.3 ms
             // at 512, 82.5 ms at 2048) at the cost of a partial buffer that
@@ -475,38 +915,64 @@
             // reduce pass then has to stream, and which is why this stops
             // rather than doubling again.
 
-[57] src/config.rs:599
+[104] src/config.rs:1006
             // Low enough to keep A0's 27.5 Hz fundamental within 0.4 dB, high
             // enough to take 30 dB off the 2.6 Hz swell the pedestal pumps at.
 
-[58] src/config.rs:614
+[105] src/config.rs:1023
             // 2 GiB. The reason for this number -- leaving room for Cake on the
             // same device -- was retracted 2026-08-23; the two are never run
             // together. The default has not been re-derived. See the development notes.
 
-[59] src/config.rs:684
+[106] src/config.rs:1039
+            // Derived from the bank's longest release. There is no material-
+            // dependent number to guess here any more.
+
+[107] src/config.rs:1044
+            // 2,048 rather than 8,192: the cache budget below is derived from
+            // this, and 8,192 entries at the mean tail would ask for 6.0 GB
+            // against roughly 5.9 GiB free. 2,048 is 1.51 GB and still half the
+            // 3,946 that the densest measured passage needs, which is what
+            // residency scheduling is for.
+
+[108] src/config.rs:1050
+            // 512 measured on both test files; 768 leaves a margin without
+            // costing much, since the row length is the expensive dimension.
+
+[109] src/config.rs:1054
+            // 4 GiB. Chosen against the user's stated ceiling -- no renderer in
+            // this scene goes above 10 GB -- with merlin's non-kernel host
+            // usage measured at about 2.5 GiB on the largest test file.
+
+[110] src/config.rs:1062
+            // 4M rather than 1M: a note becomes one impulse per stereo layer
+            // per bus, so four, and one test file's densest passage overran 1M
+            // in a single 2048-frame step. 16 B each, so this is a 64 MiB
+            // buffer.
+
+[111] src/config.rs:1153
         // The render pass stages one float per voice per channel lane, plus a
         // second level of WG floats. The limit is the 48 KiB a compute
         // workgroup gets, not the 16 KiB wgpu guarantees as a floor.
 
-[60] src/config.rs:697
+[112] src/config.rs:1166
         // The reduction assigns at least one thread to each of the
         // reduce_tile * 2 channel lanes.
 
-[61] src/config.rs:718
+[113] src/config.rs:1201
         // Past a tenth of the rate the bilinear transform bends the corner,
         // and nothing sub-audio is left to block well before that.
 
-[62] src/config.rs:757
+[114] src/config.rs:1243
         // 255 and 65535 are the widths the driver packs a note-on into while
         // it waits for admission. Well past anything musical, but a silent
         // truncation there would corrupt which voice a candidate refers to.
 
-[63] src/config.rs:777
+[115] src/config.rs:1263
     /// Frames in which a steal may be scheduled. The fade has to finish inside
     /// the block, so a victim cannot start fading in the last `fade` frames.
 
-[64] src/config.rs:783
+[116] src/config.rs:1269
     /// Frames in one step of the envelope grid: 4 ms, 192 frames at 48 kHz.
     ///
     /// BASSMIDI moves a voice's envelope on a 4 ms grid counted from its
@@ -519,13 +985,17 @@
     /// Capped so a voice's position on the grid fits the thirteen bits the
     /// gate slot word has for it (`voice::GRID_SHIFT`); that is 2 MHz.
 
-[65] src/config.rs:798
+[117] src/config.rs:1284
     /// Voice slots to allocate. A stolen voice keeps sounding until its own
     /// stop frame, so for part of a block the pool holds the outgoing voices
     /// and their replacements at once. `max_voices` stays the ceiling on what
     /// survives a block; this is the transient headroom on top of it.
 
-[66] src/config.rs:806
+[118] src/config.rs:1292
     /// The most voices one block may steal. Integer arithmetic, and both
     /// backends call this rather than computing it themselves, because the two
     /// have to agree exactly or the null test stops meaning anything.
+
+[119] src/config.rs:1314
+    /// Frames of the sustaining waveform merlin caches per waveform, which is
+    /// its longest note. Resolves the zero default; see `merlin_head_frames`.

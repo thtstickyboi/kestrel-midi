@@ -1,0 +1,116 @@
+# Comments extracted from src/merlin/gpubuild.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/merlin/gpubuild.rs:5
+//! Sustain renders made on the device, many at once: the kernel builder.
+//!
+//! Every kernel merlin caches starts as one voice rendered with no note-off,
+//! the sustain `Kernel::from_cmd` makes with a `CpuSynth`. That is one core
+//! rendering one voice after another, and on 2026-10-16 it was the whole of
+//! why convolving every note did not work: with `--merlin-promote-after 0` on
+//! the 44.75 M-note test file, kernel building had taken **342 s by 76.7 s of
+//! audio**, the render was at 0.19x, the GPU was about 6% busy, and the 4 GiB
+//! host store that holds the renders was full.
+//!
+//! This renders a batch of them in parallel on the device, through the same
+//! render pass that plays notes on the per-voice backend -- its `SOLO` build,
+//! which writes each voice to its own row instead of mixing them (see
+//! `render.wgsl` and `GpuSynth::solo_on_shared`). So a kernel built here sounds
+//! exactly as the per-voice GPU backend would play that note, which is what
+//! the fallback plays the notes that are not convolved with. It is not
+//! bit-identical to the `CpuSynth` render, which is a separate implementation
+//! of the same arithmetic; `tests/merlin_gpubuild.rs` holds the two together.
+
+[2] src/merlin/gpubuild.rs:34
+/// The most bytes of rows one chunk of a batch lands in: its readback holds
+/// every block of every row in it, so this bounds the host memory a chunk in
+/// flight takes, and with it how many voices a chunk of long notes may hold.
+///
+/// *Batches used to be read back 16 blocks at a time, waiting on each read, and
+/// before that one block at a time with the whole rows buffer each time --
+/// which made the device slower than the CPU it replaces: 13.47 s of building
+/// against 6.02 s on the first 30 s of the 44.75 M-note test file with every
+/// note convolved, 2026-10-16. A batch is now queued whole and waited on only
+/// when something reads it.*
+
+[3] src/merlin/gpubuild.rs:83
+/// A sustain for `sustain.wgsl`: `frames` frames of `cmd` through its own
+/// `params`, from word `at` of the pool.
+
+[4] src/merlin/gpubuild.rs:93
+/// Whether a sustain is a pure function of its frame, which is what
+/// `sustain.wgsl` can render. Its pitch must hold still: no pitch LFO, no
+/// glide (a voice's flags above `VF_LOOP_UNTIL_RELEASE`) and no modulation
+/// envelope, which the voice path keeps.
+
+[5] src/merlin/gpubuild.rs:101
+/// `kernel::env_at`'s shape for `p`: frames of attack and hold, the first frame
+/// at the sustain level, that level, and the decay as `sustain.wgsl` reads it.
+
+[6] src/merlin/gpubuild.rs:156
+        // A sample that has run out stays out, and well below where a page's
+        // steps could wrap the word.
+
+[7] src/merlin/gpubuild.rs:194
+    /// Where `render_into` lands a chunk's rows before copying them out, and
+    /// the most bytes of rows it lands at once.
+
+[8] src/merlin/gpubuild.rs:200
+/// A batch queued on the device and not yet read: one or more chunks, each its
+/// own readback.
+
+[9] src/merlin/gpubuild.rs:223
+    /// A builder on `shared`'s device and sample pool, `rows` voices a chunk.
+    ///
+    /// Its own `Config`, cut from `cfg`: the voice ceiling is the chunk, there
+    /// is nothing to steal, and nothing is profiled -- a solo build has no
+    /// reduce to time, and the passes' timestamps would be read by nobody.
+
+[10] src/merlin/gpubuild.rs:236
+    /// Queue each `(command, frames)` to be rendered with no note-off for
+    /// `frames` frames, through the params table `params` and the modulation
+    /// envelopes `menv`, installed as the base variant -- the filterless table
+    /// merlin builds kernels through, which is what `Kernel::from_cmd` installs
+    /// as its `CpuSynth`'s base too -- and return without waiting.
+    ///
+    /// The command is rewritten the way `Kernel::from_cmd` rewrites it: unit
+    /// gain hard left, so the row is the raw mono waveform; gate slot 0 with
+    /// no note-offs ever published, so nothing releases it; variant 0, because
+    /// the table installed as the base already is the variant. And its row is
+    /// its place in the chunk, in `note_id_lo`, which nothing else reads here.
+    ///
+    /// Chunked longest first, so a chunk's rows end together and its readback
+    /// is not mostly the silence after its short notes.
+
+[11] src/merlin/gpubuild.rs:299
+    /// Wait for a batch and take its sustains, in the order `begin` was given
+    /// the jobs.
+
+[12] src/merlin/gpubuild.rs:331
+    /// `jobs` into `dst` by `sustain.wgsl`, every frame of every job side by
+    /// side. Nothing waits; whatever is submitted next reads them.
+
+[13] src/merlin/gpubuild.rs:367
+    /// `jobs` by `direct_into`, each read back: what the tests hold against
+    /// the voice path.
+
+[14] src/merlin/gpubuild.rs:396
+    /// Land up to `bytes` of rows at once in `render_into`: nothing is read
+    /// back there, so the chunk is bounded by device memory alone.
+
+[15] src/merlin/gpubuild.rs:403
+    /// Each `(command, frames)` rendered as [`GpuBuilder::begin`] renders it,
+    /// straight into `dst` on the device: job `j`'s frames end to end from
+    /// word `at[j]`. Nothing is read back and nothing waits; the copies are
+    /// queued behind the renders, so whatever is submitted next reads them.
+
+[16] src/merlin/gpubuild.rs:419
+        // As many voices side by side as the pool holds, whatever their
+        // lengths, a few blocks of all their rows landing at once and copied
+        // out to their places before the next few: the device renders the
+        // longest note's blocks once, not once per chunk of long notes.

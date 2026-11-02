@@ -29,59 +29,67 @@
     /// falconeye-system`. See [`super::system`].
 
 [3] src/falconeye/report.rs:73
-    /// The executable that has `falconeye-selftest`, which runs each GPU's
-    /// self-test in a process of its own so that a driver that crashes cannot
-    /// take the report with it. Without, they run in this process.
+    /// The executable that has `falconeye-selftest` and `list-adapters`, which
+    /// run each GPU's self-test and each backend's adapter listing in a process
+    /// of its own so that a driver that crashes cannot take the report with it.
+    /// Without, they run in this process.
 
-[4] src/falconeye/report.rs:79
+[4] src/falconeye/report.rs:78
+    /// Only this backend, as `--gpu-backend` names it, for the adapters and the
+    /// self-test; every backend without.
+
+[5] src/falconeye/report.rs:83
 /// Collect the report and write it. `say` hears each step as it starts.
 /// Returns the report's path.
 
-[5] src/falconeye/report.rs:115
+[6] src/falconeye/report.rs:123
         // A render's device setup reports at info; a self-test sets up a
         // dozen, and those lines would bury its own.
 
-[6] src/falconeye/report.rs:170
+[7] src/falconeye/report.rs:178
         // Render logs go under logs/; anything that names its own folder,
         // the administrator step's wer/, keeps it.
 
-[7] src/falconeye/report.rs:195
+[8] src/falconeye/report.rs:203
 /// `reports` beside the logs: beside the executable, or in local app data
 /// where that cannot be written.
 
-[8] src/falconeye/report.rs:223
+[9] src/falconeye/report.rs:231
 /// Windows' facts, read from the registry and kernel32 directly -- not
 /// through PowerShell, which antivirus watches. Nothing read names the PC.
 
-[9] src/falconeye/report.rs:296
+[10] src/falconeye/report.rs:304
 /// Linux's or macOS's facts, from files and the system's own tools; see
 /// `posix`. Nothing read names the PC.
 
-[10] src/falconeye/report.rs:303
-/// Every adapter on every backend, and which of them the self-test runs on:
-/// the hardware ones, on Vulkan and DX12.
+[11] src/falconeye/report.rs:311
+/// Every adapter on `backends`, and which of them the self-test runs on: the
+/// hardware ones, on Vulkan and DX12. Each backend is listed in a child of
+/// `isolate` where there is one, and a backend whose listing crashed or hung is
+/// named with how, which is what a report from a machine that crashes there is
+/// for.
 
-[11] src/falconeye/report.rs:348
+[12] src/falconeye/report.rs:360
         // What the guided renderer counts voices against: a figure for Linux too, where
         // `sample` above has none.
 
-[12] src/falconeye/report.rs:373
+[13] src/falconeye/report.rs:391
 /// `nvidia-smi`, where NVIDIA's driver is installed: the state now, the link,
 /// the limits, and how many programs use the GPU. Their names are left out.
 
-[13] src/falconeye/report.rs:411
+[14] src/falconeye/report.rs:429
 /// Windows' timeout settings and GPU scheduling. Absent means Windows'
 /// default: `TdrDelay` 2 s.
 
-[14] src/falconeye/report.rs:431
+[15] src/falconeye/report.rs:449
 /// `graphics_settings` as lines, for a crash report: it is the first thing
 /// asked for once a GPU reset shows (2026-10-03), and a report that carries it
 /// needs no second round trip. Empty off Windows.
 
-[15] src/falconeye/report.rs:453
+[16] src/falconeye/report.rs:471
 /// The render logs and FalconEye's reports: listed, and the recent ones added
 /// to the archive. Returns the MIDI names they carry, which stay visible.
 
-[16] src/falconeye/report.rs:511
+[17] src/falconeye/report.rs:529
 /// Run the administrator step and take in what it read: its listing as the
 /// section, its `.wer` texts into the archive.

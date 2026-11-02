@@ -1,0 +1,365 @@
+# Comments extracted from src/merlin/bucket.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/merlin/bucket.rs:5
+//! Key-major merlin, step 1: the bucket pass.
+//!
+//! THE PLAN's key-major build order (the dev notes, "Proposed: key-major rendering
+//! -- flip the loop order") renders one key's notes for the whole song in one
+//! pass. So before anything renders, every note has to be known with its
+//! length and filed under its key. This is that pass: the real `Driver`
+//! against a backend with no pool, the way merlin takes notes, so the pairing
+//! and the routing are the render's own rather than a second copy of them.
+//! Nothing here renders; `finish` writes silence.
+//!
+//! What it keeps:
+//!
+//! - **Runs, not notes.** Copies struck on one slot in one block at one frame,
+//!   whose commands differ only in note id and ordinal, are one open run, as in
+//!   THE PLAN's Phase 1, and are released from the front a note-off frame at a
+//!   time. An open run is 48 bytes where merlin's `Open` holds a whole command.
+//! - **A voice table**: one row per distinct command, with everything that
+//!   differs per note cleared, and per params generation. Its params and
+//!   modulation-envelope rows are **captured by value at the note-on**, since
+//!   the driver recycles variant slots and the index alone names a different
+//!   table by the time a later step reads it.
+//! - **A bucket store**: one list of 40-byte [`RunRec`]s per key, held inside a
+//!   fixed memory budget and spilled to a file past it. The budget moves where a
+//!   record is held, never which records there are.
+//! - **Controller curves**: per channel, the bend and the two channel gains at
+//!   each gate tile where they move. Step 3 applies them through a note.
+//!
+//! ## The gate: what merlin is handed, exactly
+//!
+//! The pass mirrors `MerlinSynth::route` and `resolve`: the glide rule,
+//! `apply_channel`, the promotion count, the release frame, the gain at the
+//! note-off, CC120's cut and the head-cache clamp. With `--merlin-digest` it
+//! keeps a [`NoteDigest`] of what merlin would plan, copy by copy, and merlin
+//! keeps the same digest of what it does plan. **The two agreeing on a real
+//! file is step 1's gate.** A second digest covers every note with no clamp and
+//! no routing. It is taken as records are filed and again as the store is read
+//! back, so a spill that lost or altered a record shows as well.
+//!
+//! ## What it does not do yet
+//!
+//! Glides are stripped and flagged ([`REC_GLIDE`]); step 4 gives them their own
+//! path. Records within a key come out in release order, not start order; the
+//! window step (5) sorts them. Curves are held in memory and counted, not
+//! spilled.
+
+[2] src/merlin/bucket.rs:67
+/// Groups the store is filed by: one per MIDI key, every channel's notes on
+/// that key together.
+
+[3] src/merlin/bucket.rs:71
+/// A CC120 damped this run rather than releasing it. Merlin fires no impulse
+/// for such a note and ramps its head down over `steal_fade_frames`.
+
+[4] src/merlin/bucket.rs:74
+/// The note glided (portamento) and the glide was stripped, which is what
+/// merlin does with no fallback to send it to.
+
+[5] src/merlin/bucket.rs:79
+/// Merlin would render this run on its per-voice fallback, so it is not in
+/// merlin's digest. Only set when mirroring.
+
+[6] src/merlin/bucket.rs:82
+/// Merlin would already have planned what is left of this run, clamped to its
+/// head cache, and forgotten it. Only set when mirroring.
+
+[7] src/merlin/bucket.rs:86
+/// How far back along a slot's runs a copy looks for the run it continues: a
+/// note's layers, side by side. More only finds more to fold, never changes a
+/// copy.
+
+[8] src/merlin/bucket.rs:91
+/// One run of identical notes, as the bucket store holds it.
+///
+/// 40 bytes. Everything a note's sound needs beyond its voice row: when it
+/// starts, how long it is held, how many copies, and the gains it opens and
+/// closes on. THE PLAN prices the store at 16-24 bytes a record once the start
+/// frames are delta-coded; this is the plain form that is checked first.
+
+[9] src/merlin/bucket.rs:111
+    /// The note's gains at its note-on with its channel's folded in, which is
+    /// what merlin's command carries.
+
+[10] src/merlin/bucket.rs:114
+    /// The note's own gains times the channel's at the note-off: what the
+    /// release tail is fired at.
+
+[11] src/merlin/bucket.rs:125
+    /// The command with every word that differs per note cleared: the ids, the
+    /// ordinal, `start_rel`, `row_bias`, the gate slot and the gains. Bend is
+    /// already in the step and the variant is the note-on's.
+
+[12] src/merlin/bucket.rs:129
+    /// The params row it reads, from its own variant, as it stood at the
+    /// note-on.
+
+[13] src/merlin/bucket.rs:139
+    /// The command a record of this voice stands for, as merlin holds it once
+    /// the per-note words that do not reach the sound are cleared.
+
+[14] src/merlin/bucket.rs:150
+/// Clear what differs between copies of one note -- its id, its ordinal on the
+/// slot -- and the two words that only steer `apply_channel`, whose effect is
+/// already in the step and the gains. The glide byte above the id stays.
+
+[15] src/merlin/bucket.rs:172
+/// A voice table key: the stripped command, compared and hashed by its bytes,
+/// and which installation of its variant slot it was struck under.
+
+[16] src/merlin/bucket.rs:195
+/// `MerlinSynth`'s `VoiceKey`, which its promotion count is keyed on: the
+/// variant by index, not by generation, as merlin counts it.
+
+[17] src/merlin/bucket.rs:226
+/// An order-free digest of a list of notes, copy by copy.
+///
+/// Two independent 64-bit hashes of each copy, summed, so neither the order the
+/// notes arrive in nor how they are grouped into runs reaches it, and a run of
+/// `n` adds exactly what `n` copies would. A copy is its command (see
+/// [`strip_note`]), its start, its duration, its gain at the note-off and
+/// whether a CC120 cut it.
+
+[18] src/merlin/bucket.rs:294
+/// Records a key's list holds in one sealed chunk: 160 KiB. A list grows by
+/// doubling up to this and then seals it, so what one push can allocate beyond
+/// the budget is bounded by one chunk rather than by a whole list doubling.
+/// Spills write a key whole, so this sets no write size.
+
+[19] src/merlin/bucket.rs:300
+/// One key's records: on disk, then sealed in memory, then the open tail, which
+/// is also the order they were filed in.
+
+[20] src/merlin/bucket.rs:316
+/// The spill file, shared by the store that writes it and the sealed windows
+/// that read it back. Every read and write names its position, so a window is
+/// read on one thread while the store appends on another. Removed when the last
+/// of them lets go.
+
+[21] src/merlin/bucket.rs:346
+/// The records, one list per (window, key), inside one memory budget that
+/// covers the windows still being filed and the sealed ones their reader has
+/// not yet let go of.
+///
+/// A record is filed into every window it reaches, so a window, once sealed,
+/// holds everything its render needs and is read once. Without windows -- the
+/// CPU reference, and the pass run alone -- everything is window 0, sealed only
+/// at the end, as the store first was.
+
+[22] src/merlin/bucket.rs:355
+    /// The windows not yet sealed, oldest first: `windows[i]` is window
+    /// `base + i`.
+
+[23] src/merlin/bucket.rs:359
+    /// Record storage held in memory by the windows not yet sealed, as
+    /// allocated rather than as filled.
+
+[24] src/merlin/bucket.rs:362
+    /// The same for sealed windows still held by their reader, which gives it
+    /// back as each is dropped.
+
+[25] src/merlin/bucket.rs:387
+            // At least one chunk a key, or a budget too small to hold the
+            // tails would spill on every push.
+
+[26] src/merlin/bucket.rs:406
+    /// What the budget covers now: the unsealed windows and the sealed ones
+    /// still held.
+
+[27] src/merlin/bucket.rs:455
+    /// Write whole lists out, largest first, until a quarter of the budget is
+    /// free again or nothing unsealed is left in memory. A list goes out whole
+    /// -- sealed chunks, then the tail -- so its records stay in the order they
+    /// were filed.
+
+[28] src/merlin/bucket.rs:463
+            // Ties to the oldest window and lowest key, so the choice is a
+            // function of the records alone.
+
+[29] src/merlin/bucket.rs:519
+    /// Hand over the oldest open window, whole, to be read: everything filed
+    /// into it so far, which the caller knows is everything it will get. If it
+    /// would take the budget over, its own lists go to the spill file first.
+
+[30] src/merlin/bucket.rs:556
+    /// Records filed under `key` in the oldest open window: all of them,
+    /// without windows.
+
+[31] src/merlin/bucket.rs:562
+    /// `key`'s records in the oldest open window -- all of them, without
+    /// windows -- in the order they were filed; see `KeyList::records`.
+
+[32] src/merlin/bucket.rs:571
+    /// Hand `f` every record filed under `key` in the oldest open window, in
+    /// the order they were filed, a chunk at a time.
+
+[33] src/merlin/bucket.rs:588
+    /// The records in the order they were filed, without copying what is in
+    /// memory: the part on disk read into a buffer of its own, the sealed
+    /// chunks and the tail borrowed. The spill file is read at positions, not
+    /// through its cursor, so lists can be read side by side.
+
+[34] src/merlin/bucket.rs:596
+    /// Records `[lo, hi)` of the list, the same way: of what is on disk, only
+    /// the part in that range is read.
+
+[35] src/merlin/bucket.rs:625
+/// A window the pass has finished filing, handed whole to its reader: every
+/// record that reaches it, per key. What it holds in memory counts against the
+/// store's budget until it is dropped.
+
+[36] src/merlin/bucket.rs:659
+/// One key's records, from `key_records`: what was on disk, then what is in
+/// memory, which is the order they were filed in.
+
+[37] src/merlin/bucket.rs:673
+/// `buf.len()` bytes of `file` from `at`, without its cursor mattering, so
+/// several threads can read one file. (Windows' `seek_read` does move the
+/// cursor; nothing reads or writes the spill file through it.)
+
+[38] src/merlin/bucket.rs:748
+/// Where the pass's wall clock goes, cumulative seconds.
+///
+/// A clock read per call, never per note or per record: timing each push into
+/// the store was two reads a record, 124 M on the 44.75 M-note test file, and
+/// about 3 s of what it claimed to measure (2026-10-22).
+
+[39] src/merlin/bucket.rs:757
+    /// `resolve`: pairing note-offs and filing the records, spill writes
+    /// included (the store times those on its own as well).
+
+[40] src/merlin/bucket.rs:783
+    /// The variant tables as installed, index minus one, and how many times
+    /// each slot has been installed.
+
+[41] src/merlin/bucket.rs:789
+    /// The last two voice rows each slot found, newest first (`u32::MAX`
+    /// empty): a slot mostly repeats them -- a note's layers, a key struck
+    /// again at one velocity -- and a full compare is cheaper than hashing the
+    /// key. `voice_of` only ever gains entries, so a hit is what it would say.
+
+[42] src/merlin/bucket.rs:795
+    /// Open runs per slot, oldest first: ordinal order, which is the order the
+    /// slot's note-offs release them. Indexed by `gate_slot & SLOT_MASK`, and
+    /// held whole per slot rather than as indices into one list, because a
+    /// release then reads memory in order.
+
+[43] src/merlin/bucket.rs:808
+    /// Mirroring merlin for the gate: its promotion threshold, its head-cache
+    /// ceiling in frames and its promotion counts.
+
+[44] src/merlin/bucket.rs:828
+    /// Filing by window, for the per-key render: the window's length in
+    /// frames, `None` to keep everything in window 0.
+
+[45] src/merlin/bucket.rs:831
+    /// Each voice row's release tail as key-major plans it, its raw release
+    /// held to `Shape::tail_cap`: how far a record reaches past its note-off.
+
+[46] src/merlin/bucket.rs:842
+/// Frames past the last note's reach that key-major renders, for the bus
+/// filters to ring out.
+
+[47] src/merlin/bucket.rs:916
+    /// File by windows of `frames`, every window sealed once the file is read
+    /// (`seal_all`), for the per-key render to take (`take_ready`). Nothing is
+    /// sealed sooner: a key is rendered over the whole song, so its first
+    /// window is no use before its last is filed, and until then the store's
+    /// budget spills whatever list is largest, in any window.
+
+[48] src/merlin/bucket.rs:931
+    /// Where key-major's render ends: the last record's reach and the bus
+    /// filters' ring-out.
+
+[49] src/merlin/bucket.rs:968
+    /// What merlin would plan, by [`NoteDigest`]. Only kept with
+    /// `Config::merlin_digest`.
+
+[50] src/merlin/bucket.rs:974
+    /// Every note filed, as it was filed. Only kept with
+    /// `Config::merlin_digest`, like the other: it costs a hash a record.
+
+[51] src/merlin/bucket.rs:1020
+    /// `MerlinSynth::apply_channel`: the channel's bend into the step and its
+    /// gains into the note's, from the row current at the note's own frame.
+
+[52] src/merlin/bucket.rs:1087
+    /// `MerlinSynth::params_of`, and its fallback to the bank's row for a
+    /// variant the driver named but never installed.
+
+[53] src/merlin/bucket.rs:1120
+    /// The voice table row for a resolved command, made on first sight with
+    /// its params captured.
+
+[54] src/merlin/bucket.rs:1156
+    /// `MerlinSynth::open_block`'s part: which channels a CC120 cuts this
+    /// block, where no run is folded.
+
+[55] src/merlin/bucket.rs:1174
+    /// `MerlinSynth::fold_into_run`'s rule, on the voice row rather than the
+    /// command -- the same voice is the same command but for its per-note
+    /// words, and the slot and gains are compared here -- and found by looking
+    /// back along the slot's newest runs rather than through an index. A note's
+    /// layers share its ordinal and sit side by side at the back, so the run a
+    /// copy continues is among the last [`FOLD_LOOKBACK`].
+    ///
+    /// Which run a copy joins changes how a slot's notes are grouped, never
+    /// what any copy is, so the digests do not see it.
+
+[56] src/merlin/bucket.rs:1208
+    /// `MerlinSynth::route`, for every note: none goes anywhere else, so the
+    /// fallback's choice is only recorded, for the digest.
+
+[57] src/merlin/bucket.rs:1218
+                // Merlin sends a glide to its fallback when it has one, and
+                // otherwise convolves it with the glide stripped. The store
+                // keeps it the second way, flagged.
+
+[58] src/merlin/bucket.rs:1264
+    /// File `count` copies of `o`, all released at `end`; `rel` is that frame
+    /// inside this block, where the channel rows are read.
+
+[59] src/merlin/bucket.rs:1291
+        // Every window the record reaches, as `plan_key` tests it: its note-off,
+        // the steal fade, its release tail and one frame.
+
+[60] src/merlin/bucket.rs:1303
+    /// `MerlinSynth::resolve`, visiting only the slots this block's gates
+    /// release on: file what they release, from the front of each run, a
+    /// release frame at a time.
+    ///
+    /// Merlin's walks every open note after every part. A slot's note-offs
+    /// release its ordinals in order and its runs are held in ordinal order, so
+    /// its runs are walked from the front and left at the first one past this
+    /// block's count; every run behind that one is past it too.
+
+[61] src/merlin/bucket.rs:1324
+            // A run left open in front of one released whole: only behind a
+            // run whose note-off came before it was handed over, which
+            // `release_frame` never releases, as merlin's never does.
+
+[62] src/merlin/bucket.rs:1352
+        // Once a block: a run struck in it has been held at most a block, and
+        // `held` is the same for every part of it.
+
+[63] src/merlin/bucket.rs:1362
+    /// File what this block releases of one run, from its front, and say how
+    /// many copies that was.
+
+[64] src/merlin/bucket.rs:1380
+    /// Merlin's head-cache ceiling, for its digest only. A note merlin still
+    /// holds past `--merlin-head-ms` is planned there at the ceiling,
+    /// unreleased, and leaves its open list, so no later copy folds onto it.
+    /// The store keeps the note to its real note-off.
+
+[65] src/merlin/bucket.rs:1541
+    /// Outstanding while any run waits for its note-off, which keeps the
+    /// driver going until the end-of-file release has paired every one.

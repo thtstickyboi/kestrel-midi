@@ -1,0 +1,56 @@
+# Comments extracted from shaders/bus.wgsl
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] shaders/bus.wgsl:5
+// Merlin: the per-velocity filter buses, and the mix down to stereo.
+//
+// the development notes section 3(c). The reference bank is 128 velocity groups that
+// are byte-identical apart from `lovel`/`hivel`, all playing the same 88
+// samples: velocity's whole effect is an amplitude (which folds into the
+// impulse gain) and a cutoff (which is an LTI filter). Keeping that filter in
+// the cached waveform makes 128 kernels where one would do, and the first real
+// run measured exactly that -- one new waveform every 6.3 notes.
+//
+// So each distinct biquad owns two buses, left and right. Notes convolve into
+// the bus their velocity selects, the biquad runs once per bus per block, and
+// the buses sum to stereo.
+//
+// ## Why this is exact, which is not quite section 3(c)'s reason
+//
+// That section says "filtering is linear, so it commutes with the summation".
+// True across notes, but it does not license pulling the filter out of a single
+// note's envelope -- `cpu.rs` computes `x = s * g` and filters *that*, so the
+// envelope is inside the filter.
+//
+// What makes it exact is different: in the per-voice backend each voice's
+// biquad starts from rest at its own note-on, and a voice's input is zero
+// before then. Filtering a signal that is zero until `s_i`, from zero state at
+// frame 0, is identical to filtering it from zero state at `s_i`. So one bus
+// filter running continuously over the sum equals the sum of per-voice filters
+// reset at each onset -- provided every note on the bus shares the
+// coefficients, which is what a bus is.
+//
+// The state therefore has to persist across blocks, and must not be cleared
+// between them.
+
+[2] shaders/bus.wgsl:57
+// ---------------------------------------------------------------------------
+// One invocation per bus. Serial in frames, because a biquad is: the state at
+// frame n depends on n-1. With a few hundred buses that is a few hundred
+// threads of P steps, which is far cheaper than it looks next to the
+// multiply-accumulate.
+// ---------------------------------------------------------------------------
+
+[3] shaders/bus.wgsl:75
+        // Transposed direct form II, matching `cpu.rs` exactly -- including
+        // `b2 == b0`, which is why `c` is four words and not five.
+
+[4] shaders/bus.wgsl:85
+// ---------------------------------------------------------------------------
+// Sum every bus into stereo. One invocation per output frame.
+// ---------------------------------------------------------------------------

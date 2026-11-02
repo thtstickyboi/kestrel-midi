@@ -1,0 +1,33 @@
+# Comments extracted from shaders/sustain.wgsl
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] shaders/sustain.wgsl:5
+// Merlin's sustains, one invocation per frame.
+//
+// A sustain is a voice with no note-off, unit gain and no filter, so every frame
+// of it is a pure function of its frame number: position by multiplying, loops
+// by modulo, the envelope and the tremolo in closed form. `render.wgsl` walks a
+// voice's frames one after another, so a key's time there is its longest note's.
+// Here it is its frames over the card's width.
+//
+// One workgroup per page of a job. The host works out where each page starts,
+// in 128-bit arithmetic, so this needs no 64-bit integers: a frame is at most
+// `PAGE` steps from its page's start, which fits in what WGSL multiplies.
+//
+// Only what is a pure function of the frame comes here. A waveform whose pitch
+// moves (a pitch LFO, a glide, a modulation envelope) keeps the voice path. See
+// `gpubuild::direct_ok`.
+
+[2] shaders/sustain.wgsl:76
+/// The position `k` frames into a page: `(hi, lo)` of its 32.32 phase, wrapped
+/// into the loop as `render.wgsl` wraps it. The fraction never moves, because
+/// a wrap takes whole frames.
+
+[3] shaders/sustain.wgsl:118
+                // Exact at each gate tile and straight between, as the voice
+                // walks its gains.

@@ -14,19 +14,19 @@
 //! reference and the GPU path go through this, which is what makes the null
 //! test meaningful: the two backends see byte-identical input.
 
-[2] src/driver.rs:24
+[2] src/driver.rs:27
 /// Time strata a saturated block is cut into before ranking admission.
 ///
 /// Bounds how far the admitted set can drift in time while leaving each
 /// stratum wide enough that ranking inside it is a real choice. At 64 a
 /// 4096-frame block is cut into 64-frame pieces, 1.3 ms apiece.
 
-[3] src/driver.rs:33
+[3] src/driver.rs:36
 /// A selected RPN that is not one this synth acts on, including the null RPN
 /// and anything reached through NRPN. Parked outside the 14-bit range so it
 /// can never compare equal to RPN 0.
 
-[4] src/driver.rs:38
+[4] src/driver.rs:41
 /// How far CC71-CC75 are quantised before they become a params variant.
 ///
 /// Two steps of a controller, so 64 levels. CC74 spans +/-2400 cents across
@@ -35,7 +35,7 @@
 /// started with, a step was 300 cents and a move from CC74=64 to CC74=70
 /// landed in the same bucket and did nothing at all.
 
-[5] src/driver.rs:47
+[5] src/driver.rs:50
 /// What this synth does with a controller number.
 ///
 /// Every number from 0 to 127 has an entry, because the alternative -- a match
@@ -44,15 +44,15 @@
 /// this for the controllers a file actually sends, so "is this doing
 /// anything" is answerable without reading source.
 
-[6] src/driver.rs:60
+[6] src/driver.rs:63
     /// Would change what is heard, and is not implemented. The string says
     /// what it would take.
 
-[7] src/driver.rs:145
+[7] src/driver.rs:148
 /// How long to keep rendering after the last MIDI event before giving up on
 /// voices that will not die, in seconds.
 
-[8] src/driver.rs:151
+[8] src/driver.rs:154
     /// Cumulative microseconds inside `next_block`, split so the host/device
     /// share is visible. Filled only under `Config::profile`, because reading
     /// a clock five times a block is not free at 32,000 blocks.
@@ -63,52 +63,94 @@
     /// was the drain, and `prepare_block` now overlaps it -- these counters are
     /// what showed that and what would show it regressing.
 
-[9] src/driver.rs:171
+[9] src/driver.rs:166
+    /// Publishing the block's controller state: sound-controller variants,
+    /// modulation, and the gate and channel tables handed to the backend.
+
+[10] src/driver.rs:169
+    /// Building params tables for new CC71-CC75 states. Part of preparing a
+    /// block, so it runs alongside the backend like `us_drain` does.
+
+[11] src/driver.rs:172
+    /// Waiting, with the backend done, for the next block's preparation to
+    /// finish: the share of the render the host drain is the critical path of.
+
+[12] src/driver.rs:175
+    /// Building a pool-less backend's commands in `prepare_block`, alongside
+    /// the previous block. The per-voice backends build theirs in `us_admit`,
+    /// after admission has heard back from the device.
+
+[13] src/driver.rs:185
+    /// Of `us_drain`, the time the drain waited for the threads reading the
+    /// MIDI for it (`Config::drain_threads`): its own reading of the file, and
+    /// the coalescing look-ahead. Whichever is large is the one holding the
+    /// drain up. Measured a chunk or a batch at a time, never an event.
+
+[14] src/driver.rs:193
     /// Times a sound-controller change had to reuse an approximate copy
     /// because the budget was spent. Any of these is audible as the
     /// controller appearing to do nothing.
 
-[10] src/driver.rs:175
+[15] src/driver.rs:197
     /// Distinct quantised states the file asked for, whether or not they
     /// were granted.
 
-[11] src/driver.rs:182
+[16] src/driver.rs:204
     /// Blocks written as zeros on the host without a dispatch, because no
     /// voice was alive and none was admitted. See `Config::skip_silence`.
 
-[12] src/driver.rs:186
+[17] src/driver.rs:208
     /// Note-ons the block could not admit. Counted here rather than in the
     /// backends because admission now happens before a voice is built, so a
     /// backend never sees the ones that were refused.
 
-[13] src/driver.rs:191
+[18] src/driver.rs:213
     /// Note-ons `Config::min_velocity` skipped. Not in `notes`, which counts
     /// what was rendered.
 
-[14] src/driver.rs:196
+[19] src/driver.rs:216
+    /// Note-ons `Config::coalesce` folded into an earlier one on their tick,
+    /// which was built at their summed gain. In `notes`, which counts what was
+    /// rendered, and not in `voices_spawned`, which counts what was queued.
+
+[20] src/driver.rs:220
+    /// Note-ons coalescing rendered unmerged because the look-ahead had read
+    /// `Config::coalesce_window` past them before they were released.
+
+[21] src/driver.rs:225
     /// Samples the final clamp had to pull back to full scale. Every run of
     /// these is a squared-off waveform top, which is what a click sounds like.
 
-[15] src/driver.rs:200
+[22] src/driver.rs:229
     // ---- last block only, for the per-block diagnostic ------------------
     /// Voices alive when this block's admission decision was taken.
 
-[16] src/driver.rs:209
+[23] src/driver.rs:238
     /// Microseconds the host waited on the device for this block: the render
     /// log's "longest device wait", which is how a block climbing towards
     /// Windows' 2 s reset shows. Always measured; one clock read a block.
 
-[17] src/driver.rs:213
+[24] src/driver.rs:242
     /// Summed opening amplitude of every layer the block queued, and of the
     /// subset it admitted. Level follows the second of these, so if anything
     /// moves at the block rate it moves here first.
 
-[18] src/driver.rs:221
+[25] src/driver.rs:247
+    /// Whether events still to come made this block not the last: the stream
+    /// not read to its end when it was committed, or voices deferred past it.
+    /// Key-major's bucket pass counts the blocks the stream covers by it.
+
+[26] src/driver.rs:254
     /// The counters a render adds up as it goes. The microsecond timings, which
     /// describe one run's speed, and the figures of the last block, which the
     /// next block overwrites, are not carried. Exhaustive, as `Driver::save_state`.
 
-[19] src/driver.rs:288
+[27] src/driver.rs:334
+/// Workers for a reading of `tracks` tracks: one per `per_worker`
+/// (`Config::drain_tracks_per_worker`), at least one and at most `threads`
+/// (`Config::drain_threads`); none when `threads` is 0.
+
+[28] src/driver.rs:341
 /// Pack a note-on into one word: everything `build_layer` and `SpawnCmd` will
 /// need if the note survives admission, minus the ordinal, which is a u32 of
 /// its own because it does not fit alongside the rest.
@@ -121,64 +163,64 @@
 ///
 /// `ch` is the channel across every port, so all eight bits of it.
 
-[20] src/driver.rs:329
+[29] src/driver.rs:382
     /// Cents from that key's pitch, from the key tuning and the channel's
     /// scale/octave tuning together.
 
-[21] src/driver.rs:334
+[30] src/driver.rs:387
 /// One MIDI Tuning Standard tuning program: every key's offset from 12-tone, in
 /// `mts::UNITS_PER_CENT`.
 
-[22] src/driver.rs:343
+[31] src/driver.rs:396
 /// A note-on's portamento in 16 bits: the interval it glides across, as the
 /// key it glides from less its own, in the low byte, and CC5 above it. Zero is
 /// no glide, because CC5 = 0 is.
 
-[23] src/driver.rs:359
+[32] src/driver.rs:412
 /// One layer a block might admit, before anything has been built for it.
 ///
 /// `key` is `voice::admit_key`, which no longer has a block-relative field,
 /// so it is final as soon as the candidate is built.
 
-[24] src/driver.rs:366
+[33] src/driver.rs:419
     /// Index into `notes`, or `DEFERRED` for a voice built in an earlier block
     /// whose delay lands in this one.
 
-[25] src/driver.rs:369
+[34] src/driver.rs:422
     /// The region to build, so materialising never has to preview again. For a
     /// `DEFERRED` candidate this is the index into `deferred_now` instead.
 
-[26] src/driver.rs:372
+[35] src/driver.rs:425
     /// Note id, as an offset from `block_first_id`. Unused when `DEFERRED`,
     /// whose command already carries its id. Wide, because one block can hand
     /// out more than 2^32 ids, and the struct is 24 bytes either way.
 
-[27] src/driver.rs:386
+[36] src/driver.rs:439
 /// Everything building an admitted candidate reads, and nothing it writes, so
 /// one block's candidates can be built on several threads at once.
 
-[28] src/driver.rs:397
+[37] src/driver.rs:450
     /// Each note's key to build on and its tuning in cents, once anything has been
     /// tuned; empty before, when every note is built on its own key untuned. See
     /// `Driver::note_tune`.
 
-[29] src/driver.rs:407
+[38] src/driver.rs:462
     /// The command for one candidate. `memo` holds the last note's analytic
     /// angle, since a note's layers usually sit together.
 
-[30] src/driver.rs:416
+[39] src/driver.rs:471
         // The key the voice is built on is the one nearest its pitch, which is the key
         // struck unless a key table has moved it; `key` stays what the note is.
 
-[31] src/driver.rs:421
+[40] src/driver.rs:476
             // The preview said this layer exists, so this is unreachable
             // unless the two have drifted apart.
 
-[32] src/driver.rs:426
+[41] src/driver.rs:481
         // A delayed layer whose start still lands inside this block is a
         // candidate like any other, but it starts late.
 
-[33] src/driver.rs:471
+[42] src/driver.rs:533
 /// For `Config::min_velocity`: which of each (channel, key)'s unanswered
 /// note-ons were skipped, so the note-off that answers a skipped one is
 /// skipped with it.
@@ -191,123 +233,186 @@
 ///
 /// Kept as runs of one answer, so a key holding a million note-ons costs a
 /// couple of entries rather than a million.
+///
+/// `coalesce::Lookahead` keeps a copy, so that it pairs what the gates pair.
 
-[34] src/driver.rs:492
+[43] src/driver.rs:557
     /// For a snapshot: the keys that have something unanswered, and their runs.
     /// Almost all of them have nothing, so the rest are not written.
 
-[35] src/driver.rs:539
+[44] src/driver.rs:604
     /// Whether the note-on a note-off answers was skipped. A note-off with
     /// nothing unanswered passes through, and the gates ignore it as before.
 
-[36] src/driver.rs:555
+[45] src/driver.rs:620
 /// Which channels are drum parts before a file says anything. Channel 10 --
 /// index 9 -- by the General MIDI convention, and nothing else: on every port,
 /// as BASSMIDI has it.
 
-[37] src/driver.rs:574
+[46] src/driver.rs:640
+/// Where a driver's events come from.
+///
+/// A MIDI file, or one note-slice stream written by `kestrel slice`. Both
+/// answer the same three questions -- the next event, the timebase, and how
+/// many tracks the material had -- and nothing below `next_block` can tell
+/// them apart, so a slice takes the same path through admission, the gate
+/// table and the backend that the whole file would have taken.
+///
+/// That is necessary for a sliced render to sum back to the whole and it is
+/// **not sufficient**, because merlin also picks a note's *path* from the
+/// notes it has seen. See `crate::slice` for that, for why a note-off must
+/// land in the same slice as the note-on it releases, and for the measurements
+/// behind both.
+///
+/// A driver holds one, so the MIDI variant's few hundred bytes (its merge
+/// workers' handles since the drain went parallel) are not worth a box on the
+/// path every event takes.
+
+[47] src/driver.rs:660
+    /// Boxed because a `SliceReader` carries a 256 KiB read window and a
+    /// `MidiStream` carries one per track; without it the enum is as large as
+    /// the window and every `Driver` pays for it.
+
+[48] src/driver.rs:703
+    /// Where a MIDI stream has read to, for a checkpoint. A slice stream's
+    /// position is not saved: `single::unsupported` refuses the render first,
+    /// and this is what says so if anything else gets here.
+
+[49] src/driver.rs:720
+    /// The frame a per-track stream holds its render open to; see
+    /// `Driver::hold_frame`. A slice is a part of a mix, not of a track, and
+    /// holds nothing.
+
+[50] src/driver.rs:730
+    /// How long the drain has waited on the stream's merge workers; a slice
+    /// has none.
+
+[51] src/driver.rs:740
+/// A params-table variant built for a slot: the slot, the params table, and
+/// its modulation-envelope table, shared so the backend keeps them uncopied.
+
+[52] src/driver.rs:744
 /// A block `submit_block` has handed to the backend and `finish_block` has
 /// not yet taken back.
 
-[38] src/driver.rs:587
+[53] src/driver.rs:757
     /// Scale/octave tuning, `mts`: per channel, how far each pitch class is
     /// moved, in `mts::UNITS_PER_CENT`, C first. A note-on takes the offset of
     /// its key's pitch class on its channel, as it is when the note-on arrives:
     /// a note sounding is not retuned, which is what BASSMIDI does.
 
-[39] src/driver.rs:592
+[54] src/driver.rs:762
     /// Whether anything has been tuned: a channel's scale/octave tuning, a key
     /// table (`Config::tuning`, a single-note change). Until it has, `note_tune`
     /// is not kept and every note is struck as it is, so a file that never tunes
     /// anything pays one branch a note-on.
 
-[40] src/driver.rs:597
+[55] src/driver.rs:767
     /// This block's tuned note-ons, one per entry of `notes` once `tuned`, and empty
     /// until then: the key to build the voice on (the key nearest the pitch, which
     /// is the key itself unless a key table moved it) and the cents it is tuned
     /// from there. Per-block scratch like `note_ticks`.
 
-[41] src/driver.rs:602
+[56] src/driver.rs:772
     /// The tuning of every key that the configuration gives (`Config::tuning`, which
     /// no command-line flag sets). Rebuilt from it.
 
-[42] src/driver.rs:605
+[57] src/driver.rs:775
     /// MIDI Tuning Standard tuning programs a file has set (`Config::mts_notes`): each a
     /// table of every key's offset, which starts as `key_static`'s so a key the
     /// message did not name keeps it. A channel plays on the one it has selected.
 
-[43] src/driver.rs:609
+[58] src/driver.rs:779
     /// Each channel's selected tuning program, `bank << 7 | program`, RPN 3 and 4.
     /// Everything is on bank 0 program 0 until a file says otherwise.
 
-[44] src/driver.rs:622
+[59] src/driver.rs:785
+    /// The backend has no pool (`Backend::has_pool` is false), so every
+    /// note-on is admitted and the candidate list is never thinned either.
+    /// Latched from the backend on each `next_block`, before the first block
+    /// is prepared.
+
+[60] src/driver.rs:790
+    /// The backend takes a block's commands in parts (`Backend::spawn_parts`),
+    /// latched with `admit_all`. A block admitting more than
+    /// `Config::spawn_chunk` is then built and handed over a chunk at a time.
+
+[61] src/driver.rs:794
+    /// Set by `admit_block` for a block it left unbuilt to go up in parts: how
+    /// many candidates it admitted and where the block starts.
+
+[62] src/driver.rs:806
     /// Last program change per channel, kept because the drum-part SysEx can
     /// move a channel between the melodic banks and bank 128 without a program
     /// change following it, and the preset has to be re-resolved when it does.
 
-[45] src/driver.rs:626
+[63] src/driver.rs:810
     /// GS part type: 0 melodic, 1 or 2 for the two drum maps. Channel 10 is
     /// drums by the GM convention and the rest are not, until a `DrumPart`
     /// SysEx says otherwise.
 
-[46] src/driver.rs:635
+[64] src/driver.rs:819
     /// Channel coarse tuning, RPN 2, in semitones. The wire value is an MSB
     /// centred on 64, so this is `msb - 64` and the range is +/-64 semitones.
 
-[47] src/driver.rs:638
+[65] src/driver.rs:822
     /// Channel fine tuning, RPN 1, in cents. A 14-bit value centred on 8192
     /// spanning +/-100 cents.
 
-[48] src/driver.rs:641
+[66] src/driver.rs:825
     /// The raw 14-bit value behind it, kept so an MSB and an LSB written at
     /// different times compose rather than replacing one another.
 
-[49] src/driver.rs:650
+[67] src/driver.rs:834
     /// CC71 resonance, CC72 release, CC73 attack, CC74 brightness, CC75 decay.
     /// Quantised by `SOUND_CC_SHIFT` before they become a params variant, so
     /// a slow sweep does not demand a new copy of the table per event.
 
-[50] src/driver.rs:654
+[68] src/driver.rs:838
     /// CC1 modulation depth, CC76 vibrato rate, CC77 vibrato depth, CC92
     /// tremolo depth, CC67 soft pedal.
 
-[51] src/driver.rs:661
+[69] src/driver.rs:845
     /// Fine halves for the four controllers that have one worth reading. A
     /// file almost never sends them, but declaring a controller "applied" and
     /// then dropping half its resolution is the same silence this whole table
     /// exists to stop.
 
-[52] src/driver.rs:669
+[70] src/driver.rs:853
     /// LFO phase per channel, in cycles, carried across blocks so vibrato does
     /// not restart every 85 ms.
 
-[53] src/driver.rs:672
+[71] src/driver.rs:856
     /// Portamento: CC65, CC5, a pending CC84 (zero for none), and the key of
     /// the channel's last note-on, `NO_KEY` before the first. See `porta` for
     /// what each does, measured against BASSMIDI.
 
-[54] src/driver.rs:680
+[72] src/driver.rs:864
     /// Frame by which every glide handed to the backend has landed. A backend
     /// runs its glide path only for a block that starts before it, so a file
     /// that never glides never runs it at all.
 
-[55] src/driver.rs:686
+[73] src/driver.rs:870
     /// The controller values each variant's table was built from, which are not
     /// the quantised ones above: what a stopped render needs to build the same
     /// tables again. Parallel to `variants`; slot 0 is the bank's own table and
     /// is never built.
 
-[56] src/driver.rs:695
+[74] src/driver.rs:879
     /// Bitmask of variants any channel has pointed at during this block. A
     /// variant referenced by a row already written cannot be rebuilt under it.
 
-[57] src/driver.rs:703
+[75] src/driver.rs:887
+    /// The same, built by `prepare_block` and waiting for the block to be
+    /// committed.
+
+[76] src/driver.rs:890
     /// Set when a voice queued this block was born under a non-zero variant.
     /// Its copy of the params table has to stay reachable even if no published
     /// row names it, which happens when a channel moves onto a variant and
     /// back off inside a single gate tile.
 
-[58] src/driver.rs:713
+[77] src/driver.rs:900
     /// For a per-track stream, the frame the whole file's last event falls
     /// on. The stream runs out sooner, but the render counts it as done only
     /// in the block holding this frame, which is where a whole-file render
@@ -315,19 +420,37 @@
     /// end are released on the same frame, and a one-track file renders the
     /// same bytes either way. `None` for a whole file.
 
-[59] src/driver.rs:720
+[78] src/driver.rs:907
     /// Between `submit_block` and `finish_block`: what the second needs of
     /// the first.
 
-[60] src/driver.rs:725
+[79] src/driver.rs:912
     /// Whether block 0's tables have been built. Every later block is prepared
     /// while its predecessor is on the device, so only the first needs this.
 
-[61] src/driver.rs:730
-    /// This block's admitted voices are the first `spawn_len`; see
-    /// `materialise`.
+[80] src/driver.rs:916
+    /// Blocks of the backend's output latency still to be run and discarded.
+    ///
+    /// `None` until the first block, because the backend is handed in per call
+    /// rather than held. See [`Backend::output_latency_frames`].
 
-[62] src/driver.rs:734
+[81] src/driver.rs:922
+    /// This block's commands. One buffer, grown to the densest block and
+    /// reused: it goes to the backend for `spawn`, and when the next block's
+    /// are built ahead it is handed to `prepare_block` as soon as `spawn` has
+    /// returned, rather than a second buffer standing beside it.
+    ///
+    /// Its length is a high-water mark, not a count: this block's admitted
+    /// voices are the first `spawn_len`; see `materialise`.
+
+[82] src/driver.rs:931
+    /// `prepare_block` has already built this block's commands into
+    /// `spawn_buf`: the backend has no pool, so admission takes every
+    /// candidate and there was nothing to wait for. `prep_energy` is the
+    /// block's candidate energy, handed to `stats` when the block is committed
+    /// rather than while the previous one is still being reported.
+
+[83] src/driver.rs:938
     /// This block's note-ons, one packed entry each, plus their ordinals.
     ///
     /// A block may hold a hundred times more note-ons than the pool can admit
@@ -337,65 +460,103 @@
     /// a note-on against the 152 a materialised `SpawnCmd` used to cost in the
     /// driver and the backend together.
 
-[63] src/driver.rs:744
+[84] src/driver.rs:948
     /// `Some` when `Config::min_velocity` skips anything: which note-offs
     /// answer a skipped note-on. `None` otherwise, so the default path runs
     /// exactly the code it did before the option existed.
 
-[64] src/driver.rs:748
+[85] src/driver.rs:952
     /// One entry per admissible layer this block, up to `cand_cap`. See `Cand`
     /// and `thin_cands`.
 
-[65] src/driver.rs:751
+[86] src/driver.rs:955
     /// Candidates offered this block, counting the ones `cand_stride` skipped:
     /// the block's real `want`, and the index each candidate is ranked by.
 
-[66] src/driver.rs:754
+[87] src/driver.rs:958
     /// Note-ons offered this block, counting the ones `cand_stride` skipped,
     /// with each deferred voice counted as one of its own: the unit thinning
     /// keeps or drops. See `thin_cands`.
 
-[67] src/driver.rs:758
+[88] src/driver.rs:962
     /// Offer only units whose number is a multiple of this. One until the
     /// list reaches `cand_cap`, doubling each time it does, so a power of two.
 
-[68] src/driver.rs:761
+[89] src/driver.rs:965
     /// `Config::max_block_candidates`, never below twice the pool, so thinning
     /// cannot leave admission fewer candidates than it could take.
 
-[69] src/driver.rs:764
+[90] src/driver.rs:968
     /// This block's share of the deferred queue, already built. Kept apart from
     /// `spawn_buf` so that admission ranks over one list and `spawn_buf` can be
     /// filled with the winners alone.
 
-[70] src/driver.rs:770
+[91] src/driver.rs:974
+    /// What `Bank::preview_note_on` has answered so far, kept. Filled as note-ons
+    /// ask and carrying nothing the render decided, so a resumed render builds it
+    /// again.
+
+[92] src/driver.rs:978
     /// Note id of this block's first candidate. Ids are handed out in
     /// candidate order, so a candidate's id is this plus its index and does
     /// not have to be stored.
 
-[71] src/driver.rs:774
+[93] src/driver.rs:982
     /// Voices whose SF2 delay pushes their start past this block, with the
     /// glide they were struck with: it is counted from the block a voice
     /// starts in, which is not known until then.
 
-[72] src/driver.rs:778
+[94] src/driver.rs:986
     /// Fill `DriverStats::last_want_energy` and `last_take_energy`; see
     /// `measure_block_energy`.
 
-[73] src/driver.rs:797
+[95] src/driver.rs:989
+    /// `Some` under `Config::coalesce`: the look-ahead that knows each
+    /// note-on's release, and the groups open on the tick being drained. `None`
+    /// otherwise, so the default path runs the code it did before.
+
+[96] src/driver.rs:993
+    /// This block's notes' coalescing weights, one per entry of `notes` while
+    /// coalescing is on and empty otherwise. Per-block scratch like `notes`.
+
+[97] src/driver.rs:1016
+    /// What each of the render's MIDI streams may spend on track windows:
+    /// `midi::READ_BUDGET` between them, so the look-ahead's second reading of
+    /// the file costs no more memory than one. Both read the same bytes at the
+    /// same rate, so they take equal halves.
+
+[98] src/driver.rs:1024
+    /// Render one note-slice stream rather than a MIDI file.
+    ///
+    /// Deliberately a separate constructor and not an extension check inside
+    /// `open`: slicing is opt-in machinery for material that will not fit
+    /// otherwise, and an ordinary render should not be able to reach it by
+    /// accident. `kestrel render --note-slice` is the only caller.
+
+[99] src/driver.rs:1038
+        // The look-ahead is a second `MidiStream` over the same file, and a
+        // slice stream is not a MIDI file. Refused rather than quietly
+        // rendered unmerged, so a sliced render never looks coalesced.
+
+[100] src/driver.rs:1047
     /// Render the tracks `sel` names, alone: the per-track path. See
     /// `MidiStream::open_tracks` for what the stream does differently, and
     /// `hold_frame` for how the render's end is kept where the whole file's is.
 
-[74] src/driver.rs:909
+[101] src/driver.rs:1067
+        // Both readings of a MIDI file, the drain's and the look-ahead's, merged
+        // on worker threads (`MidiStream::set_threads`): the same events either
+        // way. A slice is one stream already in order and keeps to this thread.
+
+[102] src/driver.rs:1189
     /// Set the scale/octave tuning of a channel's pitch class, in
     /// `mts::UNITS_PER_CENT`.
 
-[75] src/driver.rs:918
+[103] src/driver.rs:1198
     /// Something is tuned from here on. Every note this block has recorded so far
     /// was struck untuned, and is built on its own key.
 
-[76] src/driver.rs:931
+[104] src/driver.rs:1211
     /// How a note-on is tuned: the key to build it on and the cents from there, and
     /// whether it sounds at all.
     ///
@@ -407,39 +568,54 @@
     /// so the right sample plays. Drum parts are not tuned by a key table. A key a
     /// keyboard map leaves out (`x`) does not sound.
 
-[77] src/driver.rs:960
+[105] src/driver.rs:1240
     /// One key of a tuning program set by a message (`Event::KeyTune`): the table
     /// is made on its first key, from the configuration's tuning, so a key the
     /// message did not name keeps that.
 
-[78] src/driver.rs:967
+[106] src/driver.rs:1247
             // BASSMIDI ignores these; say so once, so a file that has them is not
             // taken for one that renders as written.
 
-[79] src/driver.rs:990
+[107] src/driver.rs:1270
     /// Put the three lane tunings of the 31-EDO template on the lane
     /// channels of every port, which is what the template's player sends before
     /// the first note and after a reset (`edo31`). The file carries the same
     /// three messages, and reads them again when it comes to them.
 
-[80] src/driver.rs:1011
+[108] src/driver.rs:1291
     /// Track data decoded so far and the file's total, in bytes. See
     /// `MidiStream::bytes_read` for why this, and not the audio clock, is what
     /// progress is measured in.
 
-[81] src/driver.rs:1018
+[109] src/driver.rs:1298
     /// Measure each block's queued and admitted energy into
     /// `DriverStats::last_want_energy` and `last_take_energy`. Off unless
     /// asked, because it costs two passes over the candidates with the device
     /// waiting on them; `--block-csv` asks.
 
-[82] src/driver.rs:1028
+[110] src/driver.rs:1308
         // SF2 files put their drum kits in bank 128. Which channels are drum
         // parts is channel 10 by the GM convention, plus whatever the GS
         // rhythm-part SysEx has said since.
 
-[83] src/driver.rs:1042
+[111] src/driver.rs:1322
     /// Render one block. Returns false once the file and its tail are done.
+    ///
+    /// A backend that answers with an earlier block than the one it was given
+    /// -- see [`Backend::output_latency_frames`] -- has that lead run off here
+    /// first, so the caller always receives frame 0 of the file in its first
+    /// block. Those blocks are real: they consume their share of the event
+    /// stream and their note-ons reach the backend. Only their *output*, which
+    /// is from before the file starts, is thrown away, so they do not count
+    /// towards the rendered length.
+
+[112] src/driver.rs:1339
+                // The return is deliberately ignored: a file shorter than the
+                // lead is still entirely ahead of us, and stopping here would
+                // emit none of it.
+
+[113] src/driver.rs:1350
     /// Build the tables for one block: begin the gate and channel blocks, take
     /// any deferred voices whose delay has landed, and drain the event stream
     /// up to the block boundary.
@@ -452,58 +628,207 @@
     ///
     /// Output is unaffected: every block's tables are built from the same
     /// events in the same order, and only the wall-clock moment changes.
+    ///
+    /// `free` is where the command buffer arrives once the backend's `spawn`
+    /// is done with it, when this runs alongside the backend; `None` when it
+    /// does not, and `spawn_buf` is already free.
 
-[84] src/driver.rs:1064
+[114] src/driver.rs:1378
         // Whatever each channel is already on stays referenced for the whole
         // block, because `end_block` fills every unwritten row with it.
 
-[85] src/driver.rs:1083
+[115] src/driver.rs:1398
         // Voices whose delay landed them in this block. They are already
         // built, so they enter admission as candidates that point at
         // `deferred_now` rather than at a note-on to be previewed.
 
-[86] src/driver.rs:1102
+[116] src/driver.rs:1417
                 // A unit of its own. Its siblings, if it had any, were parked
                 // separately and `swap_remove` has scattered them, so there
                 // is no run here to keep together.
 
-[87] src/driver.rs:1137
+[117] src/driver.rs:1452
                 // Tempo applies from its own tick, so it must be consumed even
                 // if it lands past the block boundary check below.
 
-[88] src/driver.rs:1162
+[118] src/driver.rs:1491
+        // The params tables this block's CC71-CC75 changes asked for. Built
+        // here rather than when the block is committed because this is the
+        // half of the driver that runs alongside the backend, and on
+        // controller-heavy material the builds are most of the host's time:
+        // 13.8 s of a 34.9 s render on one test file, 2026-09-19. Each is a
+        // pure function of the bank and one controller state, so they are
+        // built in parallel and handed over in the order they were queued.
+
+[119] src/driver.rs:1517
             // Counted as usize: with every port in use there are 256 channels,
             // which as a u8 range bound would wrap to zero and release nothing.
 
-[89] src/driver.rs:1165
+[120] src/driver.rs:1520
                 // Not `all_notes_off`: a file that ends with the pedal still
                 // down would otherwise leave every held note un-released and
                 // ringing into the tail until it timed out.
 
-[90] src/driver.rs:1190
-    /// The first of `next_block`'s three steps, split out so that a batch can
-    /// submit many renders' blocks as one: everything up to and including the
-    /// backend's `submit`. `prepare_ahead` and `finish_block` follow, in that
-    /// order, before the next call.
+[121] src/driver.rs:1528
+        // A backend with no pool admits every candidate (`admit_all`), so
+        // admission does not wait on the device's live count and the block's
+        // commands can be built here, alongside the previous block, rather
+        // than on the render thread once it is committed. Everything this
+        // reads -- the candidates, the notes, the deferred voices, the glide
+        // -- was settled by the drain above; the order is the order
+        // `one_block` would have built them in.
+        // Not for a block that will go up in parts: building all of it ahead is
+        // exactly the memory that splitting it exists to avoid.
 
-[91] src/driver.rs:1202
+[122] src/driver.rs:1539
+            // Into the one command buffer, which the backend may still be
+            // reading for the current block: it arrives on `free` when the
+            // backend's `spawn` returns, and `submit` and `finish` never see
+            // it. If the backend failed before handing it over, the channel is
+            // closed and an empty buffer does; the render is ending anyway.
+            //
+            // Not cleared: its length is a high-water mark and `spawn_len`,
+            // reset above, is this block's share; see `materialise`.
+
+[123] src/driver.rs:1567
+    /// Build this block's `take` admitted candidates `Config::spawn_chunk` at a
+    /// time and hand each to the backend as it is built, then say the block's
+    /// glides and end it. The commands go over in the order one `spawn` would
+    /// have had them, so a backend that takes parts gives the same output.
+
+[124] src/driver.rs:1593
+    /// The backend's half of a committed block, on the render thread while the
+    /// next block is prepared on another: `spawn` this block's `n` commands,
+    /// hand the buffer to `prepare_block` through `to_prep`, then `submit` and
+    /// `finish`. Returns microseconds in `spawn`, in `submit` plus `finish`,
+    /// and the backend's stolen count after `spawn`.
+    ///
+    /// Takes the buffer and the sender by value so that every way out of here,
+    /// an early `?` included, releases the sender: `prepare_block` may be
+    /// waiting on it, and a sender held past a failure would leave it waiting
+    /// while this thread waits to join it.
+
+[125] src/driver.rs:1614
+        // Whether or not `prepare_block` wants it; `one_block` takes it back
+        // out of the channel when nothing did.
+
+[126] src/driver.rs:1618
+        // `submit` is timed with `finish`: a backend that cannot pipeline does
+        // its work there, and leaving it out would file that under "other".
+
+[127] src/driver.rs:1626
+    /// One whole block: admission, spawn, render, and the output stage.
+    ///
+    /// **Two paths, chosen by what the backend is.** A backend with a pool
+    /// takes `next_block`'s three steps in order on this thread, which is the
+    /// path every per-voice render has always run: the device renders under
+    /// `prepare_ahead`, so a second thread has nothing to add and a stock
+    /// render pays for none. A backend with no pool -- merlin -- does its work
+    /// on the host, in `spawn` and `finish`, so the next block is prepared on a
+    /// thread of its own while the backend takes this one; see
+    /// `one_block_poolless`.
+
+[128] src/driver.rs:1655
+    /// A block of a backend that rendered everything up front
+    /// (`Backend::prerendered_blocks`): taken back and put through the output
+    /// stage, with no event read. Where the render ends is what `finish_tail`
+    /// would have decided reading them: every block the stream covers, then
+    /// on while the backend's audio lasts, stopped by the tail cap
+    /// `MAX_TAIL_SECONDS` past the stream's last block, as it stops a voice
+    /// that never dies. The counts are asked for after the block, because a
+    /// backend still rendering learns them as it goes; the event counts are
+    /// taken from it with the last block.
+
+[129] src/driver.rs:1684
+    /// Take the counts of the events a render read from `from`, a driver that
+    /// read the same stream with the same settings, for a backend whose blocks
+    /// this one hands out without reading them (`Backend::prerendered_blocks`).
+    /// The figures of the blocks themselves -- frames, blocks, what the output
+    /// stage clipped -- stay this driver's own.
+
+[130] src/driver.rs:1704
+    /// Commit the block `prepare_block` built -- admission, spawn, render --
+    /// and prepare the next one while this one is on the backend.
+    ///
+    /// **The next block is prepared on a second thread while the backend
+    /// takes this one on this thread.** From the end of admission to the end of
+    /// the block the backend needs only this block's commands and `out`, and
+    /// `prepare_block` touches neither the backend nor them, so the two share
+    /// nothing that changes and the output is the same bytes it was in
+    /// sequence. What the thread buys depends on the backend: the GPU's
+    /// `submit`/`finish` already let the device run under the drain, but a
+    /// backend whose work is host work -- merlin's plan, head and kernel
+    /// builds -- could not overlap anything on one thread.
+    ///
+    /// A scoped thread per block rather than a standing one: a block is tens
+    /// of milliseconds and the spawn is tens of microseconds, and it keeps
+    /// `prepare_block` an ordinary `&mut self` method.
+    ///
+    /// The backend takes the command buffer for `spawn` and then hands it on
+    /// to `prepare_block`, which builds the next block's commands into it when
+    /// the backend has no pool, while the backend goes on to `submit` and
+    /// `finish`. One buffer, never two alive at once. See `spawn_buf`.
+
+[131] src/driver.rs:1730
+        // A block too big to build at once: in parts, on this thread, and the
+        // next block prepared after it rather than beside it -- the
+        // preparation and the parts would want the same candidate lists. Only
+        // the densest blocks come here.
+
+[132] src/driver.rs:1753
+        // This block's commands are the first `n` of the buffer; the next
+        // block's preparation resets `spawn_len` under us.
+
+[133] src/driver.rs:1758
+        // A receiver can move between threads but not be shared by them, so it
+        // goes over with `prepare_block` and comes back when that is joined.
+
+[134] src/driver.rs:1767
+            // Time spent here is the next block's preparation outlasting this
+            // one's rendering: the host drain is the critical path.
+
+[135] src/driver.rs:1774
+        // Still in the channel when `prepare_block` had no use for it: the
+        // buffer is free again, and keeps its length, which is a high-water
+        // mark rather than a count.
+
+[136] src/driver.rs:1790
+    /// Everything a block does up to the backend's `spawn`: prime the first
+    /// block, hand over the controller state, publish the tables, and admit and
+    /// build this block's voices. What `submit_block` and `one_block_poolless`
+    /// have in common; the backend's half differs between them.
+    ///
+    /// Returns what `finish_tail` needs of the block, and the backend's stolen
+    /// count before it, for the caller to difference once `spawn` has run.
+
+[137] src/driver.rs:1802
+        // Before anything is prepared: `prepare_block` thins the candidate
+        // list, and a backend with no pool must not lose note-ons there either.
+
+[138] src/driver.rs:1807
         // Block 0 has nothing prepared behind it. Every later block was built
         // while its predecessor was still on the device -- see the call to
         // `prepare_block` after `submit` below.
 
-[92] src/driver.rs:1221
+[139] src/driver.rs:1826
         // Nothing alive and nothing offered: the block renders exact zeros, so
         // the device is not asked to. Everything on the host still runs --
         // the tables above were built, admission below decides nothing, the
         // next block is prepared and the limiter drains its lookahead -- and
         // only the backend calls are left out. A thin stem is mostly this.
+        //
+        // Never for a backend with no pool. Its `active_voices` is a flag for
+        // "something is outstanding", not a count, and its output arrives
+        // blocks after the input that made it, so whether it survives a block
+        // being stepped over has not been checked -- and `Backend::skip_block`
+        // asks it to leave itself exactly as rendering would have.
 
-[93] src/driver.rs:1233
+[140] src/driver.rs:1844
                 // A voice born under a variant no published row names still has
                 // to be handed back to the rows on its second gate tile, so the
                 // controller path stays on for it.
 
-[94] src/driver.rs:1240
+[141] src/driver.rs:1854
         // Admission, on candidates rather than on built voices.
         //
         // `take` is what the backend would have kept anyway; deciding it here
@@ -512,60 +837,99 @@
         // against a 1M pool that is the difference between 15 GiB of host
         // memory and a few hundred megabytes.
 
-[95] src/driver.rs:1248
+[142] src/driver.rs:1862
         // What admission chooses from: every layer the block offered, unless
         // it outgrew `cand_cap` and was thinned. The counts are of what it
         // offered, which is the same number whenever it was not.
 
-[96] src/driver.rs:1261
-                // Thinned across the block rather than truncated, so a
-                // saturated block keeps its timing instead of being heard at
-                // its start and silent at its end. `spawn_pick(i, ..) >= i`, so
-                // compacting forwards in place never overwrites a candidate
-                // still to be read.
+[143] src/driver.rs:1866
+        // A backend with no pool admits everything: `admit_take` caps a block
+        // at `max_voices`, which means nothing when there is no pool to
+        // overflow. See `Backend::has_pool`. Nothing was thinned for it either,
+        // so `cand_seen` is `want` and `dropped` does not move.
 
-[97] src/driver.rs:1274
-        // After the rule has reordered, not before: measuring the first
-        // `take` in arrival order reports the same number for every rule.
-        // Only for `--block-csv`, the one thing that reads them: two passes
-        // over every candidate with the device idle, 0.17 s of a 73 s render.
-
-[98] src/driver.rs:1283
+[144] src/driver.rs:1881
         // `prepare_block` has already moved `block_index` past the block being
         // committed.
 
-[99] src/driver.rs:1303
+[145] src/driver.rs:1885
+            // Built by `prepare_block`, alongside the previous block: a
+            // backend with no pool takes every candidate, so there was no
+            // admission to wait for.
+
+[146] src/driver.rs:1896
+                    // Thinned across the block rather than truncated, so a
+                    // saturated block keeps its timing instead of being heard
+                    // at its start and silent at its end. `spawn_pick(i, ..)
+                    // >= i`, so compacting forwards in place never overwrites a
+                    // candidate still to be read.
+
+[147] src/driver.rs:1910
+            // After the rule has reordered, not before: measuring the first
+            // `take` in arrival order reports the same number for every rule.
+            // Only for `--block-csv`, the one thing that reads them: two passes
+            // over every candidate with the device idle, 0.17 s of a 73 s render.
+
+[148] src/driver.rs:1922
+                // Built and handed over a chunk at a time by
+                // `one_block_poolless`, after this returns.
+
+[149] src/driver.rs:1934
+        // A block going up in parts has not been built, so nothing knows its
+        // glides yet; `spawn_in_parts` says them once it has.
+
+[150] src/driver.rs:1940
         // `want`, not what was admitted. The counter has always meant "voices
         // this block queued", dropped ones included, and changing that
         // silently would move a number people read off the summary line.
 
-[100] src/driver.rs:1311
+[151] src/driver.rs:1945
         // Snapshotted *before* the next block is prepared, because `more`
         // asks whether there is more to come after the block being committed
         // -- and preparing the next one moves both of these forward. Reading
         // them afterwards ends the render one block early and truncates the
         // tail, which is exactly what it did the first time.
 
-[101] src/driver.rs:1325
+[152] src/driver.rs:1959
+    /// The first of `next_block`'s three steps, split out so that a batch can
+    /// submit many renders' blocks as one: everything up to and including the
+    /// backend's `submit`. `prepare_ahead` and `finish_block` follow, in that
+    /// order, before the next call.
+    ///
+    /// For a backend with a pool. One without goes through `next_block`, which
+    /// prepares the next block on a thread of its own.
+
+[153] src/driver.rs:1995
     /// The second of `next_block`'s three steps: build the next block's
     /// tables while the device is busy with this one. The whole reason
     /// `submit` and `finish` are separate.
 
-[102] src/driver.rs:1332
+[154] src/driver.rs:2002
     /// The last of `next_block`'s three steps: take the block back from the
     /// backend -- or write the zeros of a silent one -- limit it, and say
     /// whether there is more to come.
 
-[103] src/driver.rs:1415
+[155] src/driver.rs:2027
+    /// What follows the backend's block coming back, however it got there: put
+    /// it through the output stage, count it, and say whether there is more to
+    /// come. `waited` is the microseconds the host spent waiting on the
+    /// backend for it.
+
+[156] src/driver.rs:2060
+    /// The block through the output stage, and counted: `finish_tail`'s part
+    /// that every block has, whatever decides whether another follows. Returns
+    /// the backend's figures as they stand after it.
+
+[157] src/driver.rs:2112
             // Events are handled in stream order, so this is the variant in
             // force at the note-on's own frame -- which the tile row does not
             // yet carry if the controller arrived on this very tick.
 
-[104] src/driver.rs:1427
+[158] src/driver.rs:2124
             // As with `variant`: a bend or a gain change on this note's own
             // tick has not reached its tile's row yet, so it reads the next.
 
-[105] src/driver.rs:1435
+[159] src/driver.rs:2132
     /// Move the `take` best candidates to the front, ranked *within* time
     /// strata rather than across the whole block.
     ///
@@ -586,7 +950,19 @@
     /// 64-frame pieces -- 1.3 ms, far too short to hear as clustering -- and
     /// each picks its own top share. The development notes have the comparison.
 
-[106] src/driver.rs:1473
+[160] src/driver.rs:2155
+        // The selections first, in parallel. Each stratum selects within its
+        // own disjoint slice of `cands`, so they cannot see each other -- and
+        // `select_nth_unstable` is deterministic, so which elements end up in
+        // the winning prefix does not depend on how the work was scheduled.
+        //
+        // The compaction below stays serial and stays second. A stratum writes
+        // its winners to `[olo, ohi)`, and `olo <= lo` means that range can
+        // overlap the *read* range of an earlier stratum -- fine in sequence,
+        // a race in parallel. Splitting the pass in two is what makes the
+        // expensive half safe to spread.
+
+[161] src/driver.rs:2199
             // Left in partition order, and **do not sort it**. The order
             // decides which voice lands in which pool slot and therefore the
             // summation order of the mixdown, so it has to be deterministic --
@@ -597,20 +973,20 @@
             // development notes have that measurement and why it stayed
             // hidden for so long.
 
-[107] src/driver.rs:1483
+[162] src/driver.rs:2209
             // Slide the winners down. `olo <= lo` because `take <= want`, so
             // this never reaches into a stratum still to be visited.
 
-[108] src/driver.rs:1492
+[163] src/driver.rs:2218
     /// Number the next admission candidate. Every layer that reaches
     /// admission takes one, kept or not, so the index a candidate is ranked by
     /// does not depend on whether the block was thinned.
 
-[109] src/driver.rs:1502
+[164] src/driver.rs:2228
     /// Number the next unit -- a note-on, or one deferred voice -- and say
     /// whether the stride keeps it. See `thin_cands`.
 
-[110] src/driver.rs:1511
+[165] src/driver.rs:2237
     /// Halve this block's candidates once the list reaches `cand_cap`: keep
     /// every other note-on, and offer only every other one from here on.
     ///
@@ -634,16 +1010,26 @@
     /// 2026-09-25 and was heard as the mix going hard left in the densest
     /// passages; the development notes have the three renders.
 
-[111] src/driver.rs:1541
+[166] src/driver.rs:2267
             // One unit: a deferred voice alone, or a note-on's run of layers,
             // which are consecutive because they are pushed together and
             // thinning only ever runs between note-ons.
 
-[112] src/driver.rs:1551
+[167] src/driver.rs:2277
                 // Note indices only grow and `kept <= r`, so copying forwards
                 // never overwrites one still to be read.
 
-[113] src/driver.rs:1585
+[168] src/driver.rs:2315
+    /// Close the coalescing groups open on the tick being drained, and weight
+    /// what each leader built by how many note-ons it stands for: its
+    /// candidates rank as loud as it will sound, it is built at that gain
+    /// (`Builder::build`), and its layers parked for a later block are scaled
+    /// here, since they are already built.
+    ///
+    /// Before candidates are thinned, which moves them, and at the end of the
+    /// drain, so that none is open at a block boundary.
+
+[169] src/driver.rs:2344
     /// Build the voices for the first `take` candidates, appending them to
     /// `spawn_buf` in candidate order.
     ///
@@ -656,30 +1042,35 @@
     /// and each voice is built from the candidate and read-only tables alone,
     /// into its own slot, so the list is the same bytes on any number.
 
-[114] src/driver.rs:1614
+[170] src/driver.rs:2359
+    /// [`Driver::materialise`] of the admitted candidates `[lo, hi)` alone,
+    /// appended at `spawn_len`. A candidate builds the same command wherever
+    /// its span starts, so a block built in spans is the block built whole.
+
+[171] src/driver.rs:2381
         // Only ever grown: its length is a high-water mark and `spawn_len` is
         // this block's share, so a block is written over the last one's
         // rather than zeroed first.
 
-[115] src/driver.rs:1621
+[172] src/driver.rs:2388
         // Build a run of candidates into `out`, front first: how many were
         // built, and where the last of their glides ends.
 
-[116] src/driver.rs:1639
+[173] src/driver.rs:2406
             // Pieces are taken as threads come free rather than dealt out
             // evenly: on a machine with fast and slow cores an even deal
             // waits for the slowest.
 
-[117] src/driver.rs:1666
+[174] src/driver.rs:2433
             // A layer the preview named and `build_layer` refused leaves its
             // piece short. Close the gaps, in order; it never happens.
 
-[118] src/driver.rs:1684
+[175] src/driver.rs:2451
     /// Grow the published tables to cover channel `ch`, a port at a time. The
     /// driver's own per-channel state always covers every port; the tables are
     /// what cost work every block, so they cover only what the file has used.
 
-[119] src/driver.rs:1697
+[176] src/driver.rs:2464
     /// `tick` is the event's own MIDI tick, before it rounds to a frame: the
     /// analytic phase angle is keyed on it, so two notes a tick apart stay
     /// distinct even when they land on the same output frame.
@@ -689,21 +1080,25 @@
     /// controller, program change or bend on all three channels of its triplet.
     /// Everything after sees ordinary MIDI.
 
-[120] src/driver.rs:1752
+[177] src/driver.rs:2522
+                // Asked of every note-on, a skipped one too, so the look-ahead
+                // stays on the note-on this is.
+
+[178] src/driver.rs:2528
                 // First, so a skipped note is not counted, previewed, offered,
                 // or remembered as the next glide's source: it is not there.
 
-[121] src/driver.rs:1771
+[179] src/driver.rs:2547
                 // Portamento, decided here in stream order and before
                 // admission: a note that is dropped is still the key the next
                 // one glides from, as it is in BASSMIDI, which drops nothing.
 
-[122] src/driver.rs:1790
+[180] src/driver.rs:2566
                 // Preview rather than build. A saturated block cannot admit
                 // most of these, and building a voice for one that is about to
                 // be dropped is the whole cost this exists to remove.
 
-[123] src/driver.rs:1795
+[181] src/driver.rs:2571
                 // The seed is the id the first layer of this note-on is
                 // about to be given. It is handed out in candidate order from
                 // a counter that only the MIDI advances, so it is stable
@@ -713,92 +1108,109 @@
                 // nothing: its gate is open and shut as any note's, so a note-off
                 // still finds it, and no layer is offered for it.
 
-[124] src/driver.rs:1814
-                // Thinned between note-ons, never between the layers of one,
-                // so `note` stays valid for all of them.
+[182] src/driver.rs:2590
+                // Coalescing. Everything above has happened for this note-on as
+                // for any other -- it is registered with the gates, it moved the
+                // glide, it took its preview -- so all that is left to decide is
+                // whether it builds anything or folds into an earlier note-on on
+                // this tick that is the same voice. One that folds takes the ids
+                // its layers would have, so every later note's are the same.
 
-[125] src/driver.rs:1821
+[183] src/driver.rs:2624
+                // Thinned between note-ons, never between the layers of one,
+                // so `note` stays valid for all of them. Never for a backend
+                // with no pool, which renders every note it is handed.
+
+[184] src/driver.rs:2628
+                    // Thinning moves candidates, so the groups that point at
+                    // them close first.
+
+[185] src/driver.rs:2640
                 // Whether the stride keeps this note-on, decided once for all
                 // its layers at the first one it offers.
 
-[126] src/driver.rs:1827
+[186] src/driver.rs:2646
                     // Ids are handed out here, in candidate order, exactly as
                     // they were when this loop built voices -- so a candidate's
                     // id is `block_first_id` plus its index and never has to be
                     // stored. A delayed layer takes one too, because it did
                     // before and the sequence has to be the same either way.
 
-[127] src/driver.rs:1838
+[187] src/driver.rs:2657
                             // Lands in a later block, so it is not this block's
                             // to admit. Build it now and park it; delayed voices
                             // are rare enough that this is not the hot path.
 
-[128] src/driver.rs:1844
+[188] src/driver.rs:2663
                                 // A voice parked for a later block is born in
                                 // that block's tile zero, whose row already
                                 // carries the state this controller set, so it
                                 // needs no bias.
 
-[129] src/driver.rs:1868
+[189] src/driver.rs:2687
                     // A variant a queued voice was born under has to stay
                     // reachable for the whole block whether or not the voice
                     // survives admission, which is what the old code did by
                     // pinning at queue time. Marked before the stride, which
                     // is admission too.
 
-[130] src/driver.rs:1940
+[190] src/driver.rs:2733
+                // A note-on the stride did not keep built nothing to lead, so
+                // the next of its duplicates gets the chance it would have had.
+
+[191] src/driver.rs:2781
                     // Data entry, and the increment/decrement pair that walks
                     // the same value. Only RPN 0, pitch bend sensitivity, is
                     // acted on; selecting an NRPN parks `rpn_sel` outside the
                     // 14-bit range so a file's NRPN data entry cannot be
                     // mistaken for a bend range.
 
-[131] src/driver.rs:1953
+[192] src/driver.rs:2794
                     // RPN 1, channel fine tuning: 14 bits centred on 8192,
                     // spanning a semitone either way. The MSB alone is the
                     // usual case and lands on `(msb - 64) * 128` internally.
 
-[132] src/driver.rs:1966
+[193] src/driver.rs:2807
                     // RPN 2, channel coarse tuning: MSB only, centred on 64,
                     // one semitone per step. A file that transposes a part two
                     // octaves up and bends it two octaves back down nets to
                     // zero -- and a synth that reads only the bend plays it two
                     // octaves flat, which is what this used to do.
 
-[133] src/driver.rs:1975
+[194] src/driver.rs:2816
                     // RPN 3 and 4, the tuning program and the tuning bank the channel
                     // plays on, for the MIDI Tuning Standard's key tables. Only read
                     // when those are (`Config::mts_notes`); a note-on takes the program as
                     // it is when the note-on arrives.
 
-[134] src/driver.rs:2017
+[195] src/driver.rs:2858
                     // Portamento. Read at each note-on, so none of them needs a
                     // row: a glide under way keeps the speed it started with,
                     // and CC65 going off does not stop it.
 
-[135] src/driver.rs:2038
+[196] src/driver.rs:2879
                         // The gate side keeps the note bookkeeping straight --
                         // those notes really have ended -- and the channel row
                         // carries the hard cut, because CC120 must not wait for
                         // a release the way CC123 does.
 
-[136] src/driver.rs:2046
+[197] src/driver.rs:2887
                     // Every channel mode message below carries an all-notes-off
                     // with it, which is the part that changes what is heard.
                     // The mode itself -- omni, and mono against poly voice
                     // allocation -- is not implemented; see the README.
 
-[137] src/driver.rs:2072
+[198] src/driver.rs:2913
                 // And its scale/octave tuning goes back to equal temperament:
                 // measured 2026-10-05, a GM System On and a GS Reset both do.
                 // The 31-EDO template's player sends its tunings again after
                 // a reset, so there they come straight back.
 
-[138] src/driver.rs:2080
+[199] src/driver.rs:2921
                 // And what a file set with single-note messages and bulk dumps, which
                 // the standard puts back too; the configuration's own tuning stays.
 
-[139] src/driver.rs:2095
+[200] src/driver.rs:2936
     /// Take one of CC71-CC75 and move the channel onto whichever copy of the
     /// params table matches its new combination, building that copy if this is
     /// the first time the combination has come up.
@@ -811,7 +1223,7 @@
     /// `max_param_variants` a channel takes the nearest copy that already
     /// exists rather than failing or thrashing.
 
-[140] src/driver.rs:2132
+[201] src/driver.rs:2973
             // Out of slots. Rebuilding a stale one is much better than
             // approximating, because an approximation is silent: this file
             // asks for 67 distinct states, and approximating meant most of it
@@ -823,12 +1235,12 @@
             // the old reference. Voices always read their channel's current
             // variant, so nothing older than this block can be holding one.
 
-[141] src/driver.rs:2181
+[202] src/driver.rs:3022
     /// Queue the build of variant `i` from channel `c`'s current controllers.
     /// Built at the end of the block rather than here: a table can be tens of
     /// thousands of entries and the event loop is not the place for it.
 
-[142] src/driver.rs:2201
+[203] src/driver.rs:3042
     /// CC121, Reset All Controllers.
     ///
     /// **Resets far less than the name suggests.** The MMA specification lists
@@ -852,7 +1264,7 @@
     /// and a pending CC84 survive, as does the key the next note glides from.
     /// Measured 2026-09-18; see `porta`.
 
-[143] src/driver.rs:2239
+[204] src/driver.rs:3080
     /// Lay the vibrato and tremolo LFOs over the controller rows.
     ///
     /// Both are per channel, not per voice, so they can be evaluated on the
@@ -864,27 +1276,27 @@
     /// Depth is the GM default of +/-50 cents at full wheel, scaled by CC77.
     /// Rate is 5 Hz at CC76's centre and spans roughly 0.5 to 14 Hz.
 
-[144] src/driver.rs:2252
+[205] src/driver.rs:3093
         // Every port's channels, covered by the tables or not, so a channel's
         // phase never depends on when its port was first reached. Only a
         // covered one can get past the depth test: a depth takes a controller,
         // and a controller covers its channel.
 
-[145] src/driver.rs:2263
+[206] src/driver.rs:3104
                 // Keep the phase running anyway, so switching the wheel on
                 // mid-note does not jump the curve to wherever it left off.
 
-[146] src/driver.rs:2286
+[207] src/driver.rs:3127
     /// Freeze this channel's bend into the factor the backends multiply by.
     /// The power lives here, on the host, once per event rather than once per
     /// voice per tile.
 
-[147] src/driver.rs:2290
+[208] src/driver.rs:3131
         // Bend, coarse tuning and fine tuning are three separate controls that
         // all end up as one pitch multiply. They are summed in semitones here
         // rather than applied in sequence, so the arithmetic stays exact.
 
-[148] src/driver.rs:2299
+[209] src/driver.rs:3140
     /// Fold CC7, CC11 and CC10 into the pair of gains a voice multiplies by.
     ///
     /// Volume and expression are squared, which is the General MIDI
@@ -896,27 +1308,27 @@
     /// Pan is constant power, and multiplies whatever pan the region already
     /// had rather than replacing it.
 
-[149] src/driver.rs:2310
+[210] src/driver.rs:3151
         // 14-bit where a file bothers to send the fine half, 7-bit otherwise:
         // with the LSB at zero these are exactly msb/127.
 
-[150] src/driver.rs:2319
+[211] src/driver.rs:3160
         // Relative to where the channel powered on, so a channel that never
         // sends CC7 -- or sends 100 -- is exactly unity and keeps the fast
         // path. The power-on level itself is in every voice's own gain; see
         // `bank::POWER_ON_GAIN`.
 
-[151] src/driver.rs:2326
+[212] src/driver.rs:3167
         // The soft pedal is continuous rather than a switch, and takes off up
         // to 6 dB at the bottom of its travel. A real una corda also darkens
         // the tone; that part is not modelled.
 
-[152] src/driver.rs:2332
+[213] src/driver.rs:3173
         // Centre has to come out at exactly one on both sides, or a file that
         // sends a redundant "pan centre" would quietly drop 3 dB and stop the
         // unity fast path.
 
-[153] src/driver.rs:2349
+[214] src/driver.rs:3190
     /// Like `next_block`, with one difference: after the block is submitted,
     /// `hold` is asked whether to stop short of preparing the next one. If it
     /// says so, the driver is left **at a block boundary**, with nothing built
@@ -933,11 +1345,11 @@
     /// preparation reads nothing the device wrote. A fresh driver is in this
     /// state too, which is why a resumed one needs no special first block.
 
-[154] src/driver.rs:2385
+[215] src/driver.rs:3226
     /// Whether the driver is at a block boundary: no block on the device and
     /// none prepared. See `next_block_or_hold`.
 
-[155] src/driver.rs:2391
+[216] src/driver.rs:3232
     /// Everything this render has come to that is not rebuilt from the
     /// configuration, the soundfont and the MIDI file: the stream's position,
     /// the clock, the per-channel state, the gates, the limiter, the counters.
@@ -950,11 +1362,25 @@
     /// remembers what the list was. `tests/resume_single.rs` is what shows a
     /// decision was wrong.
 
-[156] src/driver.rs:2416
+[217] src/driver.rs:3257
+            // Rebuilt by `load_state` from the stream, the gates and the note
+            // pairing saved below (`Lookahead::resync`). Its groups are
+            // per-tick scratch, and none is open at a boundary.
+
+[218] src/driver.rs:3261
             // Per-block scratch: emptied or rewritten by `prepare_block` before
             // anything reads it, and nothing is prepared at a boundary.
 
-[157] src/driver.rs:2588
+[219] src/driver.rs:3275
+            // Set from the backend at the top of every block (`admit_block`),
+            // and what the backend's output latency is is the backend's to say
+            // again: only a backend with no pool has any, and none can be saved.
+
+[220] src/driver.rs:3279
+            // Latched with `admit_all`, and per-block scratch: a block in parts
+            // is built and handed over before the block ends.
+
+[221] src/driver.rs:3449
     /// Go on from a saved state: the other half of `save_state`, into a driver
     /// that was just opened on the same MIDI, soundfont and settings. Anything
     /// that does not fit is an error that says what, and the driver is then not
@@ -964,17 +1390,27 @@
     /// `reinstall_variants` hands it the params tables the sound controllers
     /// had built.
 
-[158] src/driver.rs:2700
+[222] src/driver.rs:3563
+            // A `Source`, which can refuse (a slice is not saved). Coalescing
+            // refuses slices at the start, so this is always a MIDI file here.
+
+[223] src/driver.rs:3570
         // Nothing is prepared, and a resumed render prepares its first block as a
         // fresh one does.
 
-[159] src/driver.rs:2706
+[224] src/driver.rs:3576
     /// Hand the backend the params tables the sound controllers built before
     /// the stop: one per variant slot past the first, rebuilt from the
     /// controller values each was built under. After `load_state`, before the
     /// first block.
 
-[160] src/driver.rs:2720
+[225] src/driver.rs:3590
     /// The largest magnitude written to the output so far, after `--volume`
     /// and the limiter and before the clamp. `stats.peak` is the mix's, ahead
     /// of all of that.
+
+[226] src/driver.rs:3617
+    /// What the defaults give the files they were chosen on
+    /// (`Config::drain_tracks_per_worker`): one worker a reading for every
+    /// real file measured, 4,000 and 6,000 tracks among them; two at 16,000
+    /// tracks, where one no longer kept up; the thread cap at the most tracks tested.

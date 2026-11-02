@@ -15,34 +15,52 @@
 //! terminal window can be opened they run in the current one instead.
 
 [2] src/bin/kestrel/tui/extras.rs:21
-/// The flag the new window is started with. Routed on only when it is the
-/// whole command line, and never listed in `--help`.
+/// The flag the new window is started with, and the one that follows it with
+/// the window it came from. Routed on only when they are the whole command
+/// line, and never listed in `--help`.
 
-[3] src/bin/kestrel/tui/extras.rs:34
-    // Through `start`, not by spawning the child with CREATE_NEW_CONSOLE. The
-    // standard library always hands a child this process's standard handles,
-    // so a child spawned straight into a new console window gets the window
-    // but reads its keys from this one -- where the main menu is already
-    // waiting on them. That shipped, and Extras could not be typed into
-    // (reported 2026-09-12). `start` gives the process in the new window that
-    // window's own input and output.
+[3] src/bin/kestrel/tui/extras.rs:27
+/// Open Extras in a new terminal window running this executable, told which
+/// process it came from, so that Merlin, opened from it, can see that window
+/// out.
 
-[4] src/bin/kestrel/tui/extras.rs:66
-    // No standard way to ask for a terminal, so try the usual ones in turn,
-    // starting with whatever the session says it prefers.
+[4] src/bin/kestrel/tui/extras.rs:39
+/// The Extras window's whole life: `kestrel --extras-window`, and the process
+/// it was opened from when it says so.
 
-[5] src/bin/kestrel/tui/extras.rs:106
+[5] src/bin/kestrel/tui/extras.rs:43
     // These are the command-line tools, and they report the way the command
     // line does.
 
-[6] src/bin/kestrel/tui/extras.rs:136
+[6] src/bin/kestrel/tui/extras.rs:60
+/// The process this window came from, set once by `run`; `None` for Extras run
+/// in the window it was chosen in, where there is nothing to close.
+
+[7] src/bin/kestrel/tui/extras.rs:85
 /// What the Extras menu offers, in the order shown and numbered from 1. Built
 /// per build, so a release build numbers its entries without a gap.
 
-[7] src/bin/kestrel/tui/extras.rs:306
+[8] src/bin/kestrel/tui/extras.rs:95
+/// What the person is told before Merlin opens. The first sentence is the
+/// user's own words, 2026-11-02; the rest says what it asks of a machine.
+
+[9] src/bin/kestrel/tui/extras.rs:119
+/// The disclaimer, and Merlin's window if it is agreed to. `open` is what opens
+/// the window and sees out the one Extras came from, which a test replaces.
+
+[10] src/bin/kestrel/tui/extras.rs:342
 /// FalconEye's machine report. What it holds is shown before anything is
 /// collected, and the GPU self-test is asked for, since it loads the GPU.
 
-[8] src/bin/kestrel/tui/extras.rs:398
+[11] src/bin/kestrel/tui/extras.rs:435
 /// Every public subcommand's flags, straight from the clap definitions that
 /// parse them, so this can never describe a flag that does not exist.
+
+[12] src/bin/kestrel/tui/extras.rs:495
+    /// Merlin is the last choice, so Kestrel's own keep the numbers they had,
+    /// and Close is still the one after them.
+
+[13] src/bin/kestrel/tui/extras.rs:545
+    /// A window that could not be opened, or a main window that stayed, leave
+    /// Extras where it is, with the person told: neither is a reason to close
+    /// the only window they have.

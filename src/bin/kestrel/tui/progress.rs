@@ -41,7 +41,7 @@ pub struct Labels {
 
 /// Recent speed and note rate, smoothed over a couple of seconds so the \[8\]
 #[derive(Default)]
-struct Rates {
+pub(super) struct Rates {
     prev: Option<(f64, f64, u64)>,
     speed: Option<f64>,
     notes: f64,
@@ -78,7 +78,7 @@ impl Rates {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Footer {
+pub(super) enum Footer {
     Hint,
     Armed,
     /// Armed, for a render that saves its progress: a stop can keep it or not.
@@ -110,7 +110,7 @@ fn stop_key(key: &crossterm::event::KeyEvent, saving: bool) -> Option<Stop> {
     }
 }
 
-fn spinner(tick: u64) -> &'static str {
+pub(super) fn spinner(tick: u64) -> &'static str {
     const FRAMES: [&str; 4] = [
         "\u{25CF}\u{25CB}\u{25CB}",
         "\u{25CB}\u{25CF}\u{25CB}",
@@ -121,7 +121,7 @@ fn spinner(tick: u64) -> &'static str {
 }
 
 /// Two labelled values side by side, each column `col` wide.
-fn pair(col: usize, l1: &str, v1: Line, l2: &str, v2: Line) -> Line {
+pub(super) fn pair(col: usize, l1: &str, v1: Line, l2: &str, v2: Line) -> Line {
     let mut left = vec![c(format!("{l1:<10}"), DIM)];
     left.extend(v1);
     let mut line = style::fit(&left, col);
@@ -131,12 +131,12 @@ fn pair(col: usize, l1: &str, v1: Line, l2: &str, v2: Line) -> Line {
     line
 }
 
-fn dash() -> Line {
+pub(super) fn dash() -> Line {
     vec![c("\u{2014}", DIM)]
 }
 
 /// Video and host memory, side by side.
-fn memory(snap: &Snapshot, col: usize) -> Line {
+pub(super) fn memory(snap: &Snapshot, col: usize) -> Line {
     let mut vram = match (snap.device_bytes, snap.backend.as_deref()) {
         (Some(bytes), _) => vec![s(style::bytes(bytes))],
         (None, Some("cpu")) => vec![c("none, CPU backend", DIM)],
@@ -162,6 +162,23 @@ fn memory(snap: &Snapshot, col: usize) -> Line {
     pair(col, "VRAM", vram, "RAM", ram)
 }
 
+/// The host's memory and the adapter's, side by side, for a render whose own \[11\]
+pub(super) fn memory_line(snap: &Snapshot, col: usize) -> Line {
+    let ram = match (snap.host_rss_bytes, snap.host_rss_peak_bytes) {
+        (Some(now), Some(peak)) => vec![s(style::bytes(now)), c(format!("  peak {}", style::bytes(peak)), DIM)],
+        (Some(now), None) => vec![s(style::bytes(now))],
+        _ => dash(),
+    };
+    let video = match snap.gpu_memory.and_then(|m| m.dedicated_used.map(|used| (used, m.dedicated_total))) {
+        Some((used, total)) => {
+            let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
+            vec![s(format!("{:.1} of {:.1} GiB", gib(used), gib(total)))]
+        }
+        None => dash(),
+    };
+    pair(col, "RAM", ram, "VRAM", video)
+}
+
 /// The spinner row a frame shows before rendering starts.
 fn setting_up(phase: Phase, tick: u64, secs: f64) -> Line {
     let what = match phase {
@@ -179,12 +196,12 @@ fn setting_up(phase: Phase, tick: u64, secs: f64) -> Line {
 }
 
 /// How a frame is drawn, as distinct from what it shows.
-struct View {
+pub(super) struct View {
     /// Frames drawn so far, for the spinner.
-    tick: u64,
+    pub(super) tick: u64,
     /// Content width inside the panel.
-    inner: usize,
-    footer: Footer,
+    pub(super) inner: usize,
+    pub(super) footer: Footer,
 }
 
 /// Lay out one frame. Pure, so a frame can be checked as text.
@@ -233,7 +250,7 @@ fn frame(labels: &Labels, snap: &Snapshot, rates: &Rates, view: &View) -> Vec<Li
             bar.push(b(pct, AMBER));
             body.push(bar);
 
-            // [11]
+            // [12]
             let middle = if finishing {
                 vec![c(format!("Closing the file {}", spinner(tick)), AMBER)]
             } else if frac >= 1.0 {
@@ -324,7 +341,7 @@ fn frame(labels: &Labels, snap: &Snapshot, rates: &Rates, view: &View) -> Vec<Li
     style::panel(title, &body, inner, footer)
 }
 
-/// A per-track render's frame: its tracks, many at once, rather than one \[12\]
+/// A per-track render's frame: its tracks, many at once, rather than one \[13\]
 fn track_frame(labels: &Labels, snap: &Snapshot, rates: &Rates, view: &View) -> Vec<Line> {
     let View {
         tick,
@@ -476,7 +493,7 @@ fn track_frame(labels: &Labels, snap: &Snapshot, rates: &Rates, view: &View) -> 
     style::panel(title, &body, inner, footer)
 }
 
-/// The terminal while the screen owns it: raw mode so Ctrl+C arrives as a key \[13\]
+/// The terminal while the screen owns it: raw mode so Ctrl+C arrives as a key \[14\]
 struct Screen {
     raw: bool,
     size: (u16, u16),
@@ -513,7 +530,13 @@ impl Screen {
             self.fresh = true;
         }
         let mut out = std::io::stdout().lock();
-        let _ = queue!(out, terminal::BeginSynchronizedUpdate);
+        self.paint(&mut out, lines);
+        let _ = out.flush();
+    }
+
+    /// One frame, written to `out`.
+    fn paint(&mut self, mut out: impl Write, lines: &[Line]) {
+                let _ = queue!(out, terminal::BeginSynchronizedUpdate);
         if self.fresh {
             let _ = queue!(out, terminal::Clear(terminal::ClearType::All), cursor::MoveTo(0, 0));
             let room = self.size.1 >= style::BANNER_ROWS + lines.len() as u16 + 2;
@@ -534,10 +557,18 @@ impl Screen {
             let _ = style::queue_line(&mut out, line);
             let _ = queue!(out, terminal::Clear(terminal::ClearType::UntilNewLine));
         }
+        // [15]
+        for i in stale_rows(self.rows, lines.len()) {
+            let _ = queue!(out, cursor::MoveTo(0, self.top + i as u16), terminal::Clear(terminal::ClearType::CurrentLine));
+        }
         self.rows = lines.len() as u16;
         let _ = queue!(out, terminal::EndSynchronizedUpdate);
-        let _ = out.flush();
     }
+}
+
+/// The rows of the last frame that this one, of `now` rows, does not cover.
+fn stale_rows(before: u16, now: usize) -> std::ops::Range<usize> {
+    now..(before as usize).max(now)
 }
 
 impl Drop for Screen {
@@ -556,6 +587,23 @@ impl Drop for Screen {
 
 /// Render with the progress screen up, and return how it ended.
 pub fn run(job: &Job, plan: Plan, bank: Option<Arc<Bank>>, labels: &Labels) -> Result<Summary> {
+    // [16]
+    let widest = if labels.per_track { WIDEST_PER_TRACK } else { WIDEST };
+    run_screen(job, plan, bank, widest, &|snap, rates, view| frame(labels, snap, rates, view))
+}
+
+/// The widest Merlin's panel goes: a normal render's.
+pub(super) const MERLIN_WIDEST: usize = WIDEST;
+
+/// `run`, with the frame a caller's own: what is drawn from a snapshot, and how \[17\]
+pub(super) fn run_screen(
+    job: &Job,
+    plan: Plan,
+    bank: Option<Arc<Bank>>,
+    widest: usize,
+    draw: &dyn Fn(&Snapshot, &Rates, &View) -> Vec<Line>,
+) -> Result<Summary> {
+    let _busy = super::window::Busy::new();
     let monitor = Monitor::new();
     let interactive = std::io::stdin().is_tty() && std::io::stdout().is_tty();
 
@@ -564,8 +612,7 @@ pub fn run(job: &Job, plan: Plan, bank: Option<Arc<Bank>>, labels: &Labels) -> R
         let worker =
             scope.spawn(move || session::run_monitored(job, plan, bank, &render_monitor));
 
-        // [14]
-        let mut screen = Screen::open(interactive, if labels.per_track { WIDEST_PER_TRACK } else { WIDEST });
+        let mut screen = Screen::open(interactive, widest);
         let mut rates = Rates::default();
         let mut armed: Option<Instant> = None;
         let mut tick = 0u64;
@@ -594,7 +641,7 @@ pub fn run(job: &Job, plan: Plan, bank: Option<Arc<Bank>>, labels: &Labels) -> R
                 inner: screen.inner(),
                 footer,
             };
-            screen.draw(&frame(labels, &snap, &rates, &view));
+            screen.draw(&draw(&snap, &rates, &view));
             if finished {
                 break;
             }
@@ -604,14 +651,14 @@ pub fn run(job: &Job, plan: Plan, bank: Option<Arc<Bank>>, labels: &Labels) -> R
                 std::thread::sleep(FRAME);
                 continue;
             }
-            // [15]
+            // [18]
             if !event::poll(FRAME).unwrap_or(false) {
                 continue;
             }
             if let Ok(Event::Key(key)) = event::read() {
                 let armed_now = armed.is_some_and(|t| t.elapsed() < CONFIRM);
                 match stop_key(&key, saving) {
-                    // [16]
+                    // [19]
                     Some(_) if !armed_now => armed = Some(Instant::now()),
                     Some(Stop::Keep) => monitor.cancel(),
                     Some(Stop::Discard) => monitor.cancel_discarding(),
@@ -630,7 +677,7 @@ pub struct BatchRow {
     /// The job on the screen, from 1, and how many there are.
     pub job: usize,
     pub jobs: usize,
-    /// Its soundfont set, from 1, and how many sets the batch loads. Filled in \[17\]
+    /// Its soundfont set, from 1, and how many sets the batch loads. Filled in \[20\]
     pub set: usize,
     pub sets: usize,
     /// Jobs finished, and of them how many failed. Live: filled in per frame.
@@ -640,7 +687,7 @@ pub struct BatchRow {
 
 /// What `run_batch` shares between the render thread and the screen.
 struct BatchShared {
-    /// The monitor of the job on the screen: each job gets a fresh one, so its \[18\]
+    /// The monitor of the job on the screen: each job gets a fresh one, so its \[21\]
     monitor: std::sync::Mutex<Arc<Monitor>>,
     /// That job, from 0; `usize::MAX` before the first.
     current: std::sync::atomic::AtomicUsize,
@@ -655,14 +702,14 @@ impl BatchShared {
     }
 }
 
-/// The batch's observer: each job's own render reports to a monitor of its own, \[19\]
+/// The batch's observer: each job's own render reports to a monitor of its own, \[22\]
 struct Watch {
     shared: Arc<BatchShared>,
     obs: session::MonitorObserver,
 }
 
 impl Watch {
-    /// Put job `index` on the screen, on a monitor of its own, unless it \[20\]
+    /// Put job `index` on the screen, on a monitor of its own, unless it \[23\]
     fn show(&mut self, index: usize) {
         use std::sync::atomic::Ordering::Relaxed;
         if self.shared.current.load(Relaxed) == index {
@@ -688,6 +735,9 @@ impl session::Observer for Watch {
     fn tracks(&mut self, progress: &session::TrackProgress) {
         self.obs.tracks(progress);
     }
+    fn merlin(&mut self, progress: &Arc<kestrel::merlin::progress::MerlinProgress>) {
+        self.obs.merlin(progress);
+    }
     fn cancelled(&self) -> bool {
         self.shared.cancel.load(std::sync::atomic::Ordering::Relaxed) || self.obs.cancelled()
     }
@@ -710,7 +760,7 @@ impl kestrel::batch::BatchObserver for Watch {
     fn finished(&mut self, _total: usize, result: &kestrel::batch::JobResult) {
         use kestrel::batch::Outcome;
         use std::sync::atomic::Ordering::Relaxed;
-        // [21]
+        // [24]
         self.show(result.index);
         let ended = match &result.outcome {
             Outcome::Done(s) => Ok(s.clone()),
@@ -725,9 +775,10 @@ impl kestrel::batch::BatchObserver for Watch {
     }
 }
 
-/// Run a batch with the progress screen up, one job at a time on the screen. \[22\]
+/// Run a batch with the progress screen up, one job at a time on the screen. \[25\]
 pub fn run_batch(plan: kestrel::batch::BatchPlan, mut labels: Vec<Labels>) -> kestrel::batch::BatchSummary {
     use std::sync::atomic::Ordering::Relaxed;
+    let _busy = super::window::Busy::new();
     let interactive = std::io::stdin().is_tty() && std::io::stdout().is_tty();
 
     let sets = plan.groups().len();
@@ -892,6 +943,7 @@ mod tests {
             host_rss_bytes: Some(1_330_000_000),
             host_rss_peak_bytes: Some(1_900_000_000),
             per_track: None,
+            merlin: None,
         }
     }
 
@@ -903,7 +955,7 @@ mod tests {
         Phase::Finishing,
     ];
 
-    /// Every phase lays out to the same rectangle, so the screen never leaves \[23\]
+    /// Every phase lays out to the same rectangle, so the screen never leaves \[26\]
     #[test]
     fn every_phase_draws_the_same_rectangle() {
         let mut heights = Vec::new();
@@ -931,7 +983,7 @@ mod tests {
         assert!(heights.iter().all(|&h| h == heights[0]), "{heights:?}");
     }
 
-    /// The footer that offers both stops sits in the panel's bottom edge, which has \[24\]
+    /// The footer that offers both stops sits in the panel's bottom edge, which has \[27\]
     #[test]
     fn the_footer_that_offers_both_stops_fits_the_narrowest_panel() {
         for inner in [40, 70, WIDEST] {
@@ -963,7 +1015,7 @@ mod tests {
         crossterm::event::KeyEvent::new(code, mods)
     }
 
-    /// Which stop a key asks for: Ctrl+C and Esc keep the progress, Ctrl+D does not, \[25\]
+    /// Which stop a key asks for: Ctrl+C and Esc keep the progress, Ctrl+D does not, \[28\]
     #[test]
     fn a_stop_key_says_whether_to_keep_the_progress() {
         let ctrl = KeyModifiers::CONTROL;
@@ -991,7 +1043,7 @@ mod tests {
         }
     }
 
-    /// And so does a per-track render's, whose rows differ from a normal \[26\]
+    /// And so does a per-track render's, whose rows differ from a normal \[29\]
     #[test]
     fn every_phase_of_a_per_track_render_draws_the_same_rectangle() {
         let labels = Labels { per_track: true, ..labels() };
@@ -1009,9 +1061,9 @@ mod tests {
             let all: Vec<String> = frame(&labels, &snap, &Rates::default(), &wide).iter().map(|l| style::plain(l)).collect();
             let all = all.join("\n");
             if phase == Phase::Rendering {
-                // [27]
+                // [30]
                 assert!(all.contains(" 41.0%"), "{all}");
-                // [28]
+                // [31]
                 assert!(all.contains("24.60\u{00D7} realtime"), "{all}");
                 assert!(all.contains("Tracks 1,234 of 50,000"), "{all}");
                 assert!(all.contains("256 tracks, 18 voices each"), "{all}");
@@ -1026,7 +1078,7 @@ mod tests {
         assert!(heights.iter().all(|&h| h == heights[0]), "{heights:?}");
     }
 
-    /// At its own width a per-track render's rows fit whole, with figures the \[29\]
+    /// At its own width a per-track render's rows fit whole, with figures the \[32\]
     #[test]
     fn a_per_track_render_fits_its_rows_at_its_width() {
         let labels = Labels { per_track: true, ..labels() };
@@ -1049,7 +1101,7 @@ mod tests {
         }
     }
 
-    /// Not a check: prints one frame per phase as plain text, to look at a \[30\]
+    /// Not a check: prints one frame per phase as plain text, to look at a \[33\]
     #[test]
     #[ignore = "prints frames to look at; asserts nothing"]
     fn preview_frames() {
@@ -1076,5 +1128,101 @@ mod tests {
                 println!();
             }
         }
+    }
+
+    /// A merlin job in a guided batch has its render's progress passed on to the \[34\]
+    #[test]
+    fn a_batch_passes_a_merlin_jobs_progress_to_its_monitor() {
+        use kestrel::session::Observer as _;
+        let monitor = Monitor::new();
+        let shared = Arc::new(BatchShared {
+            monitor: std::sync::Mutex::new(monitor.clone()),
+            current: std::sync::atomic::AtomicUsize::new(0),
+            cancel: std::sync::atomic::AtomicBool::new(false),
+            done: std::sync::atomic::AtomicUsize::new(0),
+            failed: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut watch = Watch { shared, obs: monitor.observer() };
+        let progress = kestrel::merlin::progress::MerlinProgress::new();
+        watch.merlin(&progress);
+        assert!(!progress.is_cancelled());
+        monitor.cancel();
+        assert!(progress.is_cancelled(), "a stop on the monitor did not reach the job");
+    }
+
+    /// What a terminal shows after the bytes `paint` writes: moves, clears and \[35\]
+    fn screen_after(bytes: &[u8], rows: usize) -> Vec<String> {
+        let text = String::from_utf8_lossy(bytes);
+        let mut grid: Vec<Vec<char>> = vec![Vec::new(); rows];
+        let (mut r, mut c) = (0usize, 0usize);
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch != '\u{1b}' {
+                if r < rows {
+                    let row = &mut grid[r];
+                    if row.len() <= c {
+                        row.resize(c + 1, ' ');
+                    }
+                    row[c] = ch;
+                }
+                c += 1;
+                continue;
+            }
+            assert_eq!(chars.next(), Some('['));
+            let mut params = String::new();
+            let last = loop {
+                let n = chars.next().expect("an escape that ends");
+                if ('\u{40}'..='\u{7e}').contains(&n) {
+                    break n;
+                }
+                params.push(n);
+            };
+            let nums: Vec<usize> = params.trim_start_matches('?').split(';').filter_map(|p| p.parse().ok()).collect();
+            match last {
+                'H' => (r, c) = (nums.first().map_or(1, |&v| v) - 1, nums.get(1).map_or(1, |&v| v) - 1),
+                'K' if nums.first().copied().unwrap_or(0) == 0 && r < rows => grid[r].truncate(c),
+                'K' if r < rows => grid[r].clear(),
+                'J' => grid.iter_mut().for_each(Vec::clear),
+                _ => {}
+            }
+        }
+        grid.into_iter().map(|row| row.into_iter().collect::<String>().trim_end().to_string()).collect()
+    }
+
+    fn rows_of(text: &str, n: usize) -> Vec<Line> {
+        (0..n).map(|i| vec![s(format!("{text} {i}"))]).collect()
+    }
+
+    /// A frame that is shorter than the one before it leaves none of that one \[36\]
+    #[test]
+    fn a_shorter_frame_leaves_nothing_of_the_taller_one_before_it() {
+        let mut screen = Screen { raw: false, size: (100, 40), top: 0, fresh: true, rows: 0, widest: 76 };
+        let (mut first, mut second, mut third) = (Vec::new(), Vec::new(), Vec::new());
+        screen.paint(&mut first, &rows_of("tall", 12));
+        screen.paint(&mut second, &rows_of("short", 5));
+        screen.paint(&mut third, &rows_of("taller", 9));
+        let top = screen.top as usize;
+        // Replayed in order, as the terminal would have them.
+        let mut all = first.clone();
+        let after_first = screen_after(&all, 40);
+        assert!(after_first[top + 11].contains("tall 11"), "the tall frame is on the screen");
+        all.extend_from_slice(&second);
+        let after_second = screen_after(&all, 40);
+        for i in 0..5 {
+            assert!(after_second[top + i].contains(&format!("short {i}")), "row {i}: {:?}", after_second[top + i]);
+        }
+        for i in 5..12 {
+            assert_eq!(after_second[top + i], "", "row {i} still has {:?} of the frame before", after_second[top + i]);
+        }
+        // And growing again draws what it has to, over nothing.
+        all.extend_from_slice(&third);
+        let after_third = screen_after(&all, 40);
+        assert!(after_third[top + 8].contains("taller 8") && after_third[top + 9].is_empty());
+    }
+
+    #[test]
+    fn the_rows_of_the_last_frame_this_one_does_not_cover() {
+        assert_eq!(stale_rows(12, 5), 5..12);
+        assert!(stale_rows(5, 12).is_empty() && stale_rows(5, 5).is_empty() && stale_rows(0, 3).is_empty());
     }
 }

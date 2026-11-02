@@ -1,0 +1,120 @@
+# Comments extracted from shaders/kmconv.wgsl
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] shaders/kmconv.wgsl:5
+// Key-major merlin: one (key, filter) group's convolution, by overlap-add with
+// a large FFT built the four-step way from merlin's batched one.
+//
+//     out = SUM_e  x_e (*) k_e
+//
+// where `k_e` is entry `e`'s kernel and `x_e` its impulse train in the group.
+// The song is cut into blocks of `hop` frames and each block of each firing
+// entry is transformed at `n >= hop + longest kernel - 1`, so the circular
+// convolution is the linear one and nothing wraps.
+//
+// **Both channels in one complex signal.** A note's left and right impulses
+// differ only in gain, and the kernel is one real waveform, so the train is
+// packed as `left + i * right`: transforming that, multiplying by the real
+// kernel's spectrum and transforming back gives `y_left + i * y_right`
+// exactly, which halves every transform.
+//
+// **A stereo kernel fills the other half.** It is `K = k_left + i * k_right`,
+// one transform for both sides of a sample, and the note wants `y_left =
+// g_left (*) k_left`, `y_right = g_right (*) k_right`. Written with `m = (g_left
+// + g_right) / 2` and `s = (g_left - g_right) / 2`, that is `y = m (*) K + s (*)
+// conj(K)`, so the train is packed as `m + i * s`. A centred note has no `s`,
+// and then this is the plain product; see `mac`.
+//
+// A pair with few impulses skips all of that: `direct` adds its kernel at each
+// impulse, in the time domain, after the key's transforms.
+//
+// Nothing here uses an atomic. The scatter's targets are unique by
+// construction (the host merges impulses that share a frame of an entry), the
+// multiply-accumulate walks a block's entries in a fixed order, and the
+// overlap-add adds a chunk's blocks in order into what earlier chunks left --
+// so the result is a pure function of the input.
+
+[2] shaders/kmconv.wgsl:75
+/// `merlin::head::Head`, field for field: one note's head correction clipped
+/// to the window, `out0` from the window's first frame, `base` its waveform's
+/// first frame in the window's sustains, `bus` its filter.
+
+[3] shaders/kmconv.wgsl:113
+    /// Frames past the window a block's tail reaches, which the next window
+    /// starts with.
+
+[4] shaders/kmconv.wgsl:118
+/// A window's end, for one key: `count` of its buses, listed, the window's
+/// frames and carry, `at`, the window's first frame in the song's master, and
+/// how many cells or pages each pass's list holds.
+
+[5] shaders/kmconv.wgsl:136
+/// One impulse: its index in the pairs buffer (`pair * n + frame`) and its
+/// left and right gain, weight included.
+
+[6] shaders/kmconv.wgsl:226
+/// Where frequency `-f` is, for the bin stored at `bin`. The transform leaves
+/// its output transposed: frequency `k2 + n2 * k1` is stored at `k2 * n1 + k1`.
+
+[7] shaders/kmconv.wgsl:255
+        // `m + i * s` was transformed as one signal: both are real, so their
+        // spectra come apart by Hermitian symmetry, and `conj(K)`'s spectrum
+        // is `K` at the mirrored bin, conjugated.
+
+[8] shaders/kmconv.wgsl:308
+/// `[entries][7]`: `at, len, valid, plain, rel0, log2(r)` bits, and the frames
+/// to a stereo kernel's right half, zero for a mono one.
+
+[9] shaders/kmconv.wgsl:365
+    // `head.wgsl` applies the step at the end of iteration `n` once
+    // `n + 1 >= hold`, so before iteration `j` it has been applied
+    // `j - max(hold, 1) + 1` times.
+
+[10] shaders/kmconv.wgsl:379
+    // `log2(r)` from the host, in f64, in what is `split` there: WGSL's
+    // `log2` is only held to an absolute 2^-21 near one, and a release ratio
+    // is 0.9998 or closer, where that is half a percent of the value -- and
+    // `m` times it after the exponent, -77 dB on the first real null.
+
+[11] shaders/kmconv.wgsl:402
+    // The range through the workgroup's memory, so the loop around the
+    // barriers below is uniform.
+
+[12] shaders/kmconv.wgsl:410
+    // The item's heads a batch at a time into the workgroup's memory, read
+    // once there rather than by every invocation; each frame still sums them
+    // in the item's order.
+
+[13] shaders/kmconv.wgsl:431
+                // The top bit of `cap` says a stereo waveform, its right half
+                // following its left.
+
+[14] shaders/kmconv.wgsl:476
+/// One impulse: its frame from the window's start, its kernel's row of
+/// `d_desc`, and its left and right gain, weight included.
+
+[15] shaders/kmconv.wgsl:558
+/// One impulse: its frame from the window's start, its kernel's row of
+/// `d_desc`, its left and right gain, weight included, and the frames from it
+/// to where the CC120 starts it fading, the first of them at full level.
+
+[16] shaders/kmconv.wgsl:667
+/// `[listed bus][chunk]` states: where each chunk ended from zero, then, once
+/// scanned, where it truly starts.
+
+[17] shaders/kmconv.wgsl:708
+/// Per filter, `CHUNK + 2` pairs: the first row of `A^k` for each `k` below
+/// `CHUNK`, then the two rows of `A^CHUNK`.
+
+[18] shaders/kmconv.wgsl:841
+/// `[moves][3]`: the bus, the page's first frame, and whether it takes the
+/// carry or is cleared.
+
+[19] shaders/kmconv.wgsl:907
+/// `[items][5]`: the song's first frame, whole `tau`, its fraction, `tau` a
+/// frame, frames.

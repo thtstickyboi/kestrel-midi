@@ -10,6 +10,7 @@ The [README](README.md) says how to use Kestrel. This is how it works inside, an
 - [Sizing a job with `info`](#sizing-a-job-with-info)
 - [Admission and voice stealing](#admission-and-voice-stealing)
 - [Limiting](#limiting)
+- [Merlin](#merlin)
 - [Matching BASSMIDI](#matching-bassmidi)
 
 ## The render loop
@@ -128,13 +129,17 @@ At its busiest the file has 5,338,314 voices sounding at once. With 13,421,568 s
 
 **Stealing** kills the voices with the lowest envelope level, ties broken by note id. Killing the earliest-started instead sounds backwards under saturation and is: the oldest voices are the mature, sounding ones. (A dev build keeps `--steal oldest` and `drop-new`, which refuses the incoming note, for comparison.)
 
+**Duplicate notes are coalesced** (`--coalesce`, on by default since 1.4.0). Layered tracks write the same note many times: same channel, key, velocity, tick and release. Those would build identical voices, so a look-ahead over the file turns them into one voice at the summed gain. It sounds the same to within float rounding (`N * g` is not the same float as `g + ... + g`), and a dense file keeps more of its notes, because far fewer voices are stolen or dropped. Coalescing is deterministic, but its output is not the bytes of an uncoalesced render, which is why `--coalesce off` exists.
+
 **`--steal-percent`** (25) caps how much of the pool one block may replace. Unbounded, a block whose note-ons outnumber the pool replaces *every* voice, so no voice outlives the block it was born in and a saturated passage renders as a stream of 85 ms attack fragments instead of notes.
 
 ## Limiting
 
 Black MIDI mixes clip constantly -- a saturated section can peak at hundreds of times full scale -- so what happens at the ceiling matters more than usual.
 
-**`brickwall`** (default) is a lookahead true-peak limiter. It sees peaks before they arrive and cannot exceed its ceiling, so nothing downstream ever has to hard-clip. `--ceiling-db` sets the ceiling. Its 2 ms lookahead is also the render latency, which for an offline renderer costs nothing.
+**`balanced`** (default since 1.4.0) puts a leveler in front of the brickwall and takes the mix in 2.5 dB lower. Sustained loud passages are levelled before the brickwall sees them, so the peaks are not pinned at the ceiling: it lands about at omni's level and 3 dB under the brickwall's, without omni's drag after a loud burst. The brickwall still runs behind it, so the output is bounded as in every mode.
+
+**`brickwall`** is a lookahead true-peak limiter. It sees peaks before they arrive and cannot exceed its ceiling, so nothing downstream ever has to hard-clip. `--ceiling-db` sets the ceiling. Its 2 ms lookahead is also the render latency, which for an offline renderer costs nothing. Since 1.4.0 it also holds: the gain stays where a peak put it until a whole 20 ms has passed without the requirement reaching it. Before, on a steady low note the gain dipped at each peak and recovered between them, modulating the note once a half-cycle, which measured -31 dB total harmonic distortion at 30 Hz and -38 dB at 55 Hz on a +6 dBFS sine. With the hold the gain does not move on a steady note, and the distortion is at the float32 floor, -153 dB, at all four frequencies tested.
 
 **`omni`** is a port of the realtime limiter OmniConverter ships, originally from Kiva. It is a feedback follower: it sees a peak only once the peak has passed, which is why it needs a third of a second of release, and that release audibly drags the level down after every loud moment. It does not bound its own output, so since 1.1.0 the brickwall runs behind it as a safety stage at the render's ceiling: wherever omni stays under the ceiling the output is omni's, delayed by the lookahead, and nothing clips.
 
@@ -145,6 +150,20 @@ Every block leaves through one output stage, in this order: `--volume` above 100
 **`--volume`** at or below 100 scales the limited output, so 50 is exactly half the 100% file, sample for sample. Above 100 the extra goes in ahead of the limiter, which holds the ceiling. Until 1.2.1 it scaled every voice instead, so all of it went in ahead of the limiter. A dense mix sits far above full scale, so halving it still hit the ceiling: it eased the compression rather than lowering the file.
 
 **`--dc-blocker`** is a second-order Butterworth high-pass at 15 Hz ahead of the limiter. A very high voice count builds a pedestal: the near-DC part of each voice adds coherently, in proportion to the voice count, while the audible part adds at about its square root. The mix then carries a DC offset and a slow swell at the musical pulse, and the limiter spends headroom on them. On the densest passage tested, with a dark, heavily filtered library, 77% of the energy sat below 10 Hz. The blocker took that to 1.3% and brought the audible band up 2.7 dB. It takes 30 dB off at 2.6 Hz and moves the lowest piano fundamental, 27.5 Hz, by 0.37 dB. It is off by default because it changes every render's bytes. Like the volume it is linear, so 32-bit float stems still add up to the mix.
+
+## Merlin
+
+`--backend merlin`, or **Extras → Merlin (Convolution)** in the guided renderer, experimental since 1.4.0. Kestrel's loop keeps voices alive and steps through the song a block at a time. Merlin turns the loops around: **the outer loop is the key, and the whole song is inside it.** A note is a sample, shaped by its filter and envelope, started at a frame, so one key's notes for the whole song are that key's sounds convolved with a train of impulses at the note-on frames. It has no voice pool, so there is nothing to steal and no note to drop.
+
+- **A pre-pass ("Arming") reads the file** and counts the notes, pairs each note-on with its note-off so every note's length is known before it is rendered (which is what makes Merlin offline-only), and sizes the work from that. The notes then go into a key store, on disk when they do not fit in memory, grouped by key.
+- **Each key is rendered in windows.** The sound of a note is built by the same code as the CPU reference (`--backend cpu`), once for every distinct waveform; notes that share one share the work. The convolution is done in the frequency domain on the GPU, by an FFT written in WGSL with a frequency-domain delay line, and notes of one waveform that start on the same frame are read as one term rather than convolved one by one.
+- **A pitch bend that keeps moving is followed** by reading a note back through its channel's warped time, so the whole channel shares one clock and its notes still share kernels.
+- **The mix is deterministic.** Nothing in it uses a floating-point atomic, and two runs of the same file with the same settings write the same bytes. The limiter, volume and encoder then run on the finished mix, as they do for Kestrel.
+- **It is bounded by disk and by time, not by voices.** A file of 200 GB or more, or with more than 25 billion note-ons, is refused before the soundfont loads. The largest file tested, with a key store over a hundred gigabytes, took about 23 minutes on an 8 GB laptop card, and most of that was host work, reading and pairing the notes, rather than the GPU.
+- **It cannot be resumed,** because a render's state is spread over every key at once. A render that is stopped keeps nothing.
+- **What it does not do yet:** 31-EDO files, `--min-velocity`, per-track renders, analytic phase and layered soundfonts. Channel volume and/or expression are not properly applied yet.
+
+Merlin is held to BASSMIDI less closely than Kestrel is. A render of the same file is the same music, not the same bytes: Kestrel's pool lets notes go where it saturates and Merlin lets none go.
 
 ## Matching BASSMIDI
 

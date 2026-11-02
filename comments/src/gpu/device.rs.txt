@@ -65,62 +65,85 @@
 /// adapter wgpu finds that is not a processor and is not the one that failed.
 /// The same card through another backend counts, since the driver paths differ.
 
-[10] src/gpu/device.rs:228
+[10] src/gpu/device.rs:226
+/// The backend of the adapter a render with `cfg` lands on, from a listing taken
+/// in processes of their own, so that the render's own process opens that backend
+/// and no other. `None` where adapters are listed in this process (a library
+/// caller, the tests), or where the listing has no adapter to offer.
+///
+/// Opening every backend's driver in one process is what crashed a user's
+/// renders (2026-10-23): AMD's OpenGL driver for a Radeon 780M, `atio6axx.dll`,
+/// faulted in every process that also had the Vulkan and DX12 drivers loaded,
+/// and listed fine on its own. The adapter is the one the listing ranks first,
+/// by the same ranking and filters `pick_adapter` applies, so it is the adapter
+/// the render would get anyway, and no output byte changes.
+
+[11] src/gpu/device.rs:253
+/// The adapter a render lands on among `found`, sorted by `rank`: the first that
+/// is not a processor, is on `backends`, and has `want` in its name where that is
+/// given. `pick_adapter`'s filters, for a listing.
+
+[12] src/gpu/device.rs:267
 /// The adapter a render with `cfg` runs on, chosen as `create` chooses it,
 /// without opening a device: for `gpu::auto_pool_budget`, which has to size
 /// the pool for the adapter the render will get before the soundfont loads.
 
-[11] src/gpu/device.rs:282
+[13] src/gpu/device.rs:274
+        // A backend whose listing crashed would crash this listing too, and
+        // this one is in the render's own process. Named, it is still tried.
+
+[14] src/gpu/device.rs:337
     // A device error that arrives asynchronously would otherwise show up as
     // silently wrong audio.
 
-[12] src/gpu/device.rs:289
+[15] src/gpu/device.rs:344
     // wgpu drops a lost device's error on the floor unless this is set (27:
     // `ErrorType::DeviceLost => return, // will be surfaced via callback`),
     // and it surfaces later as a poll or a map failing with no cause named:
     // `WrongSubmissionIndex`, `BufferAsyncError`. Kept so `lost` can name it.
 
-[13] src/gpu/device.rs:297
+[16] src/gpu/device.rs:352
             // The advice goes in the log line, not only in `lost`'s error:
             // NVIDIA's Vulkan driver can end the process right after this
             // callback, before any poll or map has failed to build that error
             // (a mid-range card, 2026-10-03), and the log is what is left.
 
-[14] src/gpu/device.rs:316
+[17] src/gpu/device.rs:371
 /// The error for a poll or a map that failed, which is how a lost device
 /// shows itself: `detail` is wgpu's own error, and the callback's reason is
 /// added when it came.
 
-[15] src/gpu/device.rs:346
+[18] src/gpu/device.rs:401
 /// Compute-only bind group layout. `read_only[i]` says whether binding i is a
 /// read-only storage buffer; binding 0 is always the uniform block.
 
-[16] src/gpu/device.rs:359
+[19] src/gpu/device.rs:414
 /// `bind_layout`'s entries: binding 0 the uniforms, and a storage buffer at
 /// each binding after it, read-only as `read_only` says.
 
-[17] src/gpu/device.rs:418
-/// List every adapter wgpu can reach, for working out which device a render
-/// will land on.
+[20] src/gpu/device.rs:483
+/// List every adapter wgpu can reach on `backend` (`--gpu-backend`'s names;
+/// every backend with none), for working out which device a render will land
+/// on. A backend whose listing crashed or hung is named, with how.
 
-[18] src/gpu/device.rs:437
+[21] src/gpu/device.rs:505
         // The number people actually want off this listing. `gpu-info` used to
         // print the binding size and leave the division to the reader.
 
-[19] src/gpu/device.rs:447
+[22] src/gpu/device.rs:515
         // That is the binding's limit. The card's memory is the other, and where this
         // system gives a figure for it, a render with no soundfont to count yet is held
         // to about what its voice buffers could use of it.
 
-[20] src/gpu/device.rs:475
+[23] src/gpu/device.rs:546
     /// The most of one buffer the adapter will bind to a shader, which is
     /// what caps the voice pool.
 
-[21] src/gpu/device.rs:478
+[24] src/gpu/device.rs:549
     /// The largest `--max-voices` that binding takes at the configured
     /// `--steal-percent`: the same figure `gpu-info` prints.
 
-[22] src/gpu/device.rs:484
+[25] src/gpu/device.rs:555
     /// The memory a render can plan on, where it can be read: the card's own for a
     /// discrete GPU (DXGI on Windows; sysfs or `nvidia-smi` on Linux), and what
     /// Windows lets a process use for an integrated one, which shares system memory.
@@ -128,27 +151,40 @@
     /// Mac, whose memory is unified and which wgpu does not report -- and then the
     /// voice limit is the binding's alone. See [`memory_for`].
 
-[23] src/gpu/device.rs:493
+[26] src/gpu/device.rs:564
 /// The memory a render can plan on for this adapter, for [`AdapterSummary::memory_bytes`].
 /// Read once per adapter and kept: it does not change on a machine, and on Linux
 /// NVIDIA's figure is a run of `nvidia-smi`.
 
-[24] src/gpu/device.rs:509
+[27] src/gpu/device.rs:580
         // Its dedicated memory is a carve-out of a few hundred MiB and the rest is
         // system memory it shares; what a process may use of that is the OS's figure.
 
-[25] src/gpu/device.rs:529
-/// Every adapter wgpu can reach, best first, and the index of the one
-/// `create` would open for `cfg` -- `None` when nothing is eligible.
+[28] src/gpu/device.rs:607
+    /// The backends whose listing crashed, hung or failed, and how. Renders that
+    /// name no backend leave them out; see `listing::avoided`.
+
+[29] src/gpu/device.rs:612
+/// Every adapter wgpu can reach, best first, and the one `create` would open
+/// for `cfg`. Each backend is listed in a process of its own where a front end
+/// has asked for that (`listing`), so a driver that crashes while listing costs
+/// its backend and not the program.
 ///
 /// Uses `create`'s ranking and filters, so the adapter a listing marks as the
 /// default is the adapter a render lands on. An unknown `--gpu-backend` is an
 /// error here as it is there.
 
-[26] src/gpu/device.rs:603
+[30] src/gpu/device.rs:673
     /// A software adapter has no memory of its own to plan on, and an adapter that has a
     /// figure has a real one, the same on every ask (it is read once and kept).
 
-[27] src/gpu/device.rs:632
+[31] src/gpu/device.rs:716
+    /// A user's adapters, as their machine report listed them (2026-10-23). A
+    /// render there lands on the discrete GPU on Vulkan, and that is the one backend
+    /// its process may open: AMD's OpenGL driver crashed every process that
+    /// opened it beside the others. A name or a backend asked for moves it as
+    /// `pick_adapter` would.
+
+[32] src/gpu/device.rs:753
         // What NVIDIA's Vulkan reports for the whole buffer, measured 2026-10-05, and the
         // largest number there is.

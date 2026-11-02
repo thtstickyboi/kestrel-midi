@@ -261,11 +261,11 @@
     /// Whether the driver handed this lane's last block to the batch -- false
     /// for a silent block, which the driver writes itself.
 
-[47] src/gpu/batch.rs:1653
+[47] src/gpu/batch.rs:1658
     /// Every batch pass compiles and validates on the device, which is where a
     /// rewrite that produced bad WGSL would show.
 
-[48] src/gpu/batch.rs:1683
+[48] src/gpu/batch.rs:1688
     /// A render in a batch lane is the same bytes, block for block, as the
     /// same render on its own `GpuSynth`: in the second lane, so every base is
     /// non-zero, beside a first lane rendering another file, with a pool small
@@ -277,7 +277,7 @@
     /// gather writing the pool's other half at its own offset on odd blocks,
     /// and a shader reading its uniforms through a private copy.
 
-[49] src/gpu/batch.rs:1724
+[49] src/gpu/batch.rs:1729
         // "split in two submissions" sends every batch as two submissions,
         // one a lane: under a one-byte limit, each lane goes up alone. The
         // last does the same by voices, and splits the solo render's pass by

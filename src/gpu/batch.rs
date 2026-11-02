@@ -1477,8 +1477,13 @@ impl Backend for LaneBackend<'_> {
         Ok(())
     }
 
-    fn set_params_variant(&mut self, index: u32, data: &[RegionParams], menv: &[ModEnvParams]) -> Result<()> {
-        self.host.install(self.lane, self.index, index, data, menv)
+    fn set_params_variant(
+        &mut self,
+        index: u32,
+        data: std::sync::Arc<Vec<RegionParams>>,
+        menv: std::sync::Arc<Vec<ModEnvParams>>,
+    ) -> Result<()> {
+        self.host.install(self.lane, self.index, index, &data, &menv)
     }
 
     fn set_glide(&mut self, active: bool) -> Result<()> {

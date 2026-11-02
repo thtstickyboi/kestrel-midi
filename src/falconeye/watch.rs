@@ -25,9 +25,9 @@ enum Msg {
     Eof,
 }
 
-/// Watch the render `pid`, whose log is `log`, until it ends.
-pub fn run(log: &Path, pid: u32) -> Result<()> {
-    // [4]
+/// Watch the render `pid`, whose log is `log`, until it ends. `subject` is \[4\]
+pub fn run(log: &Path, pid: u32, subject: &str) -> Result<()> {
+    // [5]
     let process = Process::open(pid);
     let started = Instant::now();
 
@@ -83,7 +83,7 @@ pub fn run(log: &Path, pid: u32) -> Result<()> {
                     Some("crash") => {
                         let words: Vec<&str> = words.collect();
                         if let (Some(c), Some(p)) = (winsys::Crash::parse(&words), process.as_ref()) {
-                            // [5]
+                            // [6]
                             let module = p
                                 .module_at(c.address)
                                 .map(|(name, offset)| format!(" in {name}+{offset:#x}"))
@@ -128,7 +128,7 @@ pub fn run(log: &Path, pid: u32) -> Result<()> {
                     hang_dump = dumped.ok();
                 }
             }
-            let report = write_report(log, "HANG", &what, started, hang_dump.as_deref());
+            let report = write_report(log, subject, "HANG", &what, started, hang_dump.as_deref());
             append(log, &format!(
                 "{}; {}",
                 if stuck { format!("no block for {HANG_SECS} s") } else { format!("no heartbeat for {SILENT_SECS} s") },
@@ -149,14 +149,14 @@ pub fn run(log: &Path, pid: u32) -> Result<()> {
             append(log, &format!("the process {} (exit code {code:#x})", winsys::describe_exit(code)));
         }
         Some(code) => {
-            // [6]
+            // [7]
             std::thread::sleep(Duration::from_secs(3));
             let what = format!("{} (exit code {code:#010x})", winsys::describe_exit(code));
-            let report = write_report(log, "CRASH", &what, started, crash_dump.as_deref());
+            let report = write_report(log, subject, "CRASH", &what, started, crash_dump.as_deref());
             append(log, &format!("the process {what}; {}", reported(&report)));
         }
         None => {
-            // [7]
+            // [8]
             let window = Duration::from_millis(started.elapsed().as_millis() as u64 + 60_000);
             let (said, records) = if cfg!(windows) { (None, String::new()) } else { super::posix::death(pid, window) };
             let what = said.unwrap_or_else(|| {
@@ -168,14 +168,14 @@ pub fn run(log: &Path, pid: u32) -> Result<()> {
                         .into()
                 }
             });
-            let report = write_report_with(log, "CRASH", &what, started, crash_dump.as_deref(), Some(records));
+            let report = write_report_with(log, subject, "CRASH", &what, started, crash_dump.as_deref(), Some(records));
             append(log, &format!("the process {what}; {}", reported(&report)));
         }
     }
     Ok(())
 }
 
-/// Write `<log> <kind>.dmp` of the render and overwrite this machine's names \[8\]
+/// Write `<log> <kind>.dmp` of the render and overwrite this machine's names \[9\]
 fn dump(process: &Process, pid: u32, log: &Path, kind: &str, crash: Option<winsys::Crash>) -> Result<PathBuf, String> {
     let stem = log.file_stem().ok_or("the log has no name")?.to_string_lossy().into_owned();
     let path = log.with_file_name(format!("{stem} {kind}.dmp"));
@@ -200,7 +200,7 @@ fn reported(report: &Option<PathBuf>) -> String {
     }
 }
 
-/// The redactor for what the watcher writes: this machine's names, keeping \[9\]
+/// The redactor for what the watcher writes: this machine's names, keeping \[10\]
 fn redactor(log: &Path) -> Redactor {
     let mut r = Redactor::from_env();
     if let Some(midi) = midi_of(log) {
@@ -209,7 +209,7 @@ fn redactor(log: &Path) -> Redactor {
     r
 }
 
-/// The MIDI's name, from the log's: `<midi> <MM-DD-YYYY HH.MM.SS>.log`, or \[10\]
+/// The MIDI's name, from the log's: `<midi> <MM-DD-YYYY HH.MM.SS>.log`, or \[11\]
 pub(crate) fn midi_of(log: &Path) -> Option<String> {
     let mut stem = log.file_stem()?.to_string_lossy().into_owned();
     if stem.ends_with(')') {
@@ -222,7 +222,7 @@ pub(crate) fn midi_of(log: &Path) -> Option<String> {
     Some(stem[..date].to_string())
 }
 
-/// Add a line to the end of the render's log, which its own process no \[11\]
+/// Add a line to the end of the render's log, which its own process no \[12\]
 fn append(log: &Path, text: &str) {
     let line = format!(
         "[FalconEye {}] {}\n",
@@ -234,14 +234,15 @@ fn append(log: &Path, text: &str) {
     }
 }
 
-/// `<log> <kind>.txt` beside the log: what happened, the log's last lines, \[12\]
-fn write_report(log: &Path, kind: &str, what: &str, started: Instant, dump: Option<&Path>) -> Option<PathBuf> {
-    write_report_with(log, kind, what, started, dump, None)
+/// `<log> <kind>.txt` beside the log: what happened, the log's last lines, \[13\]
+fn write_report(log: &Path, subject: &str, kind: &str, what: &str, started: Instant, dump: Option<&Path>) -> Option<PathBuf> {
+    write_report_with(log, subject, kind, what, started, dump, None)
 }
 
-/// `write_report`, with the system's records already read, where reading \[13\]
+/// `write_report`, with the system's records already read, where reading \[14\]
 fn write_report_with(
     log: &Path,
+    subject: &str,
     kind: &str,
     what: &str,
     started: Instant,
@@ -252,11 +253,11 @@ fn write_report_with(
     let path = log.with_file_name(format!("{stem} {kind}.txt"));
     let mut out = String::new();
     out.push_str(&format!(
-        "Kestrel {} report, {}\n\
-         Written by FalconEye, Kestrel's watcher: a second process that watches each render.\n\
-         The PC's and the account's names are left out; the MIDI's, soundfonts' and tracks' are not.\n\n\
-         The render {what}.\n\
+        "Kestrel {} {} report, {}\n\
+         Report written by FalconEye.\n\n\
+         The {subject} {what}.\n\
          Its log: {}\n",
+        env!("CARGO_PKG_VERSION"),
         kind.to_lowercase(),
         chrono::Local::now().format("%m-%d-%Y %H.%M.%S"),
         log.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
@@ -273,7 +274,7 @@ fn write_report_with(
     let window_ms = started.elapsed().as_millis() as u64 + 60_000;
     let records = records.unwrap_or_else(|| system_records(window_ms));
     let log_tail = tail(log, TAIL_LINES);
-    // [14]
+    // [15]
     if let Some(v) = super::verdict::gpu_reset(&log_tail, &records) {
         out.push_str(&format!("\n== What this looks like ==\n{v}\n"));
         let settings = super::report::graphics_text();
@@ -325,12 +326,13 @@ pub(crate) fn tool(program: &str, args: &[&str], timeout: Duration) -> Result<St
     }
     let mut child = cmd.spawn().map_err(|e| format!("{program} could not be run: {e}"))?;
     let stdout = child.stdout.take();
+    // As bytes, then decoded: not every tool writes UTF-8 (see `winsys::tool_text`).
     let reader = std::thread::spawn(move || {
-        let mut s = String::new();
+        let mut bytes = Vec::new();
         if let Some(mut o) = stdout {
-            let _ = std::io::Read::read_to_string(&mut o, &mut s);
+            let _ = std::io::Read::read_to_end(&mut o, &mut bytes);
         }
-        s
+        winsys::tool_text(bytes)
     });
     let t0 = Instant::now();
     loop {
@@ -346,7 +348,7 @@ pub(crate) fn tool(program: &str, args: &[&str], timeout: Duration) -> Result<St
     reader.join().map_err(|_| format!("{program}'s output could not be read"))
 }
 
-/// Windows' own records from the last `window_ms`: GPU driver events from \[15\]
+/// Windows' own records from the last `window_ms`: GPU driver events from \[16\]
 #[cfg(windows)]
 pub(crate) fn windows_events(window_ms: u64) -> String {
     let when = format!("TimeCreated[timediff(@SystemTime) <= {window_ms}]");
@@ -369,7 +371,7 @@ pub(crate) fn windows_events(window_ms: u64) -> String {
     out
 }
 
-/// The system's records from the last `window_ms`, for a report about a \[16\]
+/// The system's records from the last `window_ms`, for a report about a \[17\]
 fn system_records(window_ms: u64) -> String {
     #[cfg(windows)]
     {
@@ -377,7 +379,7 @@ fn system_records(window_ms: u64) -> String {
     }
     #[cfg(not(windows))]
     {
-        // [17]
+        // [18]
         super::posix::death(u32::MAX, Duration::from_millis(window_ms)).1
     }
 }
@@ -398,7 +400,7 @@ fn events(log: &str, query: &str, wanted: impl Fn(&str) -> bool) -> String {
     }
 }
 
-/// `wevtutil /f:text` output, one string per event, each cut to its first 40 \[18\]
+/// `wevtutil /f:text` output, one string per event, each cut to its first 40 \[19\]
 #[cfg_attr(not(windows), allow(dead_code))]
 fn split_events(text: &str) -> Vec<String> {
     let mut events: Vec<Vec<&str>> = Vec::new();
@@ -444,6 +446,14 @@ mod tests {
         let e = split_events(text);
         assert_eq!(e.len(), 2);
         assert!(e[0].contains("4101") && e[1].contains("13"));
+    }
+
+    /// A console tool's output, piped, is in the OEM code page, not UTF-8; read \[20\]
+    #[cfg(windows)]
+    #[test]
+    fn a_tools_output_outside_ascii_is_read() {
+        let out = tool("cmd", &["/c", "echo k\u{e9}strel"], Duration::from_secs(20)).unwrap();
+        assert_eq!(out.trim(), "k\u{e9}strel", "{:?}", out.as_bytes());
     }
 
     #[test]

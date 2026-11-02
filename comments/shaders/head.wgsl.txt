@@ -1,0 +1,202 @@
+# Comments extracted from shaders/head.wgsl
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] shaders/head.wgsl:5
+// Merlin: the head correction.
+//
+// The frequency-domain delay line plays `kernel_j[n] * r^(Dj-D)` for every n.
+// That is the note only from `max(D, Dj)` on; before it the true note is the
+// flat sustain `A[n]`, and the scaled kernel is too loud by `r^(-D)` -- 44% on
+// an 8 ms note against a 0.25 s release, and 560x on a held second. Measured
+// whole-file, that is a **-14 dB** null against the CPU reference, uniform
+// across the render because every note carries it.
+//
+// So add the difference over `[0, D)`:
+//
+//     correction[n] = A[n] - kernel_j[n] * r^(Dj-D)
+//                   = A[n] * (1 - f(n))
+//
+//     f(n) = 0            for n < skip      the delay line has not started yet
+//            r^(Dj-D)     for skip <= n < Dj   the kernel is still sustaining
+//            r^(n-D+1)    for Dj <= n < D   the kernel is releasing, the note is not
+//
+// `skip` is new and is what removes merlin's longest note. The delay line used
+// to cache `kernel_j` whole, so its length was `Dj + tail` and grew with how
+// long the note was held; a nine-second note wanted a thirteen-second kernel in
+// every ring slot of every bus. It now caches from frame `skip = (Dj / P) * P`
+// and fires the impulse `skip` frames late, which is the same convolution, and
+// what it caches is the release tail alone. `f` being zero over `[0, skip)` is
+// how this pass is told to supply the note itself there rather than a
+// difference -- the same loop, the same cost, one more compare.
+//
+// The `+1` past `Dj` is the same convention `cpu.rs` uses: the envelope advances
+// before the sample is scaled, so a kernel's first released frame already
+// carries one factor of `r`.
+//
+// Two things follow, and both are why this is cheap.
+//
+// **`A[n]` is one buffer per waveform, not per entry.** The release bucket
+// changes the envelope and nothing else, so every bucket of one waveform shares
+// a head. The development notes section 3b's ten buckets per key cost one head between
+// them.
+//
+// **`f` needs no `pow` in the loop.** It is constant at `r^(Dj-D)` until `Dj`
+// and then multiplies by `r` once a frame. The host supplies the starting value
+// so the shader never evaluates an exponential.
+//
+// ## Why integer atomics
+//
+// Heads overlap: on real material a note starts every few hundred frames and
+// each correction runs for hundreds more, so many notes write one output frame.
+// `../CLAUDE.md` bans float atomics for the mixdown because their ordering is
+// not reproducible. Integer addition is associative and commutative, so this is
+// bit-exact whatever order the invocations land in -- the same argument, and the
+// same 32-bit fixed point, as the impulse scatter in `fdl.wgsl`.
+
+[2] shaders/head.wgsl:61
+    /// Buses in use. A head lands on the filter bus its note selected, because
+    /// the head is part of the note and goes through the same biquad.
+
+[3] shaders/head.wgsl:64
+    /// Frames of `A[n]` a waveform may hold. Read by nothing in this shader
+    /// since the cache went packed -- a `Head` carries its own `base` and
+    /// `cap` -- and kept because the uniform's layout is shared with the host.
+
+[4] shaders/head.wgsl:68
+    /// Fixed-point scale, chosen by the host from the head count so the
+    /// accumulator cannot overflow.
+
+[5] shaders/head.wgsl:78
+    /// First frame of this note's waveform in the cache.
+    ///
+    /// An absolute offset, filled in by the host per step. The cache is packed
+    /// -- a waveform holds only as many frames as the longest note that uses it
+    /// -- so there is no row stride to multiply by, and there is no table to
+    /// look the offset up in either: it rides in the record, which keeps this
+    /// pass's inner loop one sequential read.
+
+[6] shaders/head.wgsl:88
+    /// First frame of `A[n]` to read. Non-zero when the head began in an
+    /// earlier step, which is how a correction longer than a partition works.
+
+[7] shaders/head.wgsl:103
+    /// Frames from `src0` over which the delay line contributes nothing.
+    ///
+    /// Its kernel starts at frame `skip` of the note and its impulse is fired
+    /// `skip` frames late to match, so before that the note is entirely this
+    /// pass's to produce -- `f` is zero rather than the constant below. That is
+    /// what unbounds the note length: what the delay line caches is the release
+    /// tail, whose length is the region's, and the body of a long note comes
+    /// from here, where a frame costs 4 bytes and is shared by every note of
+    /// the waveform.
+
+[8] shaders/head.wgsl:113
+    /// Frames this waveform holds. What `src` is bounded by, where a
+    /// rectangular cache had one stride for every row.
+
+[9] shaders/head.wgsl:116
+    /// Added to `f` each frame, after the multiply by `r`.
+    ///
+    /// The envelope recurrence is affine, `f = f*r + a`, rather than the plain
+    /// `f *= r` it used to be. Zero for an ordinary note, which is the release
+    /// the geometric form was written for. **CC120 is what needs the other
+    /// half**: All Sound Off damps a channel over a fixed 96-frame *linear*
+    /// ramp, which `f *= r` cannot express from a start of zero however `r` is
+    /// chosen, and `r = 1` with `a = 1/96` expresses exactly. One fused
+    /// multiply-add instead of a multiply, and the two cases share every other
+    /// field.
+
+[10] shaders/head.wgsl:127
+    /// Per-frame gain increments, for a channel whose volume moves while the
+    /// note sounds.
+    ///
+    /// CC7 and CC11 are resolved at the note's own frame and then ride the
+    /// note, which is right only while the channel holds still. One test file's
+    /// track sends 26,734 CC7 messages against 2,397 note-ons -- eleven per
+    /// note -- and freezing them there is worth **-0.91 dB against the CPU
+    /// reference**, i.e. an error the size of the signal. The host ramps from
+    /// the gain at the note-on to the gain at the note-off, so both ends are
+    /// exact and the delay line's tail, which is fired at the note-off gain,
+    /// meets the head without a step.
+
+[11] shaders/head.wgsl:140
+    /// The gain the delay line's impulse was actually fired at.
+    ///
+    /// **The correction only telescopes when both halves carry the same gain.**
+    /// The output over a note's body is `A*(1-f)*G` from here plus `A*f*G` from
+    /// the delay line, and that is `A*G` only while the two `G`s agree. They do
+    /// not once the head follows a moving channel, so the identity has to be
+    /// written out: this pass produces `A*(G(n) - f*G_imp)` and the delay line
+    /// produces `A*f*G_imp`, which sum to `A*G(n)` for any `G(n)` at all.
+    ///
+    /// Getting this wrong is not subtle. `f` is section 3b's scalar and it
+    /// *amplifies* -- up to 3.2x -- so a mismatched pair does not drift, it
+    /// multiplies: the first version of the ramp measured **+12.8 dB** against
+    /// the CPU reference on a one-note test, where freezing the gain entirely
+    /// measured -8.
+    ///
+    /// Equal to `gain_l`/`gain_r` when nothing moves, which is the old
+    /// `A*(1-f)*G` exactly.
+
+[12] shaders/head.wgsl:160
+    /// Identical notes this correction stands for (THE PLAN, Phase 1). Each
+    /// frame's *rounded* value is multiplied by it, so a run adds exactly what
+    /// that many corrections of one would.
+
+[13] shaders/head.wgsl:167
+/// The sustaining waveforms, unit gain and unpanned, packed end to end. Where
+/// one starts and how long it is are in the `Head` that reads it.
+
+[14] shaders/head.wgsl:176
+// ---------------------------------------------------------------------------
+// One invocation per head. The design's cost model charges this pass
+// `SUM_i D_i` frame-ops, and M0 measured that access pattern at 77.9 G ops/s
+// with the reads sorted against 37.7 unsorted -- so the order the host builds
+// this list in is worth 2x, and it builds it grouped by waveform.
+// ---------------------------------------------------------------------------
+
+[15] shaders/head.wgsl:188
+    // Grid-strided, because a dispatch dimension caps at 65,535 workgroups and
+    // this pass is one invocation per head: a file whose mean note is 17.5 ms
+    // gives nearly every note a head spanning several partition steps, and one
+    // step of one such file asked for 67,008 groups. The rest of the project
+    // strides its per-voice passes for the same reason -- see
+    // `MAX_WORKGROUPS_PER_DIM` in `src/gpu/mod.rs`.
+
+[16] shaders/head.wgsl:211
+        // `dead <= hold` always -- `skip <= Dj` -- so `f` is still on its
+        // constant stretch here and the mask never has to interact with the
+        // release.
+
+[17] shaders/head.wgsl:215
+        // Rounded, not truncated. `i32()` truncates toward zero, which is a
+        // *biased* error rather than a random one, and thousands of
+        // corrections overlap one output frame on real material -- so the
+        // bias accumulates linearly where rounding would random-walk. The
+        // scatter in `fdl.wgsl` has always rounded; this did not.
+        // `A * (G(n) - f * G_imp)` per channel, not `A * (1 - f) * G`: see
+        // `gi_l`. The two are the same expression whenever the gain holds
+        // still, which is every note on a channel no controller is moving.
+
+[18] shaders/head.wgsl:229
+        // Constant until Dj, then a single multiply a frame. No exponential.
+        //
+        // `n + 1 >= hold`, not `n >= hold`: `f` has to have gained its first
+        // factor of `r` by the time `src` reaches `Dj`, so the multiply belongs
+        // at the end of iteration `hold - 1`. One iteration late leaves `f`
+        // uniformly too large by a factor of `r` across the whole head, which
+        // holds the correction at about -60 dB and looks like a precision floor
+        // rather than an index bug.
+
+[19] shaders/head.wgsl:244
+// ---------------------------------------------------------------------------
+// Fold the accumulator into the block the FDL just produced, and clear it.
+//
+// `atomicExchange` reads and zeroes together, so the next step starts clean
+// without a separate sweep.
+// ---------------------------------------------------------------------------

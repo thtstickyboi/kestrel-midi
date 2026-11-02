@@ -206,21 +206,37 @@ pub fn install_crash_filter() {
 #[cfg(windows)]
 pub fn arm_crash_filter(pipe: &std::process::ChildStdin) {
     use std::os::windows::io::AsRawHandle;
+    arm(pipe.as_raw_handle() as isize);
+}
+
+/// This process's stdout is read by the process that started it -- an adapter \[21\]
+#[cfg(windows)]
+pub fn arm_crash_filter_on_stdout() {
+    use std::os::windows::io::AsRawHandle;
+    // The handle lives as long as the process: stdout is never closed.
+    arm(std::io::stdout().as_raw_handle() as isize);
+}
+
+#[cfg(windows)]
+fn arm(pipe: isize) {
     use std::sync::atomic::Ordering;
     use windows::core::HSTRING;
     use windows::Win32::System::Threading::CreateEventW;
     if filter::DUMPED.load(Ordering::SeqCst) == 0 {
         let name = HSTRING::from(dump_event_name(std::process::id()));
-        // [21]
+        // [22]
         if let Ok(event) = unsafe { CreateEventW(None, true, false, &name) } {
             filter::DUMPED.store(event.0 as isize, Ordering::SeqCst);
         }
     }
-    filter::PIPE.store(pipe.as_raw_handle() as isize, Ordering::SeqCst);
+    filter::PIPE.store(pipe, Ordering::SeqCst);
 }
 
 #[cfg(not(windows))]
 pub fn arm_crash_filter(_pipe: &std::process::ChildStdin) {}
+
+#[cfg(not(windows))]
+pub fn arm_crash_filter_on_stdout() {}
 
 /// The render is no longer watched; call before its pipe closes.
 pub fn disarm_crash_filter() {
@@ -257,7 +273,7 @@ impl Crash {
 
 #[cfg(windows)]
 impl Process {
-    /// Write a minidump of the process to `path`: at the crash the filter \[22\]
+    /// Write a minidump of the process to `path`: at the crash the filter \[23\]
     pub fn dump(&self, pid: u32, path: &std::path::Path, crash: Option<Crash>) -> Result<(), String> {
         use std::os::windows::io::AsRawHandle;
         use windows::Win32::Foundation::HANDLE;
@@ -271,7 +287,7 @@ impl Process {
             // The pointers are the crashed process's, not ours.
             ClientPointers: true.into(),
         });
-        // [23]
+        // [24]
         let written = unsafe {
             MiniDumpWriteDump(
                 self.handle,
@@ -287,7 +303,7 @@ impl Process {
         written.map_err(|e| format!("MiniDumpWriteDump: {e}"))
     }
 
-    /// The module `address` falls in, in the process: its file name and how \[24\]
+    /// The module `address` falls in, in the process: its file name and how \[25\]
     pub fn module_at(&self, address: u64) -> Option<(String, u64)> {
         use windows::Win32::Foundation::HMODULE;
         use windows::Win32::System::ProcessStatus::{
@@ -297,7 +313,7 @@ impl Process {
         let mut modules = vec![HMODULE::default(); 512];
         loop {
             let mut needed = 0u32;
-            // [25]
+            // [26]
             unsafe {
                 EnumProcessModulesEx(
                     self.handle,
@@ -317,7 +333,7 @@ impl Process {
         }
         for module in modules {
             let mut info = MODULEINFO::default();
-            // [26]
+            // [27]
             let read = unsafe {
                 GetModuleInformation(self.handle, module, &mut info, std::mem::size_of::<MODULEINFO>() as u32)
             };
@@ -327,7 +343,7 @@ impl Process {
             let base = info.lpBaseOfDll as u64;
             if address >= base && address < base + info.SizeOfImage as u64 {
                 let mut name = [0u16; 260];
-                // [27]
+                // [28]
                 let len = unsafe { GetModuleBaseNameW(self.handle, module, &mut name) } as usize;
                 return Some((String::from_utf16_lossy(&name[..len.min(name.len())]), address - base));
             }
@@ -341,7 +357,7 @@ impl Process {
         use windows::Win32::Foundation::CloseHandle;
         use windows::Win32::System::Threading::{OpenEventW, SetEvent, EVENT_MODIFY_STATE};
         let name = HSTRING::from(dump_event_name(pid));
-        // [28]
+        // [29]
         unsafe {
             if let Ok(event) = OpenEventW(EVENT_MODIFY_STATE, false, &name) {
                 let _ = SetEvent(event);
@@ -362,7 +378,7 @@ impl Process {
     pub fn release(_pid: u32) {}
 }
 
-// [29]
+// [30]
 
 /// A string value under `HKEY_LOCAL_MACHINE\key`.
 #[cfg(windows)]
@@ -377,7 +393,7 @@ pub fn reg_string(key: &str, name: &str) -> Option<String> {
         return None;
     }
     let mut buf = vec![0u16; (bytes as usize).div_ceil(2)];
-    // [30]
+    // [31]
     let second = unsafe {
         RegGetValueW(
             HKEY_LOCAL_MACHINE,
@@ -457,7 +473,7 @@ pub fn memory() -> Option<Memory> {
     None
 }
 
-/// Plugged in or not, and the battery's charge; `battery` is `None` with no \[31\]
+/// Plugged in or not, and the battery's charge; `battery` is `None` with no \[32\]
 #[derive(Debug, Clone, Copy)]
 pub struct Power {
     pub plugged_in: Option<bool>,
@@ -498,7 +514,7 @@ pub enum Elevated {
     Failed(String),
 }
 
-/// Run `exe args` as administrator, through Windows' own permission prompt \[32\]
+/// Run `exe args` as administrator, through Windows' own permission prompt \[33\]
 #[cfg(windows)]
 pub fn run_elevated(exe: &std::path::Path, args: &str, timeout: Duration) -> Elevated {
     use windows::core::{HSTRING, PCWSTR};
@@ -515,7 +531,7 @@ pub fn run_elevated(exe: &std::path::Path, args: &str, timeout: Duration) -> Ele
         nShow: 0, // SW_HIDE: the elevated part has nothing to show
         ..Default::default()
     };
-    // [33]
+    // [34]
     if let Err(e) = unsafe { ShellExecuteExW(&mut info) } {
         // HRESULT_FROM_WIN32(ERROR_CANCELLED): the prompt was refused.
         return if e.code().0 as u32 == 0x8007_04C7 { Elevated::Declined } else { Elevated::Failed(e.to_string()) };
@@ -524,7 +540,7 @@ pub fn run_elevated(exe: &std::path::Path, args: &str, timeout: Duration) -> Ele
         return Elevated::Failed("no process was started".into());
     }
     let ms = timeout.as_millis().min(u32::MAX as u128 - 1) as u32;
-    // [34]
+    // [35]
     unsafe {
         let done = WaitForSingleObject(info.hProcess, ms) == windows::Win32::Foundation::WAIT_OBJECT_0;
         let mut code = 0u32;
@@ -545,10 +561,10 @@ pub fn run_elevated(_exe: &std::path::Path, _args: &str, _timeout: Duration) -> 
 
 // ---- DX12's reason for a lost device --------------------------------------
 
-/// Why DX12 removed `device`, when it is a DX12 device: the one thing that \[35\]
+/// Why DX12 removed `device`, when it is a DX12 device: the one thing that \[36\]
 #[cfg(windows)]
 pub fn dx12_removed_reason(device: &wgpu::Device) -> Option<(u32, &'static str)> {
-    // [36]
+    // [37]
     let code = unsafe {
         let hal = device.as_hal::<wgpu::hal::api::Dx12>()?;
         match hal.raw_device().GetDeviceRemovedReason() {
@@ -578,12 +594,55 @@ pub fn describe_removed(code: u32) -> &'static str {
     }
 }
 
-/// Crash with an access violation, for `KESTREL_CRASH_TEST=segv`: the native \[37\]
+/// Crash with an access violation, for `KESTREL_CRASH_TEST=segv`: the native \[38\]
 #[cfg(feature = "dev")]
 pub fn access_violation() -> ! {
-    // [38]
+    // [39]
     unsafe { (0x10 as *mut u8).write_volatile(1) };
     unreachable!("the write above faults")
+}
+
+/// A tool's output as text. Windows' console tools (`wevtutil`, `powercfg`) \[40\]
+pub fn tool_text(bytes: Vec<u8>) -> String {
+    match String::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            let bytes = e.into_bytes();
+            oem_text(&bytes).unwrap_or_else(|| String::from_utf8_lossy(&bytes).into_owned())
+        }
+    }
+}
+
+#[cfg(windows)]
+fn oem_text(bytes: &[u8]) -> Option<String> {
+    // SAFETY: GetOEMCP takes nothing and returns a number.
+    decode_code_page(bytes, unsafe { windows::Win32::Globalization::GetOEMCP() })
+}
+
+#[cfg(not(windows))]
+fn oem_text(_bytes: &[u8]) -> Option<String> {
+    None
+}
+
+/// `bytes` in Windows code page `code_page`, or `None` if Windows cannot \[41\]
+#[cfg(windows)]
+pub fn decode_code_page(bytes: &[u8], code_page: u32) -> Option<String> {
+    use windows::Win32::Globalization::{MultiByteToWideChar, MULTI_BYTE_TO_WIDE_CHAR_FLAGS};
+    if bytes.is_empty() {
+        return Some(String::new());
+    }
+    // [42]
+    let n = unsafe { MultiByteToWideChar(code_page, MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0), bytes, None) };
+    if n <= 0 {
+        return None;
+    }
+    let mut wide = vec![0u16; n as usize];
+    // [43]
+    let written = unsafe { MultiByteToWideChar(code_page, MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0), bytes, Some(&mut wide)) };
+    if written <= 0 {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&wide[..(written as usize).min(wide.len())]))
 }
 
 /// What an exit code means, for the codes a render dies with.
@@ -628,5 +687,25 @@ mod tests {
         );
         let n = crash_line(&mut buf, u32::MAX, usize::MAX, u32::MAX, usize::MAX);
         assert!(n <= buf.len());
+    }
+
+    /// A line of a user's Application Error event as `wevtutil` writes it on \[44\]
+    #[test]
+    fn a_tools_output_in_another_code_page_is_not_lost() {
+        const LINE: &str = "Имя сбойного модуля: atio6axx.dll";
+        let cp866: [u8; 33] = [
+            0x88, 0xac, 0xef, 0x20, 0xe1, 0xa1, 0xae, 0xa9, 0xad, 0xae, 0xa3, 0xae, 0x20, 0xac, 0xae, 0xa4, 0xe3,
+            0xab, 0xef, 0x3a, 0x20, 0x61, 0x74, 0x69, 0x6f, 0x36, 0x61, 0x78, 0x78, 0x2e, 0x64, 0x6c, 0x6c,
+        ];
+        #[cfg(windows)]
+        assert_eq!(decode_code_page(&cp866, 866).as_deref(), Some(LINE));
+        // [45]
+        let text = tool_text(cp866.to_vec());
+        assert!(text.ends_with(": atio6axx.dll"), "{text}");
+        #[cfg(windows)]
+        assert_eq!(text.chars().count(), LINE.chars().count(), "a character a byte: {text}");
+        // UTF-8 is taken as it is, Cyrillic and all.
+        assert_eq!(tool_text(LINE.as_bytes().to_vec()), LINE);
+        assert_eq!(tool_text(Vec::new()), "");
     }
 }

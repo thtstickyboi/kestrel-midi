@@ -406,8 +406,8 @@ impl Backend for CapturingCpu {
     fn set_params_variant(
         &mut self,
         index: u32,
-        data: &[crate::bank::RegionParams],
-        menv: &[crate::bank::ModEnvParams],
+        data: std::sync::Arc<Vec<crate::bank::RegionParams>>,
+        menv: std::sync::Arc<Vec<crate::bank::ModEnvParams>>,
     ) -> Result<()> {
         self.cpu.set_params_variant(index, data, menv)
     }
@@ -513,8 +513,8 @@ impl Backend for Recorder {
     fn set_params_variant(
         &mut self,
         _: u32,
-        _: &[crate::bank::RegionParams],
-        _: &[crate::bank::ModEnvParams],
+        _: std::sync::Arc<Vec<crate::bank::RegionParams>>,
+        _: std::sync::Arc<Vec<crate::bank::ModEnvParams>>,
     ) -> Result<()> {
         Ok(())
     }
@@ -682,6 +682,7 @@ fn sessions_prepare_preloaded_banks_and_cancel_before_creating_output() {
     let fixture = Fixture::new(&cfg, false);
     let mut job = Job {
         midi: fixture.midi(false),
+        note_slice: false,
         soundfonts: vec![], // Only the preloaded bank can satisfy this job.
         sf_programs: None,
         out: fixture.dir.join("session-baseline.wav"),

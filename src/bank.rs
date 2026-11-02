@@ -645,6 +645,98 @@ pub struct PreviewLayer {
     pub delay_frames: u32,
 }
 
+/// The most distinct `lorand`/`hirand` slices of the draw a bank may have and \[73\]
+const MEMO_INTERVALS_MAX: usize = 64;
+
+/// A memo of [`Bank::preview_note_on`], one per driver. \[74\]
+pub struct PreviewMemo {
+    max_layers: usize,
+    /// The limits that fall strictly between 0 and 1, sorted and distinct, of \[75\]
+    cuts: Vec<f32>,
+    /// `cuts.len() + 1`: the slices of the draw, numbered from 0.
+    intervals: usize,
+    /// Set when the bank has more slices than are worth a table.
+    off: bool,
+    /// Per preset, allocated on its first note-on: `128 * 128 * intervals` \[76\]
+    tables: Vec<Option<Box<[u64]>>>,
+    /// Every answer given so far, back to back.
+    layers: Vec<PreviewLayer>,
+}
+
+impl PreviewMemo {
+    pub fn new(bank: &Bank, max_layers: usize) -> Self {
+        let mut cuts = Vec::new();
+        if bank.uses_rand {
+            for r in &bank.regions {
+                for c in [r.rand_lo, r.rand_hi] {
+                    // [77]
+                    if c > 0.0 && c < 1.0 {
+                        cuts.push(c);
+                    }
+                }
+            }
+            cuts.sort_by(f32::total_cmp);
+            cuts.dedup();
+        }
+        let intervals = cuts.len() + 1;
+        PreviewMemo {
+            max_layers,
+            cuts,
+            intervals,
+            off: intervals > MEMO_INTERVALS_MAX,
+            tables: (0..bank.presets.len()).map(|_| None).collect(),
+            layers: Vec::new(),
+        }
+    }
+
+    /// Append to `out` exactly what `bank.preview_note_on(preset, key, vel, seed, \[78\]
+    #[inline]
+    pub fn preview(&mut self, bank: &Bank, preset: u32, key: u8, vel: u8, seed: u64, out: &mut Vec<PreviewLayer>) {
+        // [79]
+        if self.off || vel >= 128 {
+            return bank.preview_note_on(preset, key, vel, seed, self.max_layers, out);
+        }
+        let interval = if self.cuts.is_empty() {
+            0
+        } else {
+            let draw = rand_draw(seed);
+            self.cuts.partition_point(|&c| c <= draw)
+        };
+        let slot = (((key.min(127) as usize) << 7) | vel as usize) * self.intervals + interval;
+        if let Some(Some(table)) = self.tables.get(preset as usize) {
+            let e = table[slot];
+            if e != 0 {
+                let start = (e & 0xFFFF_FFFF) as usize;
+                let len = (e >> 32) as usize - 1;
+                out.extend_from_slice(&self.layers[start..start + len]);
+                return;
+            }
+        }
+        self.remember(bank, preset, key, vel, seed, slot, out);
+    }
+
+    #[cold]
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn remember(&mut self, bank: &Bank, preset: u32, key: u8, vel: u8, seed: u64, slot: usize, out: &mut Vec<PreviewLayer>) {
+        let from = out.len();
+        bank.preview_note_on(preset, key, vel, seed, self.max_layers, out);
+        let intervals = self.intervals;
+        // A preset the bank does not have previews as nothing, and is not kept.
+        let Some(entry) = self.tables.get_mut(preset as usize) else {
+            return;
+        };
+        let table = entry.get_or_insert_with(|| vec![0u64; 128 * 128 * intervals].into_boxed_slice());
+        let (start, len) = (self.layers.len(), out.len() - from);
+        // Never reached: a table would need billions of answers first.
+        if start + len >= u32::MAX as usize {
+            return;
+        }
+        self.layers.extend_from_slice(&out[from..]);
+        table[slot] = start as u64 | ((len as u64 + 1) << 32);
+    }
+}
+
 /// Everything the device needs to start one voice. Produced by `note_on`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct VoiceSpawn {
@@ -679,10 +771,10 @@ pub fn cents_to_hz(cents: f32) -> f32 {
     8.176 * (2.0f32).powf(cents / 1200.0)
 }
 
-/// Where a channel's volume (CC7) sits before a file sends one: 100, General \[73\]
+/// Where a channel's volume (CC7) sits before a file sends one: 100, General \[80\]
 pub const POWER_ON_VOLUME: u8 = 100;
 
-/// The amplitude power-on channel volume stands for, `(100/127)^2`. It is part \[74\]
+/// The amplitude power-on channel volume stands for, `(100/127)^2`. It is part \[81\]
 pub const POWER_ON_GAIN: f32 =
     (POWER_ON_VOLUME as f32 / 127.0) * (POWER_ON_VOLUME as f32 / 127.0);
 
@@ -691,7 +783,7 @@ pub fn cb_to_gain(cb: f32) -> f32 {
     (10.0f32).powf(-cb / 200.0)
 }
 
-/// The random draw for one note-on, in `[0, 1)`. \[75\]
+/// The random draw for one note-on, in `[0, 1)`. \[82\]
 #[inline]
 pub fn rand_draw(seed: u64) -> f32 {
     let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -702,10 +794,10 @@ pub fn rand_draw(seed: u64) -> f32 {
     ((z >> 40) as f32) * (1.0 / 16_777_216.0)
 }
 
-/// Linear gain from SFZ velocity crossfade, in `[0, 1]`. \[76\]
+/// Linear gain from SFZ velocity crossfade, in `[0, 1]`. \[83\]
 #[inline]
 pub fn xfade_gain(r: &Region, vel: u8) -> f32 {
-    // [77]
+    // [84]
     let fade_in = if vel >= r.xfin_hi {
         1.0
     } else if vel <= r.xfin_lo {
@@ -724,13 +816,13 @@ pub fn xfade_gain(r: &Region, vel: u8) -> f32 {
     fade_in * fade_out
 }
 
-/// Velocity to attenuation, in centibels, scaled by SFZ `amp_veltrack`. \[78\]
+/// Velocity to attenuation, in centibels, scaled by SFZ `amp_veltrack`. \[85\]
 #[inline]
 pub fn velocity_atten_cb(vel: u8, veltrack: f32) -> f32 {
     let v = vel.max(1) as f32 / 127.0;
     let t = veltrack.clamp(-100.0, 100.0) / 100.0;
     if t == 1.0 {
-        // [79]
+        // [86]
         return (-400.0 * v.log10()).clamp(0.0, 960.0);
     }
     let gain = if t >= 0.0 {
@@ -745,13 +837,13 @@ pub fn velocity_atten_cb(vel: u8, veltrack: f32) -> f32 {
 }
 
 impl Bank {
-    /// Layer `other` on top of this bank. \[80\]
+    /// Layer `other` on top of this bank. \[87\]
     pub fn merge(&mut self, mut other: Bank) {
         let pool_off = self.pool.len() as u32;
         let sample_off = self.samples.len() as u32;
         let region_off = self.regions.len() as u32;
 
-        // [81]
+        // [88]
         if self.pool_rate != other.pool_rate {
             self.pool_rate = 0;
         }
@@ -763,7 +855,7 @@ impl Bank {
         self.samples.append(&mut other.samples);
 
         for r in &mut other.regions {
-            // [82]
+            // [89]
             if r.sample != u32::MAX {
                 r.sample += sample_off;
             }
@@ -783,7 +875,7 @@ impl Bank {
         self.name = format!("{} + {}", self.name, other.name);
     }
 
-    /// Move this bank's single preset onto the given programs of bank 0. \[83\]
+    /// Move this bank's single preset onto the given programs of bank 0. \[90\]
     pub fn remap_to_programs(&mut self, programs: &[u16]) -> Result<()> {
         if self.presets.len() != 1 {
             bail!(
@@ -816,7 +908,7 @@ impl Bank {
             .iter()
             .any(|r| r.mod_lfo_to_pitch != 0.0 || r.vib_lfo_to_pitch != 0.0);
         self.uses_lfo = self.uses_lfo_volume || self.uses_lfo_pitch;
-        // [84]
+        // [91]
         self.uses_mod_env = self
             .regions
             .iter()
@@ -830,7 +922,7 @@ impl Bank {
         self.index.sort_by_key(|e| e.0);
     }
 
-    /// Resolve a (bank, program) pair, falling back the way hardware does: \[85\]
+    /// Resolve a (bank, program) pair, falling back the way hardware does: \[92\]
     pub fn find_preset(&self, bank: u16, program: u16) -> Option<u32> {
         if let Ok(i) = self.index.binary_search_by_key(&(bank, program), |e| e.0) {
             return Some(self.index[i].1);
@@ -843,7 +935,7 @@ impl Bank {
             if let Some(e) = self.index.iter().find(|e| e.0 .0 == 128) {
                 return Some(e.1);
             }
-            // [86]
+            // [93]
         }
         if let Ok(i) = self.index.binary_search_by_key(&(0, program), |e| e.0) {
             return Some(self.index[i].1);
@@ -851,7 +943,7 @@ impl Bank {
         self.index.first().map(|e| e.1)
     }
 
-    /// Build the voices for one note-on. Pushes into `out` rather than \[87\]
+    /// Build the voices for one note-on. Pushes into `out` rather than \[94\]
     #[allow(clippy::too_many_arguments)]
     pub fn note_on(
         &self,
@@ -870,7 +962,7 @@ impl Bank {
         let lo = p.key_index[key as usize] as usize;
         let hi = p.key_index[key as usize + 1] as usize;
         let mut layers = 0usize;
-        // [88]
+        // [95]
         let draw = if self.uses_rand { rand_draw(seed) } else { 0.0 };
 
         for &ri in &p.key_regions[lo..hi] {
@@ -891,7 +983,7 @@ impl Bank {
         }
     }
 
-    /// Build the one layer `preview_note_on` named, by its region index. \[89\]
+    /// Build the one layer `preview_note_on` named, by its region index. \[96\]
     pub fn build_layer(
         &self,
         region: u32,
@@ -901,7 +993,7 @@ impl Bank {
         tune: f32,
     ) -> Option<VoiceSpawn> {
         let r = self.regions.get(region as usize)?;
-        // [90]
+        // [97]
         let gain = if vel < 128 {
             self.gain_table.get(region as usize * 128 + vel as usize).copied()
         } else {
@@ -910,7 +1002,7 @@ impl Bank {
         self.build_voice(r, region, key.min(127), vel, cfg, gain, tune)
     }
 
-    /// `gain` is this region's `gain_table` entry at `vel`, when the caller \[91\]
+    /// `gain` is this region's `gain_table` entry at `vel`, when the caller \[98\]
     #[allow(clippy::too_many_arguments)]
     fn build_voice(
         &self,
@@ -944,7 +1036,7 @@ impl Bank {
             + tune as f64;
         let mut ratio = (cents / 1200.0).exp2();
 
-        // [92]
+        // [99]
         if self.pool_rate == 0 {
             ratio *= s.rate as f64 / cfg.sample_rate as f64;
         } else {
@@ -956,7 +1048,7 @@ impl Bank {
 
         let [gain_l, gain_r] = gain.unwrap_or_else(|| {
             let atten = r.attenuation_cb + velocity_atten_cb(eff_vel, r.amp_veltrack);
-            // [93]
+            // [100]
             let gain = cb_to_gain(atten) * POWER_ON_GAIN * xfade_gain(r, eff_vel);
 
             // Constant-power pan.
@@ -966,7 +1058,7 @@ impl Bank {
 
         let (start_offset, smp_len, loop_start, loop_end, flags) = sample_geometry(s, r);
 
-        // [94]
+        // [101]
         let keys = if r.params_stride != 0 { 128u32 } else { 1 };
         let ki = if r.params_stride != 0 { eff_key as u32 } else { 0 };
         let vi = if r.params_vel_span > 1 {
@@ -995,11 +1087,11 @@ impl Bank {
 
     /// Fill `params` from `regions`. Call once after all regions exist.
     pub fn build_params(&mut self, cfg: &Config) {
-        // [95]
+        // [102]
         let mut n = 0u32;
         for r in &mut self.regions {
             let per_key = r.keynum_to_decay != 0 || r.keynum_to_hold != 0;
-            // [96]
+            // [103]
             let vel_span = if r.filter_veltrack_cents != 0.0 {
                 (r.vel_hi.saturating_sub(r.vel_lo) as u32 + 1).min(128)
             } else {
@@ -1016,7 +1108,7 @@ impl Bank {
         self.build_admission_tables(cfg);
     }
 
-    /// Precompute what admission needs to rank a note-on without building it. \[97\]
+    /// Precompute what admission needs to rank a note-on without building it. \[104\]
     fn build_admission_tables(&mut self, cfg: &Config) {
         let n = self.regions.len();
         self.gain_table = vec![[0.0, 0.0]; n * 128];
@@ -1028,7 +1120,7 @@ impl Bank {
             .collect();
 
         for (ri, r) in self.regions.iter().enumerate() {
-            // [98]
+            // [105]
             let theta = (r.pan.clamp(-1.0, 1.0) + 1.0) * 0.5 * (PI as f32 * 0.5);
             let (pan_l, pan_r) = (theta.cos(), theta.sin());
             for v in 0..128u8 {
@@ -1038,7 +1130,7 @@ impl Bank {
                 self.gain_table[ri * 128 + v as usize] = [gain * pan_l, gain * pan_r];
             }
 
-            // [99]
+            // [106]
             let Some(s) = self.samples.get(r.sample as usize) else {
                 continue;
             };
@@ -1076,7 +1168,7 @@ impl Bank {
         self.key_ok[bit / 64] >> (bit % 64) & 1 != 0
     }
 
-    /// The layers `note_on` would produce, and each one's opening gain, without \[100\]
+    /// The layers `note_on` would produce, and each one's opening gain, without \[107\]
     pub fn preview_note_on(
         &self,
         preset: u32,
@@ -1093,7 +1185,7 @@ impl Bank {
         let lo = p.key_index[key as usize] as usize;
         let hi = p.key_index[key as usize + 1] as usize;
         let mut layers = 0usize;
-        // [101]
+        // [108]
         let draw = if self.uses_rand { rand_draw(seed) } else { 0.0 };
 
         for &ri in &p.key_regions[lo..hi] {
@@ -1121,7 +1213,7 @@ impl Bank {
         }
     }
 
-    /// Build one copy of the params table with a channel's sound controllers \[102\]
+    /// Build one copy of the params table with a channel's sound controllers \[109\]
     pub fn build_variant(&self, cfg: &Config, m: &ParamMod) -> Vec<RegionParams> {
         let sr = cfg.sample_rate as f32;
         let mut params = Vec::with_capacity(self.params.len());
@@ -1141,9 +1233,9 @@ impl Bank {
         params
     }
 
-    /// The modulation-envelope table for one controller state, laid out to the \[103\]
+    /// The modulation-envelope table for one controller state, laid out to the \[110\]
     pub fn build_menv_variant(&self, cfg: &Config, m: &ParamMod) -> Vec<ModEnvParams> {
-        // [104]
+        // [111]
         if self.mod_env_regions() == 0 {
             return vec![ModEnvParams::default()];
         }
@@ -1165,7 +1257,7 @@ impl Bank {
         out
     }
 
-    /// Build the pitch-factor table, sized to this bank's own largest \[105\]
+    /// Build the pitch-factor table, sized to this bank's own largest \[112\]
     fn build_menv_factors(&mut self) {
         let max_cents = self
             .regions
@@ -1241,7 +1333,7 @@ fn make_params(r: &Region, key: u8, vel: u8, sr: f32, cfg: &Config, m: &ParamMod
     let hold = r.hold * (2.0f32).powf(r.keynum_to_hold as f32 * key_delta / 1200.0);
     let decay = r.decay * (2.0f32).powf(r.keynum_to_decay as f32 * key_delta / 1200.0);
 
-    // [106]
+    // [113]
     let floor = |t: f32, base: f32| t.max(CC_MIN_FADE_SECS.min(base));
 
     let attack_frames = (m.attack.apply(r.attack) * sr).max(0.0);
@@ -1255,7 +1347,7 @@ fn make_params(r: &Region, key: u8, vel: u8, sr: f32, cfg: &Config, m: &ParamMod
     let sustain = r.sustain.clamp(0.0, 1.0);
     let floor = cfg.env_floor;
 
-    // [107]
+    // [114]
     let (decay_coef, release_coef) = match cfg.decay_curve {
         EnvelopeCurve::Exponential => (
             (10.0f32).powf(-100.0 / (20.0 * decay_frames)),
@@ -1273,12 +1365,12 @@ fn make_params(r: &Region, key: u8, vel: u8, sr: f32, cfg: &Config, m: &ParamMod
         ),
     };
 
-    // [108]
+    // [115]
     let fc_cents = r.filter_fc_cents + r.filter_veltrack_cents * (vel as f32 / 127.0)
         + m.cutoff_cents;
     let fc = cents_to_hz(fc_cents);
     let nyq_guard = sr * 0.49;
-    // [109]
+    // [116]
     let fc_lo_cents = fc_cents.min(fc_cents + r.mod_env_to_filter);
     let fc_lo = cents_to_hz(fc_lo_cents);
     let use_filter =
@@ -1290,7 +1382,7 @@ fn make_params(r: &Region, key: u8, vel: u8, sr: f32, cfg: &Config, m: &ParamMod
         (1.0, 0.0, 0.0, 0.0)
     };
 
-    // [110]
+    // [117]
     let inc = |hz: f32| -> u32 {
         let turns = (hz.max(0.0) / sr) as f64;
         (turns * 4_294_967_296.0) as u32
@@ -1336,9 +1428,9 @@ fn make_params(r: &Region, key: u8, vel: u8, sr: f32, cfg: &Config, m: &ParamMod
     }
 }
 
-/// The modulation-envelope entry matching one `make_params` entry. \[111\]
+/// The modulation-envelope entry matching one `make_params` entry. \[118\]
 fn make_menv(r: &Region, _key: u8, vel: u8, sr: f32, m: &ParamMod) -> ModEnvParams {
-    // [112]
+    // [119]
     let rate = |secs: f32| -> f32 {
         let frames = secs.max(0.0) * sr;
         if frames < 1.0 {
@@ -1348,18 +1440,18 @@ fn make_menv(r: &Region, _key: u8, vel: u8, sr: f32, m: &ParamMod) -> ModEnvPara
         }
     };
 
-    // [113]
+    // [120]
     let fc_cents = r.filter_fc_cents + r.filter_veltrack_cents * (vel as f32 / 127.0)
         + m.cutoff_cents;
 
-    // [114]
+    // [121]
     const Q_DEFAULT: f32 = std::f32::consts::FRAC_1_SQRT_2;
     let q_db = (r.filter_q_cb + m.q_cb) / 10.0 - 3.01;
     let q = (10.0f32).powf(q_db / 20.0).max(0.001);
 
     ModEnvParams {
         delay_frames: (r.mod_env_delay.max(0.0) * sr) as u32,
-        // [115]
+        // [122]
         attack_frames: {
             let f = r.mod_env_attack.max(0.0) * sr;
             if f < 1.0 {
@@ -1381,7 +1473,7 @@ fn make_menv(r: &Region, _key: u8, vel: u8, sr: f32, m: &ParamMod) -> ModEnvPara
     }
 }
 
-/// RBJ low-pass, normalised so resonance does not raise the passband level. \[116\]
+/// RBJ low-pass, normalised so resonance does not raise the passband level. \[123\]
 pub fn biquad_lowpass(fc: f32, q_cb: f32, sr: f32) -> (f32, f32, f32, f32) {
     const Q_DEFAULT: f32 = std::f32::consts::FRAC_1_SQRT_2;
     let q_db = q_cb / 10.0 - 3.01;
@@ -1429,7 +1521,7 @@ mod tests {
         }
         // Full velocity is unattenuated whatever the tracking.
         assert!(velocity_atten_cb(127, 50.0) < 0.01);
-        // [117]
+        // [124]
         assert!(velocity_atten_cb(127, -100.0) >= 960.0);
         assert!(velocity_atten_cb(1, -100.0) < 0.01);
     }
@@ -1440,7 +1532,7 @@ mod tests {
         // H(1) = (b0 + b1 + b2) / (1 + a1 + a2), with b2 == b0.
         let h = (2.0 * b0 + b1) / (1.0 + a1 + a2);
         assert!((h - 1.0).abs() < 0.02, "dc gain was {h}");
-        // [118]
+        // [125]
         let (b0, b1, a1, a2) = biquad_lowpass(1000.0, 120.0, 48000.0);
         let h_res = (2.0 * b0 + b1) / (1.0 + a1 + a2);
         assert!(h_res < h, "resonant filter raised dc gain to {h_res}");

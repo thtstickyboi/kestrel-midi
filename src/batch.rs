@@ -502,6 +502,23 @@ pub fn run(batch: BatchPlan, obs: &mut dyn BatchObserver) -> BatchSummary {
             if group.len() == 1 { "" } else { "s" }
         );
 
+        // A set whose every job merlin refuses is not worth loading for them.
+        let refusals: Vec<_> = group.iter().map(|&i| session::merlin_takes(&jobs[i], plans[i].as_ref().expect("a job is planned once"))).collect();
+        if refusals.iter().all(Result::is_err) {
+            for (&i, refused) in group.iter().zip(refusals) {
+                let r = JobResult {
+                    index: i,
+                    midi: jobs[i].midi.clone(),
+                    out: jobs[i].out.clone(),
+                    written: None,
+                    outcome: Outcome::Failed(format!("{:#}", refused.expect_err("all of them are"))),
+                };
+                obs.finished(total, &r);
+                results[i] = Some(r);
+            }
+            continue;
+        }
+
         // [23]
         let loaded = match preloaded.take() {
             Some(bank) => {

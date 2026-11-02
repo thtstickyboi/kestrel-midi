@@ -1,0 +1,29 @@
+# Comments extracted from src/bin/kestrel/tui/merlin/mod.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/bin/kestrel/tui/merlin/mod.rs:5
+//! Merlin's window: the convolution renderer, on a screen of its own.
+//!
+//! It is its own window, opened from Extras (`open`), in teal where Kestrel is
+//! amber (`style::Theme::MERLIN`), with its own home, steps and render
+//! screen. The plan is nine phases; this
+//! is phases 3 to 5 of it: the window, the theme, the home and the steps. The
+//! render screen and the end screen are Kestrel's until phases 6 and 7.
+
+[2] src/bin/kestrel/tui/merlin/mod.rs:20
+/// The flag the window is started with. Routed on only when it is the whole
+/// command line, and never listed in `--help`.
+
+[3] src/bin/kestrel/tui/merlin/mod.rs:27
+/// Open Merlin in a window of its own and see the window it was chosen in out:
+/// `parent` is the main Kestrel window Extras was opened from, if any. On
+/// `Ok`, the caller ends its own window by exiting.
+
+[4] src/bin/kestrel/tui/merlin/mod.rs:39
+/// Back to Kestrel: its guided renderer in a window of its own. The caller
+/// exits.

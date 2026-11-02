@@ -1,0 +1,189 @@
+# Comments extracted from src/merlin/fft.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/merlin/fft.rs:5
+//! Merlin M1': the batched complex FFT.
+//!
+//! the development notes section 5 makes this the largest risk in the convolution
+//! backend, because on wgpu it is the one piece CUDA would have supplied as a
+//! library call. Everything downstream assumes it works, so it is built and
+//! tested alone before any of it exists.
+//!
+//! The shader is `shaders/fft.wgsl`; the interesting decisions are documented
+//! there. This side owns the twiddle table, which is computed in f64 on the
+//! host precisely so the transform does not depend on the driver's `cos`.
+
+[2] src/merlin/fft.rs:28
+    /// Three bindings: the complex entry points never touch `spec`, so they
+    /// get a layout without it rather than a dummy buffer to satisfy one.
+
+[3] src/merlin/fft.rs:34
+    /// One uniform per direction, and that is not tidiness.
+    ///
+    /// `queue.write_buffer` is **not** ordered against the command encoder:
+    /// every queued write lands before the command buffer runs, so two passes
+    /// in one encoder sharing a uniform both see whichever value was written
+    /// last. A forward batch of `fired` followed by an inverse batch of `buses`
+    /// silently ran the forward transform at the wrong batch count. It only
+    /// showed up once the two differed.
+
+[4] src/merlin/fft.rs:43
+    /// A third uniform that is **written once, at creation, and never again**:
+    /// its batch is `u32::MAX`, so the shader's `wid.x >= u.batch` guard never
+    /// fires and the dispatch size alone says how many transforms run.
+    ///
+    /// For [`R2cBatch`]. The two above are rewritten on every call, and the
+    /// first time the kernel build shared one it would have been exposed to the
+    /// same trap in a new place -- the FDL's own per-step forward transform
+    /// writes `uniform[0]` with a different batch, and a queued write lands at
+    /// the next `submit`, not where it was issued. A value nothing writes cannot
+    /// be overwritten by a write queued behind it.
+
+[5] src/merlin/fft.rs:57
+    /// `n` must be a power of two of at least 4. `wg` is the workgroup size.
+    ///
+    /// Workgroup storage is `2 * n` complex f32 for the Stockham ping-pong, so
+    /// this checks against the device's real limit rather than assuming the
+    /// 49,152 B this machine happens to report.
+
+[6] src/merlin/fft.rs:116
+        // exp(-2*pi*i*k/(2n)), in f64 and rounded once. Doing this in the
+        // shader would make the result depend on the driver's transcendental
+        // accuracy, which is not something to put underneath a byte-identity
+        // claim.
+        //
+        // Length 2n, not n: the stages index it by `p * (2n / stage_len)` and
+        // the R2C untangle wants the half-bin rotation directly, so one table
+        // serves both.
+
+[7] src/merlin/fft.rs:167
+    /// Bind a `[batch][n]` complex buffer for transforming in place.
+    /// `inverse` selects which direction's uniform the group reads.
+
+[8] src/merlin/fft.rs:179
+    /// Record one batched transform. The caller owns the encoder so this can
+    /// sit inside a larger pass sequence without a submit between.
+
+[9] src/merlin/fft.rs:203
+    /// Bind a `[batch][n]` complex buffer -- or a slice of one -- for
+    /// [`Fft::encode_exact`]: the uniform nothing writes, so the dispatch alone
+    /// says how many transforms run.
+
+[10] src/merlin/fft.rs:218
+    /// Exactly `batch` complex transforms in place, with **no uniform write**:
+    /// `bind` must come from [`Fft::bind_exact`]. Like
+    /// [`Fft::encode_r2c_exact`], any number of these with different batches
+    /// can sit in one submit, which the per-direction uniform of
+    /// [`Fft::encode`] cannot. `batch` is bounded by the device's per-dimension
+    /// workgroup limit.
+
+[11] src/merlin/fft.rs:229
+    /// Bins a real transform produces: `n + 1`, not `n`.
+    ///
+    /// This is why the frequency-domain delay line stores `P + 1` complex per
+    /// partition and every size in the development notes is quoted as `8 * (P+1)`.
+
+[12] src/merlin/fft.rs:237
+    /// Bind for the real entry points. `data` is `[batch][n]` complex, which
+    /// is also `[batch][2n]` real; `spec` is `[batch][n+1]` complex.
+
+[13] src/merlin/fft.rs:250
+    /// `2n` reals in `data` -> `n+1` complex bins in `spec`.
+    ///
+    /// **One dispatch.** The transform and the untangle are fused: the
+    /// untangle needs `Z[k]` and `Z[N-k]`, both of which are still in
+    /// workgroup storage when the last stage finishes, so splitting it into a
+    /// second pass would re-read from global memory for nothing. Measured, that
+    /// split cost 0.0208 ms against the transform's 0.0521 -- 40% on top -- and
+    /// was the difference between 3.47x cuFFT and 2.4x.
+    ///
+    /// The pack the algorithm calls for is a reinterpretation of the same
+    /// bytes, so it costs nothing and does not appear at all.
+
+[14] src/merlin/fft.rs:272
+    /// Bind for [`Fft::encode_r2c_exact`]: the same layout as
+    /// [`Fft::bind_real`], with the uniform nothing writes.
+
+[15] src/merlin/fft.rs:283
+    /// The forward real transform of exactly `batch` rows, with **no uniform
+    /// write**: `real_bind` must come from [`Fft::bind_real_exact`], and the
+    /// dispatch is `batch` workgroups, so `batch` is bounded by the device's
+    /// per-dimension workgroup limit.
+    ///
+    /// Unlike [`Fft::encode_r2c`] this can be recorded any number of times, in
+    /// any encoder, beside any other transform, without one batch count
+    /// overriding another -- there is no batch count to override.
+
+[16] src/merlin/fft.rs:330
+/// Upload, transform, read back. For tests and for the M1' timing harness --
+/// the render path will keep its buffers resident instead.
+
+[17] src/merlin/fft.rs:376
+/// Upload `2n * batch` reals, forward-transform, read back `(n+1) * batch`
+/// bins. Tests and tools only; the render path keeps its buffers resident and
+/// leaves its spectra on the device -- see [`R2cBatch`], which builds the
+/// kernel cache.
+
+[18] src/merlin/fft.rs:440
+/// Persistent buffers for forward-transforming many rows in one dispatch and
+/// **leaving the spectra on the device**.
+///
+/// This is how the kernel cache is built. Each kernel is `depth` partitions of
+/// `2n` reals, and every kernel a partition step is missing is packed one after
+/// another into `data`, transformed by one dispatch, and left in `spec` for the
+/// caller to copy into the cache pages with `copy_buffer_to_buffer`. Nothing
+/// comes back to the host: `r2c_once` created two buffers, submitted, and
+/// blocked on a readback per kernel, and the spectra then went straight back
+/// to the device through `write_buffer`.
+///
+/// **Bit-identical to transforming each row alone**, and for a reason rather
+/// than a test: `shaders/fft.wgsl` runs one workgroup per row, every
+/// workgroup reads only its own row of `data` and the shared twiddle table and
+/// writes only its own row of `spec`, and its stage schedule is a function of
+/// `n` alone. The batch count appears nowhere in the arithmetic. The test is
+/// `tests/merlin_fft.rs::a_batch_gives_each_row_the_spectrum_it_has_alone`.
+///
+/// Both buffers **grow on demand** by doubling, up to `max_rows`, and are
+/// never shrunk: the render's peak step sets them and the common step needs a
+/// fraction. `max_rows` is what the caller may stage in one go, so a step that
+/// needs more goes up as several batches.
+
+[19] src/merlin/fft.rs:475
+    /// `max_rows` is clamped to what the device can dispatch in one dimension
+    /// and to what one storage binding holds of either buffer, so a caller
+    /// that only knows its own budget cannot ask for an invalid batch.
+
+[20] src/merlin/fft.rs:526
+    /// Row `i`'s spectrum is bins `i * (n+1)` onward of this buffer, after the
+    /// pass recorded by [`R2cBatch::transform`] has run.
+
+[21] src/merlin/fft.rs:532
+    /// Stage `rows * 2n` reals through `fill` and record their forward
+    /// transform into `enc`.
+    ///
+    /// `fill` is handed the whole input as one slice and must write **all** of
+    /// it: it points at staging memory whose prior contents are unspecified. It
+    /// runs on the calling thread but may fan out to as many as it likes, which
+    /// is the point of handing over a slice instead of taking a `Vec` and
+    /// copying it -- the assembled kernels are written once, in place.
+    ///
+    /// **One call per encoder, and submit the encoder before the next call.**
+    /// The input is staged with a queue write, which lands at the next
+    /// `submit`, not where it was issued, so two calls recorded into one
+    /// encoder would both see the second's input. This is the same trap
+    /// `Fft::uniform` is split to avoid, in a buffer instead of a uniform. The
+    /// spectra are valid for copies recorded after this in the same encoder.
+
+[22] src/merlin/fft.rs:563
+            // Doubling, so a render whose steps keep getting bigger
+            // reallocates a handful of times rather than once a step.
+
+[23] src/merlin/fft.rs:587
+                // Staging memory that is not 4-aligned. Mapped allocations are,
+                // in practice; if one is not, this costs one copy rather than
+                // refusing to build a kernel.

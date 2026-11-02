@@ -1,0 +1,332 @@
+# Comments extracted from src/slice.rs
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] src/slice.rs:5
+//! Note-slicing: one MIDI read once into `N` compact per-slice event streams.
+//!
+//! # Why this exists
+//!
+//! Merlin's host memory scales with notes *sounding at once*, not with the
+//! file. The largest test file puts 94% of its 2,120,000,753 note-ons inside
+//! one second, and that wall needs roughly 86 GiB of head notes and 23 GiB of
+//! `planned` against 31.6 GiB of RAM. No cache policy shrinks what one step
+//! needs at once.
+//!
+//! Splitting *time* does not help, because the peak is instantaneous:
+//! rendering that one second alone costs what rendering the file costs.
+//! Splitting the **note set** does, and it is exact rather than approximate:
+//!
+//! - merlin's mixdown is linear, and
+//! - merlin drops nothing -- every render of this material reports
+//!   `0 stolen, 0 dropped`,
+//!
+//! so for any partition of the note set the sum of the per-part renders is the
+//! render of the whole. One sixteenth of that file rendered with 2.7 GiB of
+//! head notes and 5.7 GiB of open notes at peak, against a whole-file wall of
+//! 86 GiB, and each pass fires far fewer distinct kernel entries.
+//!
+//! **This is exact for merlin only.** `--backend gpu` and `--backend cpu`
+//! admit and steal based on which notes are present, so slicing them changes
+//! what survives. The renderer warns when a slice stream is fed to one.
+//!
+//! # The routing has to be content-independent too, and by default it is not
+//!
+//! "Linear mixdown, drops nothing" is necessary and it is not sufficient. What
+//! it misses is that merlin decides **which path a note takes** from the notes
+//! it has seen: `merlin_promote_after` counts notes per waveform and moves the
+//! *N*th one onto the convolution path, so every note before it renders on the
+//! per-voice fallback. A slice holds a fraction of each waveform's uses, so it
+//! promotes different waveforms, at different points in the file, than the
+//! whole render does -- and a note convolved is not the same samples as the
+//! same note on the fallback.
+//!
+//! Measured on real material, 2026-09-10. A 372 k-note file cut four ways, at
+//! the default `--merlin-promote-after 256`, summed against a whole render:
+//!
+//! - median **-115.8 dB** a second, which is the arithmetic working, but
+//! - **18 seconds of 252 worse than -20 dB**, the worst at **-7.7**, and
+//! - the whole render came out **2.73 s longer**, because a convolved note
+//!   carries a kernel tail a fallback voice does not.
+//!
+//! So `render --note-slice` **refuses to run unless `--merlin-promote-after`
+//! is 0**, which convolves every waveform and is the only routing that does
+//! not depend on which notes are present. It is slower, and it is the price of
+//! a stem that adds up. The failure is invisible in a stem on its own, and the
+//! material slicing exists for has no whole render to check against -- so it
+//! had to be an error rather than a warning.
+//!
+//! # Why a pre-pass, and not `--note-slice k/N` on the parser
+//!
+//! Deciding membership in the event loop is one comparison, but it costs a
+//! full MIDI parse per slice. That was estimated at ~600 s a pass on the
+//! largest test file, which would make sixteen passes **2.7 hours of parsing**
+//! against a render that is minutes. So the parse happens once and each slice
+//! gets its own small binary stream to read instead -- and that one pass then
+//! measured **100 s** for all the notes of the largest test file, so the estimate was six times
+//! pessimistic and the pre-pass is cheap outright.
+//!
+//! # What each stream carries
+//!
+//! Its own notes, and **every channel event in the file**. Controllers are not
+//! sliceable: a CC affects every note on its channel, so each slice needs the
+//! whole controller history to reproduce the channel state its notes were
+//! struck under. That is cheap -- the largest test file has 959 CC events in
+//! total against 2.12 G notes.
+//!
+//! Tempo likewise goes to every slice, and from **every track that carries
+//! one**. `tools/split_tracks.py` shipped with a bug where it kept only
+//! `tracks[0]`'s set-tempo events; this reads the merged stream, where that
+//! distinction has already been dissolved, so the bug is not reachable here.
+//!
+//! `Event::Other` is dropped. Nothing acts on it -- it exists so a caller can
+//! count events without a second pass -- and on this material it is most of
+//! the bytes that are not notes.
+//!
+//! # How notes are assigned to slices
+//!
+//! **Per `(channel, key)` slot, round-robin**: the *j*-th note-on at a slot
+//! goes to slice `j % N`. Not the *j*-th note-on of the whole file.
+//!
+//! Two reasons, and the second is the one that matters:
+//!
+//! 1. It is at least as even. A slot with `C` notes gives each slice
+//!    `C / N` of them to within one, so the worst imbalance across the whole
+//!    file is bounded by the slot count, 2,048 notes.
+//! 2. **A global index has a degenerate case and this does not.** A file whose
+//!    notes repeat with period `N` -- a sixteen-note arpeggio against
+//!    `N = 16` -- puts every occurrence of a given key in the same slice under
+//!    a global index, so one slice carries a whole voice of the music and the
+//!    memory is not bounded at all. Striping within the slot cannot do that.
+//!
+//! It also makes note-off pairing free, which is the next section.
+//!
+//! # Pairing note-offs, which is the correctness requirement
+//!
+//! A note-off must land in the same slice as the note-on it releases, or a
+//! slice will release a note it never struck and hold one it did.
+//!
+//! `GateTable` pairs them by **counting**: `note_on` increments `on_count[s]`,
+//! `note_off` increments `off_count[s]` if the two differ and is ignored
+//! otherwise. So the *j*-th note-off at a slot releases the *j*-th note-on,
+//! and "release the oldest un-released note" falls out of that. Mirroring it
+//! here needs two `u32` per slot and no queue at all:
+//!
+//! - a note-on at slot `s` takes index `on_seen[s]` and goes to
+//!   `on_seen[s] % N`;
+//! - a note-off at slot `s` takes index `off_seen[s]` and goes to the same
+//!   slice that index went to -- `off_seen[s] % N`;
+//! - a note-off with nothing outstanding is a **stray**, and is dropped from
+//!   every slice exactly as `GateTable` drops it.
+//!
+//! **Both counters start at `s % N` rather than at zero**, which costs nothing
+//! and is not cosmetic. A slot holding `c` notes gives `c % N` slices one note
+//! more than the rest, and starting every slot at zero puts that remainder on
+//! the *same* low-numbered slices every time, so it accumulates instead of
+//! cancelling: measured on a 4,000-note fixture across 294 occupied slots, the
+//! spread between the largest and smallest slice was 294 notes -- the slot
+//! count exactly, which is the worst case the bound allows. Rotating the phase
+//! by the slot spreads the remainders over all `N` and the same fixture comes
+//! out within a couple of notes. The pairing is untouched: `on_seen` and
+//! `off_seen` start equal, so "nothing outstanding" is still `off_seen[s] ==
+//! on_seen[s]`, and the *j*-th note-off still resolves to `(s + j) % N`.
+//!
+//! The pedals need no special handling. CC64 and CC66 defer *publication* of a
+//! note-off, and CC121 lifts them, but none of the three changes which note-on
+//! a note-off belongs to -- `GateTable`'s own outstanding test is
+//! `off_count + pending_off != on_count`, which is exactly `off_seen` against
+//! `on_seen` here.
+//!
+//! **CC120 and CC123-CC127 do**, and they are the whole of the special
+//! handling: `all_sound_off` and `all_notes_off` retire every outstanding
+//! note-on on the channel, so a later note-off for a still-held key is a stray.
+//! `off_seen[s]` is set to `on_seen[s]` across the channel when one arrives.
+
+[2] src/slice.rs:150
+/// Stream magic. The trailing digit is the format version; a reader that does
+/// not recognise it refuses rather than guessing.
+///
+/// Version 2 (2026-09-22) added MIDI ports: see `T_PORT`. A version 1 stream
+/// is a version 2 stream with no port records, so both are read.
+///
+/// Version 3 (2026-10-12) added the MIDI Tuning Standard records, `Event::Tune`
+/// and `Event::KeyTune`, as two more kinds of the tempo tag (`T_TUNE`,
+/// `T_KEY_TUNE`). A version 2 reader would take them for a tempo change and
+/// misread everything after, which is why the version moved; a version 1 or 2
+/// stream has none of them, so all three are read.
+
+[3] src/slice.rs:168
+/// File extension a slice stream is written with.
+///
+/// Nothing dispatches on it: `render --note-slice` is the only way to reach a
+/// slice stream, so an ordinary render cannot wander onto this path by
+/// accident. It exists so a directory of them is recognisable, and so the
+/// renderer can say something useful when one is passed as the MIDI argument.
+
+[4] src/slice.rs:176
+/// Slot count, `channels * 128 keys` with the channels of every MIDI port.
+/// Mirrors the driver's gate table at its widest, and the pairing above is
+/// only correct while the two agree.
+
+[5] src/slice.rs:181
+/// Staging before a write, and the read window. 256 KiB matches
+/// `midi::TRACK_BUF`; nothing here is sensitive to it beyond syscall count.
+
+[6] src/slice.rs:185
+// Record tags. The high nibble is the kind and the low nibble is the channel,
+// so a channel event is one byte of tag plus its payload and a note-on is four
+// bytes including its delta.
+
+[7] src/slice.rs:196
+/// Tempo, tuning and key tuning share a kind because none of them has a
+/// channel to put in the tag's low nibble, which says which of the three it is
+/// instead. `T_TEMPO` itself is that nibble at 0, as it always was.
+
+[8] src/slice.rs:201
+/// Set on a channel record's tag when a port byte follows it: the record's
+/// channel is `16 * port + (tag & 15)`. Never set for port 0, so a file on one
+/// port writes exactly the stream version 1 did.
+
+[9] src/slice.rs:214
+    /// Track count of the source MIDI, carried only so a render can report the
+    /// same line it would have reported for the file itself.
+
+[10] src/slice.rs:223
+/// Where slice `k` of `n` lands under `dir`, given the source's file stem.
+///
+/// Zero-padded to the width of `n - 1` so a shell glob lists them in order.
+
+[11] src/slice.rs:231
+/// The raw SMF division word, so a slice round-trips a source's timebase
+/// without the reader having to know which kind it was.
+
+[12] src/slice.rs:254
+    // Seven bits a byte, high bit set on every byte but the last, most
+    // significant group first -- the SMF encoding, widened to u64 so a tick
+    // gap in a long file cannot overflow it.
+
+[13] src/slice.rs:272
+/// One slice's output stream.
+///
+/// Records are staged into a `Vec` and flushed in `BUF`-sized pieces rather
+/// than going through a `BufWriter` a byte at a time: this is called once per
+/// event and there are billions of them.
+
+[14] src/slice.rs:301
+        // Placeholder: `events` and `notes` are not known until the source is
+        // exhausted, so the header is rewritten in `finish`.
+
+[15] src/slice.rs:327
+    /// A channel record's tag, and the port byte after it when the channel
+    /// is not on port 0. See `T_PORT`.
+
+[16] src/slice.rs:339
+    /// Append one event. `tick` is absolute and must not go backwards; the
+    /// merged stream is tick-ordered, so it does not.
+
+[17] src/slice.rs:378
+            // A channel is a whole byte here, ports and all, which a tag's low
+            // nibble cannot hold.
+
+[18] src/slice.rs:393
+            // Nothing acts on it and it is not worth the bytes. Dropping it
+            // here is why a slice's event count is below the source's.
+
+[19] src/slice.rs:438
+/// Reads one slice stream back as `(tick, Event)`, the same shape
+/// `MidiStream::next` hands the driver.
+
+[20] src/slice.rs:446
+    /// Bytes of the file read into `buf` so far, the header included, and the
+    /// file's length: what `bytes_read` and `bytes_total` report.
+
+[21] src/slice.rs:455
+    /// The stream's length in bytes. The counterpart of
+    /// `MidiStream::bytes_total`, and progress is measured in it for the same
+    /// reason.
+
+[22] src/slice.rs:553
+    /// Next event, or `None` at the end of the stream.
+    ///
+    /// Deliberately not an `Iterator`, matching `MidiStream::next`: the driver
+    /// holds one of these behind a `&mut self` that an iterator's borrow would
+    /// conflict with.
+
+[23] src/slice.rs:607
+            // A tag this build does not know means the stream is damaged or
+            // was written by a later format. Stopping is the only safe answer:
+            // records are variable-length, so there is no resynchronisation
+            // point to skip to.
+
+[24] src/slice.rs:630
+    /// Note-ons seen per `(channel, key)` slot, and note-offs paired against
+    /// them. The whole of the pairing state; see the module docs.
+
+[25] src/slice.rs:634
+    /// Note-offs with nothing outstanding, dropped exactly as `GateTable`
+    /// drops them. Reported because a large count means the source pairs its
+    /// notes in a way this has not anticipated.
+
+[26] src/slice.rs:659
+        // Each slot's stripe starts at its own phase, so the `c % N` notes a
+        // slot cannot divide evenly do not always land on the same slices.
+        // The two counters must agree, and they do: "nothing outstanding" is
+        // `off_seen == on_seen`, which holds at any common starting value.
+
+[27] src/slice.rs:694
+                    // Nothing outstanding. `GateTable::note_off` ignores this
+                    // one, so no slice may carry it: a slice that did would
+                    // release a note the source never released.
+
+[28] src/slice.rs:707
+                // A channel mode message that retires every sounding note has
+                // to move the pairing cursor with it, or the next note-off for
+                // a held key pairs with a note-on that is already finished.
+
+[29] src/slice.rs:748
+/// Read `midi` once and write `n` slice streams under `dir`.
+///
+/// `progress` is called with the running note count often enough to drive a
+/// log line and rarely enough to cost nothing; a 15.8 GB file is one
+/// sequential read and the better part of ten minutes.
+
+[30] src/slice.rs:784
+/// A plain-text index beside the streams.
+///
+/// Not read back by anything -- each stream carries its own header, which is
+/// the only thing a render needs. It exists so a directory of sixteen opaque
+/// binaries can be identified months later without running a tool.
+
+[31] src/slice.rs:809
+    // Wide enough for the longest name present rather than a fixed guess: a
+    // real file's stem runs well past thirty characters and a ragged table is
+    // harder to read than a wide one.
+
+[32] src/slice.rs:860
+    /// Round-trip through a real file, under a name of this call's own.
+    ///
+    /// The name has to be unique: `cargo test` runs these on parallel threads
+    /// in one process, so a shared path is two tests writing the same file and
+    /// reading each other's header.
+
+[33] src/slice.rs:904
+    /// Channels past the first port -- up to the last channel of port 16 --
+    /// come back on the port they went in on, for every kind of channel record.
+
+[34] src/slice.rs:921
+    /// A record on port 0 is exactly what version 1 wrote, and one on another
+    /// port costs a single byte more -- the port, after the tag.
+
+[35] src/slice.rs:971
+    /// Tuning records share the tempo tag's kind and say which they are in its
+    /// low nibble, so the proof is that they come back as themselves with tempo
+    /// changes on either side -- a negative offset, a channel past the first
+    /// port, and the extremes of an `i32` included.
+
+[36] src/slice.rs:991
+    /// Version 2 streams, written before the tuning records, carry none of them
+    /// and read as they always did.

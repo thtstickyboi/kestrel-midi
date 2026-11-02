@@ -1,0 +1,182 @@
+# Comments extracted from shaders/fdl.wgsl
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] shaders/fdl.wgsl:5
+// Merlin: the frequency-domain delay line.
+//
+// the development notes section 2 in one line:
+//
+//     out[n] = SUM_e ( d_e (*) w_e )[n]
+//
+// Notes sharing an entry differ only in start frame and gain, so they collapse
+// into a sparse impulse train `d_e` and the entry contributes that train
+// convolved with its waveform. Partition each waveform into K pieces of P
+// frames, keep the partitions transformed, and a block costs
+// `8L * entries firing in it` -- note count is gone from the cost model.
+//
+// Five entry points, in the order a block runs them:
+//
+//   scatter   impulses -> per-entry time-domain input, integer atomics
+//   to_real   fixed point -> f32, and clear for the next block
+//   (fft.wgsl r2c)
+//   mac       ring[(t+k) % K] += H[e][k] * D[e]   -- this is the whole cost
+//   emit      lift ring slot t into the C2R input, clear it
+//   (fft.wgsl c2r)
+//   overlap   add the previous block's tail, keep this block's
+//
+// ## Overlap-add, where the development notes section 5 says overlap-save
+//
+// Deliberate, and the reason is the cost model. Overlap-save wants the input
+// buffer to hold `[x(t-1) | x(t)]`, so an entry that fired in the previous
+// block must be *present* in this block's input even when it has no impulses
+// now -- which puts it in the firing list, and the firing list is the one
+// quantity the whole design is trying to keep small. Zero-padding instead
+// costs one time-domain carry of P frames **per bus**, not per entry, because
+// the carry lives on the far side of the multiply-accumulate where everything
+// has already been summed. At 2 buses that is 16 KB against inflating a
+// 473-entry firing list.
+//
+// The arithmetic is unchanged: a P-frame impulse block convolved with a
+// P-frame partition is 2P-1 long and fits a 2P transform, so the circular
+// convolution equals the linear one and nothing wraps.
+
+[2] shaders/fdl.wgsl:52
+    /// E, the resident entry count. `kmeta` is what indexes the cache now, so
+    /// this is carried for the host's bounds reporting rather than read here.
+
+[3] shaders/fdl.wgsl:58
+    /// Fixed-point scale for the scatter. The host picks it from the block's
+    /// impulse count so the i32 accumulator cannot overflow -- which is
+    /// the development notes section 4's stated fallback for not having 64-bit
+    /// atomics, and it costs nothing but a multiply.
+
+[4] shaders/fdl.wgsl:63
+    /// Impulses **this block**, which is not `arrayLength(&impulses)`.
+    ///
+    /// The buffer is sized for the worst block and keeps whatever the last one
+    /// left in it, while the dispatch rounds up to a whole workgroup. Guarding
+    /// on the array length therefore re-scatters stale impulses from previous
+    /// blocks -- silently, and only once a block follows a busier one, which is
+    /// why four of five tests passed with it wrong.
+
+[5] shaders/fdl.wgsl:82
+    /// Identical notes this impulse stands for. Multiplies the *rounded* value,
+    /// so a run adds exactly what that many impulses of one would.
+
+[6] shaders/fdl.wgsl:88
+/// Kernel cache, packed. The buffers whose traffic sets the cost.
+///
+/// Four of them because one storage *binding* caps at 2 GiB and a real file's
+/// entry set is past that: 2,924 entries at their true release lengths come to
+/// 2.24 GB. Which one an entry sits in is in its `kmeta`, and it is uniform
+/// across a workgroup -- every invocation there shares a bus and a lag and
+/// walks the same firing list -- so the branch in `kread` never diverges.
+
+[7] shaders/fdl.wgsl:96
+/// [E] of `(offset into its buffer in complex, partitions, which buffer, _)`.
+///
+/// Entries do not share a length any more. One entry's kernel is its region's
+/// release tail, and that runs 1.25 s on 54 of the reference bank's keys and
+/// 4.0 s on 6 -- so a rectangular cache pays the deepest key's price on every
+/// entry, and the constant that used to set it cut the 4.0 s keys off at 46%
+/// of their tail.
+
+[8] shaders/fdl.wgsl:104
+/// [fired] entry ids, **deepest first within each bus**, ties broken by
+/// ascending entry id.
+
+[9] shaders/fdl.wgsl:140
+// ---------------------------------------------------------------------------
+// 1. Scatter.
+//
+// One invocation per impulse. Integer atomics, not float: `CLAUDE.md` bans
+// float atomics for the mixdown because their ordering is not reproducible,
+// and integer addition is associative and commutative so the result here is
+// bit-exact whatever order the invocations land in. Two notes of the same
+// entry starting on the same frame is ordinary in black MIDI, so the atomic is
+// not decorative.
+//
+// Impulses go in `[0, P)` of a `2P` row; the upper half stays zero, which is
+// the zero-padding the overlap-add needs.
+// ---------------------------------------------------------------------------
+
+[10] shaders/fdl.wgsl:159
+    // Grid-strided, like `to_real` below and `head.wgsl`'s scatter.
+    //
+    // **This was one invocation per impulse and unstrided**, on the reasoning
+    // that the 4 M starting capacity is 16,384 workgroups and wgpu would
+    // complain rather than thin the audio if a file ever passed the limit. A
+    // file did: one step of a merged black MIDI staged past 33 M impulses,
+    // which is 131,072 workgroups against a 65,535 ceiling. Complaining is not
+    // actually the behaviour anyone wanted at that point -- it is 830 seconds
+    // into a render -- and striding costs one compare.
+
+[11] shaders/fdl.wgsl:177
+// ---------------------------------------------------------------------------
+// 2. Fixed point out, zero in, one pass.
+//
+// `atomicExchange` reads and clears together, so the buffer is ready for the
+// next block without a separate clear costing another sweep of it.
+// ---------------------------------------------------------------------------
+
+[12] shaders/fdl.wgsl:189
+    // Strided for the same reason as `head.wgsl`'s scatter: this is one
+    // invocation per input *frame*, so `fired * 2P` of them, which passes
+    // 65,535 workgroups at a few thousand firing rows.
+
+[13] shaders/fdl.wgsl:200
+// ---------------------------------------------------------------------------
+// 3. The multiply-accumulate. Everything else in this file is bookkeeping.
+//
+//     ring[(t + k) % K][bin] += SUM_e H[e][k][bin] * D[e][bin]
+//
+// One invocation owns one `(bus, lag, bin)` and walks that bus's slice of the
+// firing list. Three properties, all load-bearing:
+//
+//   * **No atomics.** Distinct `k` give distinct ring slots because `k < K`,
+//     so every `(bus, slot, bin)` is written by exactly one invocation.
+//   * **Fixed entry order.** The firing list is sorted, so the summation
+//     order is a pure function of the input and the result is bit-identical
+//     run to run. The development notes section 6 determinism risk 2.
+//   * **Deepest kernel first, so the loop can stop.** Entries have their own
+//     partition counts now. Sorted descending, the entries reaching lag `k`
+//     are a prefix of the range, so the first row that does not reach it ends
+//     the loop -- total iterations are `SUM_rows depth(row)`, the useful work,
+//     rather than `rows * K`. Without that the ragged cache would cost the
+//     deepest entry's iteration count on every row, which is the trade the
+//     rectangular cache was making in bytes.
+//
+// The early exit before the ring update matters as much as the one inside the
+// loop: `K` is now set by the bank's longest release, so most `(bus, lag)`
+// pairs have nothing alive on them and would otherwise read and write the ring
+// to add zero. At 256 buses that is 4.2 MB per lag per step.
+//
+// This is the pass M0 measured at 344 GB/s under CUDA. The kernel read is the
+// traffic; `spec` is small and re-read once per lag, which is what the L2
+// pinning there was buying and what wgpu gives up.
+// ---------------------------------------------------------------------------
+
+[14] shaders/fdl.wgsl:239
+    // Compacted: `z` indexes the buses that fired, not every bus. See the
+    // dispatch in `fdl.rs` for why.
+
+[15] shaders/fdl.wgsl:260
+// ---------------------------------------------------------------------------
+// 4. Emit: lift this block's ring slot into the inverse transform's input and
+// clear it, so it is ready to accumulate again K blocks from now.
+// ---------------------------------------------------------------------------
+
+[16] shaders/fdl.wgsl:276
+// ---------------------------------------------------------------------------
+// 5. Overlap-add.
+//
+// The inverse transform leaves `2P` reals per bus in `data`. The first P are
+// this block once the previous block's tail is added; the last P become the
+// next block's tail. Each frame touches two distinct slots, so this is
+// race-free in place.
+// ---------------------------------------------------------------------------

@@ -84,28 +84,33 @@
 /// seconds on real material, so a front end wants to say which it is waiting
 /// on.
 
-[12] src/session.rs:282
+[12] src/session.rs:281
+    /// Merlin's pre-pass over the whole file, before its first key. Not an
+    /// event: a [`Snapshot`] shows it while a per-key merlin render reports
+    /// that stage (`Snapshot::merlin`), over what the session says.
+
+[13] src/session.rs:286
     /// The last block is written; the file is being closed, which for an
     /// encoded container means waiting for ffmpeg.
 
-[13] src/session.rs:285
+[14] src/session.rs:289
     /// The file is complete. This and the two after it are reported by a
     /// [`Monitor`] once [`run`] has returned; `run` itself never sends them.
 
-[14] src/session.rs:288
+[15] src/session.rs:292
     /// Stopped early through [`Observer::cancelled`]. The file is closed and
     /// holds what was rendered.
 
-[15] src/session.rs:322
+[16] src/session.rs:326
     /// This is the last block: the file ran out or `Job::seconds` was reached.
     /// Not set for a cancelled render, whose last block is only known to be
     /// the last once the observer has seen it.
 
-[16] src/session.rs:326
+[17] src/session.rs:330
     /// Seconds of audio a resumed render had already rendered when this run
     /// began. They are not this run's work, so a speed is of the rest.
 
-[17] src/session.rs:331
+[18] src/session.rs:335
 /// The share of a per-track render's progress that is its notes read; the
 /// rest is its blocks rendered inside the tracks' notes. See
 /// [`Snapshot::progress`].
@@ -129,38 +134,38 @@
 /// spans alone slow. A recent-rate projection, and a fit of each file's own
 /// costs as the render went, both did worse.
 
-[18] src/session.rs:355
+[19] src/session.rs:359
 /// A per-track render as it stands, which [`Observer::tracks`] is handed
 /// about twenty times a second in place of [`Observer::block`]: its tracks
 /// render on many threads at once, so there is no one block to report.
 
-[19] src/session.rs:366
+[20] src/session.rs:370
     /// Blocks rendered over every track; those of them that were silent and
     /// written without the device; and what the whole render comes to, known
     /// before it starts because every track runs the file's length. The
     /// release tails past the end are not in it.
 
-[20] src/session.rs:373
+[21] src/session.rs:377
     /// Blocks rendered inside each track's notes -- from the block its first
     /// note lands in to the one its last note event does -- and what those
     /// come to over every track. Nearly all of the render's time goes on
     /// these: outside them a track is silent and never reaches the device.
     /// [`Snapshot::progress`] is these and the notes, not `blocks`.
 
-[21] src/session.rs:380
+[22] src/session.rs:384
     /// Note-ons the tracks hold in all, after `--min-velocity`: where `notes`
     /// ends. 0 for a render cut short by `--seconds`, which does not reach
     /// them all; its progress is then the spans alone.
 
-[22] src/session.rs:384
+[23] src/session.rs:388
     /// Seconds of audio each track renders: the file's length, or
     /// `--seconds`. What a merge writes, and what [`Snapshot::speed`] is of.
 
-[23] src/session.rs:396
+[24] src/session.rs:400
     /// The loudest track, before any limiter. Merged, the mix's own peak is
     /// only known once it is summed.
 
-[24] src/session.rs:399
+[25] src/session.rs:403
     /// Microseconds the longest batch of tracks took, from going up to the
     /// device to its blocks coming back, since the last report: the render
     /// log's "longest batch", which is how a batch climbing towards Windows'
@@ -168,21 +173,27 @@
     /// block. 0 on the CPU. Not in the API's progress lines: it restarts at
     /// every report, many times a line.
 
-[25] src/session.rs:421
+[26] src/session.rs:425
 /// A front end's view of a render. Every method has a default, so an observer
 /// implements only what it shows.
 
-[26] src/session.rs:426
+[27] src/session.rs:430
     /// Called after every block. Cheap counters only are in `Tick`; anything
     /// that walks the tracks or allocates should be rate-limited by the
     /// observer.
 
-[27] src/session.rs:432
+[28] src/session.rs:436
+    /// A per-key merlin render is about to start. Its threads write `progress`
+    /// as they go, which this thread cannot: it is inside the render's first
+    /// block until the last key is done. Set the stop on it to stop the render
+    /// anywhere, the pre-pass included.
+
+[29] src/session.rs:441
     /// Polled during analytic preparation and once per block. True stops after
     /// the current preparation step, before any file is created, or after the
     /// block in hand, and the file is closed normally.
 
-[28] src/session.rs:438
+[30] src/session.rs:447
     /// With [`cancelled`](Observer::cancelled): the stop does not want its
     /// progress kept. A render that saves checkpoints writes none for this stop,
     /// takes away the one it wrote earlier, and takes away the audio it kept
@@ -190,54 +201,59 @@
     /// stems of a per-track render that were finished). Without it a stop saves
     /// where it was, so that `kestrel resume` can go on from there.
 
-[29] src/session.rs:467
+[31] src/session.rs:476
     /// Where a render that was stopped left its progress, the `.krsm` that
     /// `kestrel resume` takes; absent for a whole render, which lets its
     /// checkpoint go, and for one that saved none.
 
-[30] src/session.rs:472
+[32] src/session.rs:481
     /// A stop that was asked to keep none of its progress
     /// ([`Observer::discard_progress`]) and did not: no checkpoint was written
     /// and none is left, so there is nothing to resume.
 
-[31] src/session.rs:479
+[33] src/session.rs:488
 /// A render, described completely: what to read, what to write, and how.
 ///
 /// The command line builds one from its arguments and the guided renderer
 /// from its answers; a front end on the library builds it directly. `cfg` is
 /// the whole engine configuration.
 
-[32] src/session.rs:489
+[34] src/session.rs:496
+    /// `midi` is one note-slice stream written by `kestrel slice`, not a MIDI
+    /// file, and the render is a stem to be summed with its siblings. See
+    /// `crate::slice`.
+
+[35] src/session.rs:502
     /// Programs of bank 0 the last soundfont takes over, spelled the way
     /// `--sf-programs` spells them: `0,1` or `0-7`.
 
-[33] src/session.rs:496
+[36] src/session.rs:509
     /// The sample format of a WAV. Encoded containers take float and refuse
     /// anything else.
 
-[34] src/session.rs:499
+[37] src/session.rs:512
     /// Brickwall ceiling in dBFS, when one was chosen. `None` keeps `cfg`'s
     /// for WAV and FLAC, and uses -1 for the lossy containers.
 
-[35] src/session.rs:506
+[38] src/session.rs:519
     /// Render this one track alone rather than the whole file: its own notes
     /// and controllers, the setup tracks if they apply, timed by the whole
     /// file's tempo map, with every port folded onto port A.
 
-[36] src/session.rs:510
+[39] src/session.rs:523
     /// Render every track `stems.tracks` names, each alone and to a file of
     /// its own, in a folder named after the MIDI inside `out`, which is a
     /// directory here rather than a file -- or, with `stems.merge`, all of
     /// them summed into the file `out` names. See `crate::stems`.
 
-[37] src/session.rs:515
+[40] src/session.rs:528
     /// Checkpoints of a render of one file or one track: where, how often, and
     /// what to continue from; see `crate::single` and `crate::resume`. `None`
     /// writes none, which is what a caller that has not asked for them gets, and
     /// the audio then goes straight to `out`. A per-track render's are in
     /// `stems`, and this is ignored when that is set.
 
-[38] src/session.rs:532
+[41] src/session.rs:545
 /// Validate a render and resolve its output, without loading anything.
 ///
 /// Everything that can be settled without touching the soundfont is settled
@@ -245,38 +261,69 @@
 /// misconfigured encode should not cost that before it complains. The guided
 /// renderer calls this when the flags are typed, for the same reason.
 
-[39] src/session.rs:546
+[42] src/session.rs:559
     // Decided with the user 2026-09-22: too new to carry into per-track
     // rendering yet, and its preparation (minutes on a real piano) would have
     // to be shared across every track's render first.
 
-[40] src/session.rs:571
+[43] src/session.rs:584
     // Stems: a folder of files. Merged, one file, which `out` names as it
     // would for a normal render.
 
-[41] src/session.rs:575
+[44] src/session.rs:588
         // The header is enough to say whether the track exists, and it costs
         // nothing; whether it has notes waits for the scan.
 
-[42] src/session.rs:589
+[45] src/session.rs:603
+        // What merlin does not carry, said before the soundfont loads. Each of
+        // these is a feature of the per-voice path that has no counterpart in a
+        // convolution pipeline yet.
+
+[46] src/session.rs:616
     // A stems render's `out` is a directory; the stems' format says what each
     // file is, and every rule below applies to each file as it would to one.
 
-[43] src/session.rs:595
+[47] src/session.rs:622
     // Decided with the user 2026-09-22: 32-bit float WAV stems carry the raw
     // mix, limiter off, so they add back up to the whole; every other format
     // cannot hold |x| > 1 and keeps the limiter on each stem.
 
-[44] src/session.rs:615
+[48] src/session.rs:639
+    // Note-slicing, settled here for the same reason the encoder checks below
+    // are: none of it needs the soundfont, and a run that cannot produce a
+    // summable stem should say so before paying nine seconds for a pool.
+
+[49] src/session.rs:643
+        // A slice is a partition of the note set already, with its tracks folded
+        // away; there is no track in it to pick, and no setup track to share.
+
+[50] src/session.rs:648
+        // **The router has to be an error rather than a warning.**
+        // `merlin_promote_after` counts notes per waveform and moves the Nth
+        // one onto the convolution path; every note before it renders on the
+        // per-voice fallback instead. That counter runs over the notes actually
+        // present, so a slice holding 1/N of a waveform's uses may never reach
+        // the threshold, or reach it at a different point in the file -- and
+        // the two paths do not produce the same samples. Measured on real
+        // material, 2026-09-10: four slices of a 372 k-note file summed to a
+        // median of -115.8 dB a second against the whole render, but **18
+        // seconds of 252 were worse than -20 dB, the worst at -7.7**, and the
+        // whole render ran 2.73 s longer because a convolved note carries a
+        // kernel tail a fallback voice does not. With the router off the same
+        // comparison is -144.5 dB peak. Nothing about a stem shows this; it
+        // appears only when the stems are summed and compared against a render
+        // that, for the material slicing exists for, cannot be produced at all.
+
+[51] src/session.rs:712
             // Not a warning. ffmpeg clamps on the way into every container
             // here, so an unlimited mix -- which routinely peaks far above
             // full scale -- would be silently destroyed rather than degraded.
 
-[45] src/session.rs:627
+[52] src/session.rs:724
             // `--format` describes the WAV sample format. The pipe is f32le
             // whatever it says, so honouring it silently would be a lie.
 
-[46] src/session.rs:636
+[53] src/session.rs:733
             // Headroom for codec overshoot. A lossy decoder does not preserve
             // peak level, so a mix limited to exactly 0 dBFS decodes *above*
             // full scale and clips in any player with an integer output stage.
@@ -284,13 +331,13 @@
             // 2,335 samples over, which is audible as high-frequency clicks.
             // See `ffmpeg::Preset::lossy`.
 
-[47] src/session.rs:682
+[54] src/session.rs:779
 /// A soundfont that drives no LFO should not pay for the machinery. This turns
 /// the shader constant off, so the whole evaluation compiles away rather than
 /// being branched over per voice per reduce tile; the same for the modulation
 /// envelope.
 
-[48] src/session.rs:695
+[55] src/session.rs:792
 /// Say what the soundfont holds once loaded: its sample pool is what goes to
 /// the GPU, so it is the size a render log is read for. `took` is how long
 /// the load took, or `None` for a bank the front end loaded before the render.
@@ -300,7 +347,7 @@
 /// was, and the only size in them was the `.sfz` text file's: "0.0 MiB", for
 /// a render that went on to run out of memory.
 
-[49] src/session.rs:710
+[56] src/session.rs:807
 /// Render `args` as `plan` settled it.
 ///
 /// `preloaded` is a bank the caller already built from `job.soundfonts` and
@@ -310,7 +357,22 @@
 /// its header, a breadcrumb about once a second from `observe::Logged`, and the
 /// summary or the error at the end.
 
-[50] src/session.rs:738
+[57] src/session.rs:835
+/// Merlin's limit on a file's size, here so a refusal costs nothing: every
+/// front end comes through [`run`], and the two that load a soundfont before it
+/// ask this first. A file that cannot be read is the render's to report. The
+/// limit on note-ons takes the pre-pass (`Prepass::scan_with`).
+
+[58] src/session.rs:843
+    // What the per-key render's key parser does not build is refused here, at
+    // once, and not after a soundfont has loaded for ten seconds (the user,
+    // 2026-11-02: merlin refuses 31-EDO and --min-velocity; Kestrel does them).
+
+[59] src/session.rs:858
+/// `merlin_takes` for a file of `bytes` under `limit`, which a front end asks
+/// of the file it has just been shown, before it asks for anything else.
+
+[60] src/session.rs:874
 /// A file written for the 31-EDO template says so by a note key over 127, which no
 /// other file has (it is not MIDI, and BASSMIDI plays it as the wrong note), so the
 /// render plays it as the template without `--31edo` being given. Decided as the
@@ -319,95 +381,138 @@
 /// (`midi::uses_extended_keys`); a template file whose first such key comes later
 /// than that is the one `--31edo` is still for.
 
-[51] src/session.rs:771
+[61] src/session.rs:908
     // Checkpoints, if they were asked for and this render can have them. What the
     // render is, worked out before anything is spent on it, so that a checkpoint
     // that does not fit is refused at once and in words.
 
-[52] src/session.rs:829
+[62] src/session.rs:965
+    // A slice stream is not a MIDI file, so there is no key range to read: the
+    // 31-EDO template is not detected for it.
+
+[63] src/session.rs:970
     // The same cap each track of a --tracks render gets, so a stem is still
     // exactly its track rendered alone; see `tracks::candidates_each`.
 
-[53] src/session.rs:866
+[64] src/session.rs:976
+        // The checks that decide whether a slice can be rendered at all
+        // happened in `plan`, before the pool build. What is left is the
+        // source itself and the line describing it.
+
+[65] src/session.rs:1023
     // With checkpoints the audio is written under a name no finished file has,
     // and renamed when the render is whole; a resume goes on in it.
 
-[54] src/session.rs:895
+[66] src/session.rs:1051
+            // Key-major merlin's first step, run where merlin would be so it
+            // sees exactly the settings merlin does. Nothing is rendered.
+
+[67] src/session.rs:1058
+            // Key-major merlin: each key rendered over the whole song on the
+            // device, into one master that is then handed out block by block.
+            // Without the device flag it is the CPU reference, which only the
+            // tests ask for: the oracle the device is nulled against.
+
+[68] src/session.rs:1067
+            // The file is read by key-major's own pass; this driver only
+            // hands its blocks out, and reports what that pass counted.
+
+[69] src/session.rs:1078
+            // Loudly, because a quiet backend switch is how a missing feature
+            // gets mistaken for a bug in something else.
+
+[70] src/session.rs:1098
+            // No device total: merlin's buffers grow on demand, so a figure
+            // taken here would describe the start of the render and nothing
+            // after it.
+
+[71] src/session.rs:1105
     // Where the checkpoint was made, against where this runs: DX12 and Vulkan
     // write different bytes for the same render, and so may two cards, and the
     // voice limit is part of what was rendered.
 
-[55] src/session.rs:971
+[72] src/session.rs:1181
     // Stopped, and the progress was not wanted: no checkpoint is written, and
     // what a resume would have used is taken away below.
 
-[56] src/session.rs:975
+[73] src/session.rs:1185
         // With checkpoints, the render stops short of preparing the next block
         // when one is due or it is being stopped, which leaves it where it can be
         // saved whole; see `Driver::next_block_or_hold`. The stop is asked about
         // after this block is submitted and before the next is prepared, so it
         // is noticed about as soon as without checkpoints.
 
-[57] src/session.rs:1039
+[74] src/session.rs:1197
+            // A per-key merlin render stopped in its first block, which is the
+            // whole render: nothing of it is written.
+
+[75] src/session.rs:1259
                 // A stop that is not to be resumed needs no hold and no save: the
                 // block is written, and the render ends where it is.
 
-[58] src/session.rs:1048
+[76] src/session.rs:1268
                     // The audio first, so that what the checkpoint says is on the
                     // disk is.
 
-[59] src/session.rs:1065
+[77] src/session.rs:1285
                 // Stopping and not held: the stop came after the hold was asked
                 // about, so the next block is the one that is held.
 
-[60] src/session.rs:1073
+[78] src/session.rs:1293
     // A render that is whole takes its name and lets its checkpoint go; one that
     // was stopped keeps both, and an encoded one's cut-off file is no use to anyone
     // (the samples it was made from are what a resume feeds an encoder again).
 
-[61] src/session.rs:1083
+[79] src/session.rs:1303
                 // The checkpoint, whether this stop's or an earlier one's, and the
                 // samples kept for an encoder. `out` itself was never written.
 
-[62] src/session.rs:1127
+[80] src/session.rs:1347
         // From the driver: admission happens before a voice is built, so the
         // backend never sees a refused note-on to count.
 
-[63] src/session.rs:1214
+[81] src/session.rs:1385
+        // The render thread's phases add up to `us_total`. Preparing the next
+        // block runs on a second thread alongside `spawn` and `render`, so it
+        // is reported apart from them, and `wait` is how much of it was left
+        // over once the backend was done -- the part that is on the critical
+        // path.
+
+[82] src/session.rs:1462
 /// Everything a front end can show about a render in progress, at one moment.
 ///
 /// Counters are as of the last block the render thread reported. The clocks
 /// and the process memory are read when the snapshot is taken, so they keep
 /// moving while a long block is on the device.
 
-[64] src/session.rs:1230
+[83] src/session.rs:1478
     /// Of `audio_secs`, what a resumed render had already made when this run
     /// began, which `speed` leaves out. Zero for any other render, and not in the
     /// JSON.
 
-[65] src/session.rs:1235
+[84] src/session.rs:1483
     /// Track data read so far, and in the whole file. A streamed MIDI has no
     /// length in seconds until it has been read to the end, so progress is
     /// measured in these; see `MidiStream::bytes_read`.
 
-[66] src/session.rs:1259
+[85] src/session.rs:1507
     /// Device buffers this render allocated. Not the whole GPU's usage; that
     /// is `gpu_memory`.
 
-[67] src/session.rs:1262
+[86] src/session.rs:1510
     /// The whole adapter's memory, every process on it counted, once the first
     /// reading is in. Windows only for now; see `gpu::vram`.
 
-[68] src/session.rs:1265
+[87] src/session.rs:1513
     /// This process's resident memory now, and its highest since the monitor
     /// was created.
 
-[69] src/session.rs:1269
+[88] src/session.rs:1517
     /// A per-track render's tracks, once it is rendering. Its sums are also
     /// in the fields above: `audio_secs` over every track, `notes`, `stolen`
     /// and `dropped` summed, `peak_level` the loudest track.
 
-[70] src/session.rs:1277
+[89] src/session.rs:1528
     /// How far along, 0 to 1: the MIDI's track data read, once the file is
     /// open. For a per-track render, `PER_TRACK_NOTE_SHARE` of it is the
     /// notes read and the rest the blocks rendered inside the tracks' notes
@@ -421,28 +526,28 @@
     /// come fast and spans slowly at the start. See the constant for what was
     /// measured.
 
-[71] src/session.rs:1303
+[90] src/session.rs:1558
     /// Audio the render has made so far: `audio_secs`, or for a per-track
     /// render the file's length times its progress. The tracks' own audio,
     /// summed, is not it: thousands of tracks of a four-minute file are weeks of
     /// audio, nearly all of it silence, and "477x realtime" of that said
     /// nothing about when the file would be done.
 
-[72] src/session.rs:1315
+[91] src/session.rs:1570
     /// Seconds of audio per second of rendering, over the render so far: the
     /// figure the command line prints at the end as "x realtime". For a
     /// per-track render, of the file it is making.
 
-[73] src/session.rs:1322
+[92] src/session.rs:1577
     /// Seconds of rendering left, extrapolated from progress. `None` until
     /// there is enough to go on, and again once the events are all read,
     /// because the release tails after them are not in the byte count.
 
-[74] src/session.rs:1343
+[93] src/session.rs:1601
     /// The render ended normally or was cancelled. Always the last event of a
     /// render that did not fail.
 
-[75] src/session.rs:1354
+[94] src/session.rs:1612
 /// A render's live state, shared between the thread rendering it and any
 /// number of readers.
 ///
@@ -451,84 +556,89 @@
 /// happened meanwhile. So every reader sets its own update rate, and none of
 /// them can miss a phase change by looking too rarely.
 
-[76] src/session.rs:1376
+[95] src/session.rs:1634
     /// Started when the render reports its adapter, and stopped when the
     /// monitor is dropped.
 
-[77] src/session.rs:1393
+[96] src/session.rs:1653
         // A panic mid-update leaves plain counters behind, never a broken
         // invariant, so a poisoned lock is still worth reading.
 
-[78] src/session.rs:1426
+[97] src/session.rs:1677
+                // What the session says is the render from its first block, and
+                // that comes when the last key is done: the stage says what it
+                // is doing meanwhile.
+
+[98] src/session.rs:1704
     /// Every event from index `from` on, and the index to pass next time.
     /// Start at 0. Events are kept for the monitor's whole life, so any number
     /// of readers can follow them, each at its own pace.
 
-[79] src/session.rs:1435
+[99] src/session.rs:1713
     /// Ask the render to stop after the block it is on. A render that saves
     /// checkpoints saves one where it stops.
 
-[80] src/session.rs:1441
+[100] src/session.rs:1723
     /// [`cancel`](Monitor::cancel), and the progress is not wanted: see
     /// [`Observer::discard_progress`]. The order matters: a render that has seen the
     /// stop has seen what kind it is.
 
-[81] src/session.rs:1465
+[101] src/session.rs:1747
     /// Record how a render ended. [`run_monitored`] does this; a caller that
     /// drives [`run`] with [`observer`](Monitor::observer) itself has to, or
     /// its readers never see the end.
 
-[82] src/session.rs:1499
+[102] src/session.rs:1781
 /// How often the observer walks every track to count the bytes read. The
 /// other counters are copied every block; this one is a sum over what can be
 /// tens of thousands of tracks, so it is rate-limited.
 
-[83] src/session.rs:1515
+[103] src/session.rs:1797
         // A phase event marks a change. A front end that loads the soundfont
         // itself before `run` -- `api` does, to keep the bank for the next
         // render -- reports loading first, and `run` reporting it again would
         // restart the phase clock on a load that has already finished.
 
-[84] src/session.rs:1605
+[104] src/session.rs:1901
 /// [`run`], reporting into `monitor`, which is marked finished however the
 /// render ends -- a panic included. A panic becomes the error, so a reader of
 /// the monitor still gets its `Failed` event rather than a feed that stops.
 
-[85] src/session.rs:1646
+[105] src/session.rs:1942
     /// The bug this guards: `-o mix.mp3` wrote a RIFF/WAVE file named `.mp3`
     /// and reported success.
 
-[86] src/session.rs:1668
+[106] src/session.rs:1964
     /// A typo should name the thing it probably meant. These four are the ones
     /// that were asked about by hand, so they are the ones pinned.
 
-[87] src/session.rs:1687
+[107] src/session.rs:1983
     /// A real container Kestrel does not write is a considered request, not a
     /// slip, and telling it "did you mean .flac" would be nonsense.
 
-[88] src/session.rs:1708
+[108] src/session.rs:2004
         // One substitution, k for l -- not two, which is what this assertion
         // claimed until it was run.
 
-[89] src/session.rs:1711
+[109] src/session.rs:2007
         // A transposition costs two under plain Levenshtein; worth pinning,
         // because it is the case that decides the <= 2 threshold is right.
 
-[90] src/session.rs:1736
+[110] src/session.rs:2032
     /// A reader that looks rarely still sees every phase, in order; a reader
     /// that starts late gets the whole history; and the end of a render is
     /// always the last event.
 
-[91] src/session.rs:1795
+[111] src/session.rs:2091
     /// Progress, speed and the estimate say nothing until they mean
     /// something, and the estimate goes quiet again once only the release
     /// tails are left, because those are not in the byte count.
 
-[92] src/session.rs:1814
+[112] src/session.rs:2110
     /// A per-track render's progress is its notes read and its blocks inside
     /// the tracks' notes, not all their blocks, and its speed is of the file
     /// it makes, not the tracks' summed audio.
 
-[93] src/session.rs:1849
+[113] src/session.rs:2145
     /// The progress feed's wire format is this serialisation, so it is pinned:
     /// a `type` tag, snake_case names, and the payload flattened beside `t`.

@@ -323,7 +323,7 @@ pub fn run_isolated(
 }
 
 /// What an exit means, for a process that was meant to exit with a zero.
-fn how_it_ended(status: &std::process::ExitStatus) -> String {
+pub(crate) fn how_it_ended(status: &std::process::ExitStatus) -> String {
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
@@ -352,7 +352,7 @@ fn how_it_ended(status: &std::process::ExitStatus) -> String {
 }
 
 /// The last `n` messages in a text file, each cut short, on one line. Not the \[17\]
-fn last_lines(path: &Path, n: usize) -> String {
+pub(crate) fn last_lines(path: &Path, n: usize) -> String {
     let text = std::fs::read_to_string(path).unwrap_or_default();
     let lines: Vec<String> = text
         .lines()

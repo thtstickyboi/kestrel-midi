@@ -36,23 +36,43 @@
 [4] src/backend.rs:47
     /// Install one copy of the region params table. Variant 0 is the
     /// untouched one installed at construction; later ones are built when a
-    /// channel's CC71-CC75 reach a combination not seen before, which is rare
-    /// enough that this is a cold path.
+    /// channel's CC71-CC75 reach a combination not seen before.
     /// `menv` is the matching modulation-envelope table, one entry per entry
     /// of `data`, or a single default entry when the bank drives none.
+    ///
+    /// **Not a cold path on controller-heavy material**, which is why the
+    /// tables arrive shared rather than borrowed: a backend that keeps one
+    /// keeps the driver's allocation instead of copying 22,528 rows. One test
+    /// file rebuilt 6,844 of them, and merlin's copies were 2.31 s of a 17.6 s
+    /// render on the render thread (2026-09-19).
 
-[5] src/backend.rs:60
+[5] src/backend.rs:65
     /// Whether a voice may be gliding at any point of the next block, so that
     /// a backend with a separate glide path can leave it out of every block
     /// where nothing glides. See `porta`. A voice that is not gliding renders
     /// identically either way, so a backend that decides per voice from the
     /// voice's own state can ignore this.
 
-[6] src/backend.rs:69
+[6] src/backend.rs:74
     /// Add voices to the pool. May steal or drop according to the configured
     /// rule if the pool is full.
 
-[7] src/backend.rs:73
+[7] src/backend.rs:78
+    /// Whether this backend can take a block's commands in parts:
+    /// [`Backend::spawn_part`] as often as the driver likes and then
+    /// [`Backend::spawn_end`], in place of one `spawn`, with the same result.
+    ///
+    /// For a backend with no pool, which is handed every note-on of a block:
+    /// one block of the densest test file holds 199 M of them at 4096 frames,
+    /// and building all of their commands at once is what ran a machine out of
+    /// RAM before the backend had seen one. With this the driver builds and
+    /// hands over a chunk at a time. See `Config::spawn_chunk`.
+
+[8] src/backend.rs:91
+    /// One part of a block's commands, in the order `spawn` would have had
+    /// them. Only called when [`Backend::spawn_parts`] says so.
+
+[9] src/backend.rs:102
     /// Start rendering one block. Returns once the work is queued; the audio
     /// is not available until `finish`.
     ///
@@ -62,12 +82,12 @@
     /// work, and `render` -- which is still here, and is still what the tests
     /// call -- gives that idle away by construction.
 
-[8] src/backend.rs:83
+[10] src/backend.rs:112
     /// Wait for the block started by `submit` and write it into `out`,
     /// interleaved stereo, `block_frames * 2` samples. Advances every voice
     /// and compacts the pool.
 
-[9] src/backend.rs:88
+[11] src/backend.rs:117
     /// Step over one block without rendering it, in place of `set_gates`
     /// through `finish`. Called only for a block with no voice alive at its
     /// start and nothing spawned into it, which renders exact zeros; the
@@ -81,7 +101,7 @@
     /// relative to where it was born; it is advanced so that the claim above
     /// holds without that argument.)
 
-[10] src/backend.rs:102
+[12] src/backend.rs:131
     /// Write what the backend carries from one block to the next -- the live
     /// voices, and the counters beside them -- so that a render can be stopped
     /// and gone on with. Only between blocks, with none submitted.
@@ -92,21 +112,62 @@
     /// are not here either: the driver builds them again
     /// (`Driver::reinstall_variants`), from the controller values it kept.
 
-[11] src/backend.rs:115
+[13] src/backend.rs:144
     /// The other half: take back what `save_state` wrote, from a backend that
     /// has rendered nothing yet. Reads exactly what was written.
 
-[12] src/backend.rs:121
+[14] src/backend.rs:150
     /// Render one block, start to finish.
     ///
     /// The unpipelined form, kept because most callers want exactly this and
     /// because a test that renders one block should not have to know the
     /// backend has a pipeline.
 
-[13] src/backend.rs:135
+[15] src/backend.rs:164
+    /// Whether this backend has a fixed voice pool that admission must respect.
+    ///
+    /// `true` for the per-voice backends, whose pool is `max_voices` and which
+    /// therefore need the driver to thin a block that would overflow it.
+    ///
+    /// **`false` for a backend with no pool**, and then the driver must admit
+    /// every note-on. `Driver::next_block` otherwise feeds `stats().active_voices`
+    /// into `Config::admit_take`, which caps a block at `max_voices` whatever
+    /// the backend says -- and on a convolution backend that silently discards
+    /// notes it was perfectly able to render. Merlin lost 5.5 M of one file's
+    /// 44.75 M note-ons that way before this existed.
+
+[16] src/backend.rs:179
+    /// Frames of leading output the driver must run and throw away.
+    ///
+    /// Zero for a backend that answers `render` with the block it was just
+    /// given, which is every per-voice one. A convolution backend cannot: a
+    /// note becomes an impulse whose position and gain depend on its
+    /// *duration*, so a block cannot be convolved until every note starting in
+    /// it has been paired with its note-off, and those arrive later in the
+    /// stream. It therefore answers with an earlier block and the driver takes
+    /// the offset off the front.
+    ///
+    /// Not doing so is not a latency: it is the whole render arriving late,
+    /// with that much of the opening replaced by silence.
+
+[17] src/backend.rs:195
+    /// A backend that rendered the whole song before the driver began, and
+    /// only needs its blocks handed out through the output stage: `(blocks
+    /// the event stream covers, blocks its audio covers)`. The driver then
+    /// reads no events at all -- no drain, no admission, no tables -- and ends
+    /// where it would have ended reading them: past the stream's blocks, while
+    /// the audio lasts, under the same tail cap. `None`, the default, for a
+    /// backend that renders as the events arrive.
+
+[18] src/backend.rs:206
+    /// For such a backend, what the driver that did read the events counted,
+    /// once it has read them all, for this driver's summary
+    /// (`Driver::adopt_event_counts`).
+
+[19] src/backend.rs:213
     /// Per-pass timings from the last block, for `--profile`. Empty when the
     /// backend has nothing to report.
 
-[14] src/backend.rs:141
+[20] src/backend.rs:219
     /// Lose the device on purpose, for testing what a render does when the
     /// driver resets under it. See `session::crash_test`.

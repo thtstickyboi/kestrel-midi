@@ -563,7 +563,207 @@ pub fn event_midi(path: impl AsRef<Path>, events: &[(f64, [u8; 3], usize)]) -> R
     w.save(path)
 }
 
-/// The three messages that set a channel's bend range through RPN 0. Without \[19\]
+/// Black MIDI's layering in miniature, for duplicate-note coalescing \[19\]
+pub fn layered_midi(path: impl AsRef<Path>, copies: usize, notes: usize, seed: u32) -> Result<()> {
+    const PPQ: u16 = 480;
+    let mut s = seed | 1;
+    let mut next = move |n: u32| {
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        s % n
+    };
+    // (on tick, off tick, key, velocity)
+    let mut part = Vec::with_capacity(notes);
+    let mut t = 0u64;
+    for _ in 0..notes {
+        let key = 40 + next(48) as u8;
+        let vel = [64u8, 100][next(2) as usize];
+        let len = 30 + next(570) as u64;
+        part.push((t, t + len, key, vel));
+        match next(8) {
+            // The same key again on the same tick, the same length.
+            0 => part.push((t, t + len, key, vel)),
+            // A restrike on the tick this note ends.
+            1 => part.push((t + len, t + len + 40 + next(200) as u64, key, vel)),
+            _ => {}
+        }
+        // Zero is a chord.
+        t += [0, 0, 30, 60, 120][next(5) as usize];
+    }
+    let end = part.iter().map(|n| n.1).max().unwrap_or(0) + PPQ as u64;
+
+    let track = |ch: u8, late: u64, louder: u8, port: Option<u8>| {
+        let mut ev: Vec<(u64, Vec<u8>)> = Vec::new();
+        if let Some(p) = port {
+            ev.push((0, MidiWriter::port_event(p)));
+        }
+        for &(on, off, key, vel) in &part {
+            ev.push((on, vec![0x90 | ch, key, vel + louder]));
+            ev.push((off + late, vec![0x80 | ch, key, 0]));
+        }
+        ev
+    };
+
+    let mut conductor: Vec<(u64, Vec<u8>)> = vec![(0, vec![0xFF, 0x51, 0x03, 0x07, 0xA1, 0x20])];
+    let mut c = 0u64;
+    while c < end {
+        for ch in [0u8, 1] {
+            match next(12) {
+                0 => conductor.push((c, vec![0xB0 | ch, 64, 127])),
+                1 | 2 => conductor.push((c, vec![0xB0 | ch, 64, 0])),
+                3 => conductor.push((c, vec![0xB0 | ch, 7, 60 + next(60) as u8])),
+                4 => conductor.push((c, vec![0xE0 | ch, next(128) as u8, 56 + next(16) as u8])),
+                5 if next(6) == 0 => conductor.push((c, vec![0xB0 | ch, 120, 0])),
+                6 if next(6) == 0 => conductor.push((c, vec![0xB0 | ch, 123, 0])),
+                _ => {}
+            }
+        }
+        c += 240 + next(480) as u64;
+    }
+    // Portamento across the middle third of the file on channel 0.
+    conductor.push((end / 3, vec![0xB0, 5, 40]));
+    conductor.push((end / 3, vec![0xB0, 65, 127]));
+    conductor.push((end * 2 / 3, vec![0xB0, 65, 0]));
+    conductor.push((end, vec![0xB0, 64, 0]));
+    conductor.push((end, vec![0xB1, 64, 0]));
+
+    let mut w = MidiWriter::new(PPQ);
+    w.raw_track(conductor);
+    for _ in 0..copies {
+        w.raw_track(track(0, 0, 0, None));
+    }
+    w.raw_track(track(0, 1, 0, None));
+    w.raw_track(track(0, 0, 1, None));
+    w.raw_track(track(1, 0, 0, None));
+    w.raw_track(track(0, 0, 0, Some(1)));
+    w.save(path)
+}
+
+/// Black MIDI's shape at the size the drain is measured at (the development notes): \[20\]
+pub fn ensemble_midi(path: impl AsRef<Path>, tracks: usize, notes: usize, copies: usize, seed: u32) -> Result<()> {
+    const PPQ: u16 = 960;
+    let tracks = tracks.max(2) - 1;
+    let parts = (tracks / copies.max(1)).max(1);
+    let rng = |seed: u32| {
+        let mut s = seed | 1;
+        move |n: u32| {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            s % n
+        }
+    };
+
+    // A part's events, at absolute ticks, in the order they are to be written.
+    let part = |p: usize| -> (Vec<(u64, Vec<u8>)>, u64) {
+        let mut next = rng(seed.wrapping_add(p as u32).wrapping_mul(0x9E37_79B9) ^ 0x5555);
+        let ch = (p % 16) as u8;
+        let mut ev: Vec<(u64, Vec<u8>)> = vec![(0, MidiWriter::port_event((p / 16 % 16) as u8))];
+        let mut t = next(400) as u64;
+        for _ in 0..notes {
+            let key = 21 + next(88) as u8;
+            let vel = [40u8, 64, 90, 127][next(4) as usize];
+            let len = 10 + next(400) as u64;
+            ev.push((t, vec![0x90 | ch, key, vel]));
+            ev.push((t + len, vec![0x80 | ch, key, 0]));
+            match next(64) {
+                0 => ev.push((t, vec![0x90 | ch, key, vel])),
+                1 => ev.push((t, vec![0x80 | ch, key, 0])),
+                2 => ev.push((t, vec![0xB0 | ch, 64, 127])),
+                3 | 4 => ev.push((t, vec![0xB0 | ch, 64, 0])),
+                5 => ev.push((t, vec![0xB0 | ch, 7, 40 + next(88) as u8])),
+                6 => ev.push((t, vec![0xB0 | ch, 10, next(128) as u8])),
+                7 => ev.push((t, vec![0xB0 | ch, 11, 60 + next(68) as u8])),
+                8 => ev.push((t, vec![0xE0 | ch, next(128) as u8, 60 + next(8) as u8])),
+                9 if next(16) == 0 => ev.push((t, vec![0xC0 | ch, next(2) as u8])),
+                _ => {}
+            }
+            t += [0u64, 0, 0, 5, 15, 30, 60, 120][next(8) as usize];
+        }
+        ev.push((t + 500, vec![0xB0 | ch, 64, 0]));
+        // Stable: events on one tick keep the order they were written in.
+        ev.sort_by_key(|e| e.0);
+        (ev, t + 500)
+    };
+
+    let mut w = MidiWriter::new(PPQ);
+    let mut end = 0u64;
+    type Events = Vec<(u64, Vec<u8>)>;
+    let mut layers: Vec<Events> = Vec::with_capacity(tracks);
+    let mut cache: Vec<Option<Events>> = vec![None; parts];
+    for t in 0..tracks {
+        let p = t % parts;
+        let copy = t / parts;
+        let ev = match cache[p].take() {
+            Some(ev) => ev,
+            None => {
+                let (ev, e) = part(p);
+                end = end.max(e);
+                ev
+            }
+        };
+        let mut mine = ev.clone();
+        if copy % 8 == 1 && p.is_multiple_of(4) {
+            for e in &mut mine {
+                if e.1[0] & 0xF0 == 0x90 {
+                    e.1[2] = (e.1[2] + 1).min(127);
+                }
+            }
+        }
+        // Keep the part for the next copy, or let it go after the last one.
+        if t + parts < tracks {
+            cache[p] = Some(ev);
+        }
+        layers.push(mine);
+    }
+
+    let mut next = rng(seed ^ 0xC0DE);
+    let mut conductor: Vec<(u64, Vec<u8>)> = vec![
+        (0, vec![0xF0, 0x0A, 0x41, 0x10, 0x42, 0x12, 0x40, 0x00, 0x7F, 0x00, 0x41, 0xF7]),
+        // [21]
+        (
+            0,
+            [0xF0, 0x14, 0x7E, 0x7F, 0x08, 0x08, 0x00, 0x00, 0x04]
+                .into_iter()
+                .chain((0..12).map(|i| 64 + i as u8 - 6))
+                .chain([0xF7])
+                .collect(),
+        ),
+    ];
+    let mut c = 0u64;
+    while c < end {
+        let us = 300_000 + next(400_000);
+        let b = us.to_be_bytes();
+        conductor.push((c, vec![0xFF, 0x51, 0x03, b[1], b[2], b[3]]));
+        c += 2000 + next(8000) as u64;
+    }
+    w.raw_track(conductor);
+
+    // [22]
+    for ev in layers {
+        let mut running = 0u8;
+        w.raw_track(
+            ev.into_iter()
+                .map(|(t, mut m)| {
+                    let s = m[0];
+                    if (0x80..0xF0).contains(&s) {
+                        if s == running {
+                            m.remove(0);
+                        }
+                        running = s;
+                    } else if s == 0xFF {
+                        running = 0;
+                    }
+                    (t, m)
+                })
+                .collect(),
+        );
+    }
+    w.save(path)
+}
+
+/// The three messages that set a channel's bend range through RPN 0. Without \[23\]
 pub fn set_bend_range(ch: u8, semitones: u8) -> [(f64, [u8; 3], usize); 3] {
     [
         (0.0, [0xB0 | ch, 101, 0], 3),

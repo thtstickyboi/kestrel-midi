@@ -45,50 +45,55 @@
 /// soundfont is loaded, so that a checkpoint that does not fit is refused at
 /// once and in words.
 
-[5] src/single.rs:108
+[5] src/single.rs:103
+        // Its convolution pipeline is blocks deep, host and device, and none of
+        // it is in `Backend::save_state`; the block loop it runs is also not the
+        // one a boundary can be taken from.
+
+[6] src/single.rs:115
     /// `identity` is what `identity` returned, and `backend` is `cpu` or
     /// `gpu: <adapter>`.
 
-[6] src/single.rs:124
+[7] src/single.rs:131
     /// What only the running render knows: where it runs and under how many
     /// voices, which a resume has to match.
 
-[7] src/single.rs:143
+[8] src/single.rs:150
     /// Whether to stop after the block that is on the device: a checkpoint is
     /// due, the render is being stopped, or the test hook says so. `done` is
     /// the blocks finished before this one.
 
-[8] src/single.rs:159
+[9] src/single.rs:166
     /// Write the checkpoint of the render as it stands: the driver, the
     /// backend, and where the audio is. The driver must be at a boundary.
     /// Returns the size of the file.
 
-[9] src/single.rs:209
+[10] src/single.rs:216
     /// Save, and say so; a checkpoint that could not be written is a warning and
     /// the render goes on, since the render is what the user asked for.
 
-[10] src/single.rs:307
+[11] src/single.rs:314
 /// Where a render's blocks go, and what a checkpoint needs of it: the `Sink`
 /// the render has always written to, and for an encoded format the samples kept
 /// beside it.
 
-[11] src/single.rs:318
+[12] src/single.rs:325
     /// The render as it has always been written: straight to its file, with
     /// nothing kept for a checkpoint.
 
-[12] src/single.rs:329
+[13] src/single.rs:336
     /// Start writing `partial`, the name the audio has until the render is
     /// whole.
 
-[13] src/single.rs:365
+[14] src/single.rs:372
                 // The encoder is fed the whole of what was rendered, from the
                 // start, as it was before: a stream is the one thing an encoder
                 // can be given to make the same file.
 
-[14] src/single.rs:406
+[15] src/single.rs:413
     /// Everything written so far is on the disk, and this says how much and what
     /// it ends with: the audio half of a checkpoint.
 
-[15] src/single.rs:429
+[16] src/single.rs:436
     /// Close the file. For an encoded stream that is the encoder finishing,
     /// which is the wait for ffmpeg.

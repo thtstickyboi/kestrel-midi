@@ -1,0 +1,125 @@
+# Comments extracted from shaders/fft.wgsl
+#
+# Numbers are positions in the shipped file, counted from the top.
+# They are regenerated for every release and are NOT stable across
+# versions -- these files ship beside the code they belong to, so
+# they always match it. The development tree keeps every comment
+# inline; its history is the place to compare versions.
+
+[1] shaders/fft.wgsl:5
+// Merlin M1': the batched complex FFT.
+//
+// One workgroup per transform, the whole transform resident in workgroup
+// storage, ping-ponging between two halves of `buf`. Stockham rather than
+// Cooley-Tukey because Stockham is *self-sorting*: the permutation is folded
+// into the addressing, so there is no bit-reversal pass and no scratch buffer
+// in global memory.
+//
+// Two properties matter more than speed here:
+//
+//   * **Fixed schedule.** Every stage reads and writes the same addresses on
+//     every run. The development notes section 6 lists cuFFT plan selection as a
+//     determinism risk precisely because a library may choose differently run
+//     to run; there is nothing to choose here.
+//   * **Table-driven twiddles.** They come from a host buffer computed in f64,
+//     not from `cos`/`sin` in the shader. WGSL does not pin the precision of
+//     those, so computing them here would make the output depend on the
+//     driver's transcendental implementation -- fine run to run on one
+//     machine, not fine as a claim about byte-identity.
+//
+// Radix 4, with one radix-2 stage first when log2(N) is odd. N = 2048 is 2^11,
+// so it is one radix-2 stage followed by five radix-4 stages: six passes over
+// workgroup storage rather than the eleven a pure radix-2 would take.
+//
+// Storage: 2*N complex f32. At N = 2048 that is 32,768 B against the 49,152 B
+// this adapter reports. N = 4096 would need 65,536 and does not fit, which is
+// the real reason the development notes section 5 starts at P = 2048.
+
+[2] shaders/fft.wgsl:41
+// tw[k] = exp(-2*pi*i*k/(2N)), host-computed in f64. Length 2N rather than N:
+// the FFT stages want exp(-2*pi*i*p/n) for n dividing N, which is
+// tw[p * (2N/n)], and the R2C untangle wants the half-bin rotation
+// exp(-2*pi*i*k/(2N)) directly. One table serves both.
+
+[3] shaders/fft.wgsl:46
+// [batch][N] complex, transformed in place. For the real transforms this is
+// also the 2N real samples: vec2 k holds x[2k] and x[2k+1], so the pack and
+// unpack the algorithm needs are a reinterpretation and cost nothing.
+
+[4] shaders/fft.wgsl:63
+// The inverse is the forward transform with the input and output conjugated
+// and a 1/N scale. N is a power of two, so the scale is exact and costs no
+// accuracy -- which is why there is one transform here and not two.
+//
+// Split into load / transform / store so the real entry points can fuse their
+// untangle against workgroup storage. Running it as a second dispatch measured
+// 0.0208 ms against the transform's 0.0521 -- 40% on top, all of it re-reading
+// values that were still in `buf` when the transform finished.
+
+[5] shaders/fft.wgsl:86
+    // `s` is the stride between butterfly partners, `logs` its log2, and `n`
+    // the sub-transform length still to be factored. All three are the same in
+    // every invocation, so the barriers below sit in uniform control flow.
+
+[6] shaders/fft.wgsl:136
+            // -i * t3. The radix-4 butterfly is X0 = t0+t2, X1 = t1 - i*t3,
+            // X2 = t0-t2, X3 = t1 + i*t3 for the e^(-2*pi*i/n) convention.
+
+[7] shaders/fft.wgsl:166
+// ---------------------------------------------------------------------------
+// Real transforms.
+//
+// A 2N-point real DFT is an N-point complex one plus O(N) of fixup. Pack the
+// reals as z[k] = x[2k] + i*x[2k+1] -- which is what `data` already is, so the
+// pack is free -- transform, then split the result into the DFTs of the even
+// and odd subsequences and recombine:
+//
+//     E[k] = (Z[k] + conj(Z[N-k])) / 2          even samples
+//     O[k] = (Z[k] - conj(Z[N-k])) / (2i)       odd samples
+//     X[k] = E[k] + W^k * O[k],  W = exp(-2*pi*i/(2N)),  k = 0..N
+//
+// with Z[N] taken as Z[0]. That is N+1 bins from N complex points, which is
+// the whole reason the FDL stores `P+1` and not `P`.
+//
+// Both ends are exact rearrangements: there is no window, no approximation and
+// nothing to tune.
+// ---------------------------------------------------------------------------
+
+[8] shaders/fft.wgsl:185
+// `workgroup_id` is uniform across the workgroup, so an out-of-range batch
+// returns as a whole and never strands an invocation at a barrier.
+
+[9] shaders/fft.wgsl:210
+// ---------------------------------------------------------------------------
+// Real transforms.
+//
+// A 2N-point real DFT is an N-point complex one plus O(N) of fixup. Pack the
+// reals as z[k] = x[2k] + i*x[2k+1] -- which is what `data` already is, so the
+// pack is free -- transform, then split the result into the DFTs of the even
+// and odd subsequences and recombine:
+//
+//     E[k] = (Z[k] + conj(Z[N-k])) / 2          even samples
+//     O[k] = (Z[k] - conj(Z[N-k])) / (2i)       odd samples
+//     X[k] = E[k] + W^k * O[k],  W = exp(-2*pi*i/(2N)),  k = 0..N
+//
+// with Z[N] taken as Z[0]. That is N+1 bins from N complex points, which is
+// the whole reason the FDL stores `P+1` and not `P`.
+//
+// Both ends are exact rearrangements: no window, no approximation, nothing to
+// tune. And both are fused into the transform rather than run as a second
+// dispatch, because the values they need are still in `buf`.
+// ---------------------------------------------------------------------------
+
+[10] shaders/fft.wgsl:242
+        // k and N-k both wrap at N, which is what makes bin 0 and bin N fall
+        // out of the same expression as every other bin rather than needing
+        // their own cases. At k = 0 both reads hit Z[0]; at k = N likewise.
+
+[11] shaders/fft.wgsl:267
+        // Undoing the above. A real signal gives E[N-k] = conj(E[k]) and
+        // W^(N-k) = -conj(W^k), so conj(X[N-k]) = E[k] - W^k*O[k] and the two
+        // halves separate by addition and subtraction.
+
+[12] shaders/fft.wgsl:277
+        // Z[k] = E[k] + i*O[k], stored conjugated because the inverse is the
+        // forward transform between two conjugations.

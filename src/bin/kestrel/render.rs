@@ -21,6 +21,15 @@ use std::time::Instant;
 const TARGET: &str = "kestrel";
 
 impl RenderArgs {
+    /// What this render reads: the note-slice stream when `--note-slice` names
+    /// one, the MIDI file otherwise. clap requires exactly one of the two.
+    pub fn input(&self) -> &std::path::Path {
+        self.note_slice
+            .as_deref()
+            .or(self.midi.as_deref())
+            .expect("clap requires a MIDI file or --note-slice")
+    }
+
     /// The render these arguments describe, with everything clap cannot check
     /// -- the named enums, `Config::validate` -- already checked.
     pub fn to_job(&self) -> Result<Job> {
@@ -40,7 +49,8 @@ impl RenderArgs {
             None => None,
         };
         Ok(Job {
-            midi: self.midi.clone(),
+            midi: self.input().to_path_buf(),
+            note_slice: self.note_slice.is_some(),
             soundfonts: self.soundfont.clone(),
             sf_programs: self.sf_programs.clone(),
             out: self.out.clone(),
@@ -73,6 +83,11 @@ impl RenderArgs {
         if self.no_resume {
             return;
         }
+        // A merlin render cannot be resumed: its pipeline's state is not in a
+        // checkpoint, so asking for one only earns a warning on every render.
+        if self.backend == "merlin" {
+            return;
+        }
         let argv: Result<Vec<String>, OsString> = argv.into_iter().map(|a| a.into().into_string()).collect();
         let Ok(argv) = argv else {
             log::warn!(
@@ -103,7 +118,7 @@ impl RenderArgs {
         if !self.more_midi.is_empty() {
             return Some(format!(
                 "{:?} is not a flag or a value for one, and was taken for a second MIDI",
-                self.midi.to_string_lossy()
+                self.input().to_string_lossy()
             ));
         }
         if self.out_format.is_some() {
@@ -114,7 +129,7 @@ impl RenderArgs {
 
     /// Every MIDI the command names, in the order given.
     pub(crate) fn midis(&self) -> Vec<PathBuf> {
-        std::iter::once(self.midi.clone())
+        std::iter::once(self.input().to_path_buf())
             .chain(self.more_midi.iter().cloned())
             .collect()
     }
@@ -299,7 +314,7 @@ pub fn batch_cli(file: &Path) -> Result<()> {
         || !args.soundfont.iter().all(|p| named(p))
         || !named(&args.out)
         || !args.more_midi.is_empty()
-        || !named(&args.midi)
+        || !named(args.input())
     {
         bail!(
             "{}: `args` cannot name the MIDI, the soundfonts or the output: the jobs do",
